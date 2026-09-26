@@ -1,0 +1,5 @@
+result.md
+node_modules/
+*.log
+# never publish personal exports from the script
+meowstreets-data-*.json

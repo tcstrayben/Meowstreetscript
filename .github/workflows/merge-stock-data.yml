@@ -1,0 +1,51 @@
+name: Merge stock data submission
+
+# Runs when someone opens an issue whose title starts with "[stock-data]". The issue text is read from the event file
+# by scripts/merge-stock-data.js and only ever parsed as JSON. It is never put into a shell command.
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  contents: write # to commit data/stocks.json
+  issues: write # to reply to and close the submission
+
+# One submission at a time, so two runs can never write the data file at once.
+concurrency:
+  group: merge-stock-data
+  cancel-in-progress: false
+
+jobs:
+  merge:
+    if: startsWith(github.event.issue.title, '[stock-data]')
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Process the submission
+        run: node scripts/merge-stock-data.js
+
+      - name: Commit the updated data
+        run: |
+          git config user.name "stock-data-bot"
+          git config user.email "stock-data-bot@users.noreply.github.com"
+          git add data/stocks.json data/voters.json
+          if git diff --cached --quiet; then
+            echo "No data changes."
+          else
+            git commit -m "Add stock data from issue #${{ github.event.issue.number }}"
+            git push
+          fi
+
+      - name: Reply and close the issue
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ISSUE: ${{ github.event.issue.number }}
+        run: |
+          gh issue comment "$ISSUE" --body-file result.md
+          gh issue close "$ISSUE" --reason completed
