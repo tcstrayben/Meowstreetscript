@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.0
+// @version      0.15.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1241,15 +1241,19 @@
     const name = co.name || 'Companion';
     let text, level, detail;
     if (co.overdue) { text = 'overdue'; level = 'bad'; detail = `${name}: care overdue`; }
-    else if (co.out && co.errandUntil > now) { text = fmtClock(co.errandUntil - now); level = 'ok'; detail = `${name}: out, back in ${text}`; }
+    else if (co.out && co.errandUntil > now) { text = `out ${fmtClock(co.errandUntil - now)}`; level = 'ok'; detail = `${name}: out, back in ${fmtClock(co.errandUntil - now)}`; }
     else if (co.hungry) { text = 'hungry'; level = 'warn'; detail = `${name}: hungry now`; }
     else {
-      const next = [co.mealAt, co.groomAt].filter((t) => t > now).sort((a, b) => a - b)[0];
+      // mealAt/groomAt are two different, unrelated timers -- always say which one this is, so the pill never
+      // shows a bare number that looks identical to the errand countdown above once the errand has ended.
+      const candidates = [{ at: co.mealAt, label: 'meal' }, { at: co.groomAt, label: 'groom' }].filter((c) => c.at > now);
+      candidates.sort((a, b) => a.at - b.at);
+      const next = candidates[0];
       if (!next) { text = 'due'; level = 'warn'; detail = `${name}: due now`; }
       else {
-        const soon = next - now <= 15 * 60 * 1000;
-        text = fmtClock(next - now); level = soon ? 'warn' : 'ok';
-        detail = `${name}: next care in ${text}`;
+        const soon = next.at - now <= 15 * 60 * 1000;
+        text = `${next.label} ${fmtClock(next.at - now)}`; level = soon ? 'warn' : 'ok';
+        detail = `${name}: next ${next.label} in ${fmtClock(next.at - now)}`;
       }
     }
     if (!el) {
