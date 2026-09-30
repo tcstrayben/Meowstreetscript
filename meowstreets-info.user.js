@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.11.1
-// @description  Crimes page: exact XP and cash per nerve, item drops and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain. A page scanner and data export for working out how the game's numbers are made.
+// @version      0.15.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -15,11 +15,7 @@
 // @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @grant        GM_addValueChangeListener
-// @grant        GM_xmlhttpRequest
 // @grant        GM_setClipboard
-// @grant        GM_openInTab
-// @grant        GM_info
-// @connect      raw.githubusercontent.com
 // ==/UserScript==
 
 (function () {
@@ -31,9 +27,12 @@
   if (location.origin !== SITE_ORIGIN) return;
 
   // READ-ONLY by design (MeowStreets ToS: "no bots, scripts or automation that play for you").
-  // This script only reads what is already on the page and draws numbers next to it.
-  // It sends nothing to MeowStreets, clicks nothing and presses nothing. The only other thing it can do is talk to
-  // GitHub, and only when you press one of the two stock buttons on the Claw Street Ex page (see "Shared stock history").
+  // This script only reads what is already on the page you are looking at and draws numbers next to it.
+  // It makes no network requests of its own, clicks nothing and presses nothing. It does read the responses to
+  // requests the page itself makes (its own /api/state call) for exact numbers, the same way it reads rendered
+  // text -- see api-data-reference.md. Only specific known fields are ever kept; the rest (which includes your
+  // email and other players' data) is discarded at once, never saved. Everything it records stays in this
+  // browser (Tampermonkey storage) until you press "Export data".
 
   // ─── Config ───────────────────────────────────────────────────────────────
   const REFRESH_DEBOUNCE_MS = 250; // wait for the React page to settle before redrawing
@@ -76,6 +75,191 @@
   const fmtMoney = (n) => '$' + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
   const isCrimesPage = () => location.pathname.replace(/\/+$/, '') === '/crimes';
 
+  // ─── Reading the game's own /api/state response (still read-only) ─────────
+  // The page itself fetches this on most navigations, to load almost its whole state in one go. This only
+  // watches the response to that request; it never makes a request of its own. Only the specific fields below
+  // are ever kept, in memory for this page view only, never saved to storage or exported: the raw response also
+  // carries the account email and other players' data, which this project must never touch. See
+  // api-data-reference.md for the full shape of what the response contains.
+  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
+  let apiState = null; // { at, crimes: {key: {...}}, meritLines: {name: {...}}, merits, crew, chain } | null
+
+  function extractApiState(raw) {
+    if (!raw || typeof raw !== 'object') return null;
+    try {
+      const out = {
+        at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
+        education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
+        heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJob: null, crewJobRoles: null,
+      };
+      (raw.crimes || []).forEach((c) => {
+        if (!c || !c.name) return;
+        out.crimes[norm(c.name)] = {
+          chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
+          heat: c.heat, hot: !!c.hot, bonus: c.bonus, criticalChance: c.criticalChance,
+          successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
+        };
+      });
+      if (raw.merits && typeof raw.merits === 'object') {
+        out.merits = { available: raw.merits.available, earned: raw.merits.earned, spent: raw.merits.spent };
+        (raw.merits.lines || []).forEach((l) => {
+          if (l && l.name) out.meritLines[l.name] = { ranks: l.ranks, max: l.max, now: l.now, next: l.next, price: l.price };
+        });
+      }
+      if (raw.crew && typeof raw.crew === 'object') {
+        out.crew = {
+          name: raw.crew.name || null,
+          buffActive: !!raw.crew.buffActive, buffUntil: raw.crew.buff_until || 0,
+          chain: raw.crew.chain, chainAt: raw.crew.chain_at, chainEndsAt: raw.crew.chainEndsAt,
+          treasury: raw.crew.treasury, respect: raw.crew.respect,
+        };
+      }
+      if (raw.chain && typeof raw.chain === 'object') {
+        out.chain = { count: raw.chain.count, multiplier: raw.chain.multiplier, next: raw.chain.next, expiresAt: raw.chain.expiresAt };
+      }
+      // Only this one field of `player` is ever kept -- that object also carries the account email, so it is
+      // never read as a whole.
+      if (raw.player && typeof raw.player === 'object') out.protectedUntil = raw.player.protected_until || 0;
+      if (Number.isFinite(raw.bountyOnMe)) out.bountyOnMe = raw.bountyOnMe;
+      // Every consumable shares a cooldown with others of its own family (only "tuna" for Premium tuna, and
+      // "catnip" for Catnip tea, are confirmed so far -- from the user's own data, not guessed).
+      out.cooldowns = {};
+      (raw.cooldowns || []).forEach((c) => { if (c && c.item) out.cooldowns[c.item] = c.expires || 0; });
+      out.usedUp = Array.isArray(raw.usedUp) ? raw.usedUp.slice() : [];
+      // Only these two fields of `player` are ever kept here too (see the note on protectedUntil above).
+      if (raw.player && typeof raw.player === 'object') { out.energy = raw.player.energy; out.nerve = raw.player.nerve; }
+      if (raw.caps && typeof raw.caps === 'object') out.caps = { energy: raw.caps.energy, nerve: raw.caps.nerve };
+      // heistQuote.targets is already personalised to the player's own level (band) and skill -- stake, profit,
+      // failReturn, chance and energy/nerve cost are the game's own, real numbers for a heist launched right now.
+      // "profit" is the average per-cat profit on success, confirmed against the user's own completed heist
+      // (stake + profit matched the average of the real per-member payouts exactly).
+      if (raw.heistQuote && Array.isArray(raw.heistQuote.targets)) {
+        out.heists = raw.heistQuote.targets.map((t) => ({
+          name: t.name, short: t.short, badge: t.badge, stake: t.stake, profit: t.profit, failReturn: t.failReturn,
+          chance: t.baseChance, maxChance: t.maxChance, bestChance: t.bestChance, duration: t.duration,
+          minMembers: t.minMembers, energy: t.energy, nerve: t.nerve, kitCost: t.kitCost,
+        }));
+      }
+      if (Array.isArray(raw.crewJobTiers)) {
+        out.crewJobTiers = raw.crewJobTiers.map((t) => ({
+          name: t.name, tier: t.tier, nerve: t.nerve, cut: t.cut, take: t.take, respect: t.respect,
+          xp: t.xp, xpFail: t.xpFail, chance: t.baseChance, duration: t.duration, stake: t.stake,
+          minMembers: t.minMembers, maxMembers: t.maxMembers, level: t.level, roles: Array.isArray(t.roles) ? t.roles.slice() : [],
+        }));
+      }
+      if (raw.heistRules) out.heistXp = { success: raw.heistRules.successXp, fail: raw.heistRules.failureXp };
+      // The crew job / heist you are actually in right now, not just the reference lists above.
+      // Crew job: `status: "running"` plus `mine: true` is now confirmed real data (checked against 6 live
+      // captures of the same in-progress job -- always exactly one match, always the same id `activeJobId`
+      // already pointed at), so that is the primary signal; matching by `activeJobId` is kept as a fallback in
+      // case a future capture ever shows `mine` not lining up with membership. `status: "planning"` (still
+      // recruiting a crew, no end time yet) is included too so the Discord-message feature below has something
+      // to work with before the job actually launches; the sidebar pill still only shows once there's an end
+      // time (its own check on `endsAt`, unchanged).
+      if (Array.isArray(raw.crewJobs)) {
+        const mine = raw.crewJobs.find((x) => x && x.mine && (x.status === 'running' || x.status === 'planning'))
+          || (raw.activeJobId != null ? raw.crewJobs.find((x) => x && x.id === raw.activeJobId) : null);
+        if (mine) {
+          out.activeCrewJob = { name: mine.tierName || mine.name || null, endsAt: mine.ends_at || null };
+          out.myCrewJob = {
+            name: mine.tierName || mine.name || null, tier: mine.tier, status: mine.status, endsAt: mine.ends_at || null,
+            roles: Array.isArray(mine.roles) ? mine.roles.slice() : [],
+            members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready })),
+            minMembers: mine.minMembers, maxMembers: mine.maxMembers,
+            cut: mine.cut, take: mine.take, respect: mine.respectReward, nerve: mine.nerve, stake: mine.stake,
+            chance: mine.chance != null ? mine.chance : mine.previewChance,
+          };
+        }
+      }
+      // Role -> {title, stat}, the game's own data (crewJobRoles) -- which stat a seat actually uses, not a guess.
+      if (raw.crewJobRoles && typeof raw.crewJobRoles === 'object') {
+        out.crewJobRoles = {};
+        Object.entries(raw.crewJobRoles).forEach(([k, v]) => { if (v) out.crewJobRoles[k] = { title: v.title || k, stat: v.stat || null }; });
+      }
+      // Heist: no "running"-equivalent status or `mine` flag has been seen yet -- every real capture so far
+      // shows only "completed"/"cancelled"/"recruiting" -- so `activeHeistId` matched against `heists` by id is
+      // still the only confirmed way to find the one underway.
+      if (raw.activeHeistId != null && Array.isArray(raw.heists)) {
+        const h = raw.heists.find((x) => x && x.id === raw.activeHeistId);
+        if (h) out.activeHeist = { name: h.targetName || h.name || null, endsAt: h.ends_at || null };
+      }
+      if (raw.companion && typeof raw.companion === 'object') {
+        const co = raw.companion;
+        out.companion = {
+          name: co.nick || co.name || null, mealAt: co.mealAt || 0, deadlineAt: co.deadlineAt || 0,
+          playAt: co.playAt || 0, groomAt: co.groomAt || 0, errandUntil: co.errandUntil || 0,
+          out: !!co.out, hungry: !!co.hungry, overdue: !!co.overdue,
+        };
+      }
+      if (raw.stocks && typeof raw.stocks === 'object') {
+        out.stocks = {
+          tick: raw.stocks.tick, band: raw.stocks.band,
+          // companies[].id is the game's own opaque id, not the short id (nine/nip/...) used in the page's own
+          // URLs and everywhere this script already keys stocks by; only history entries carry that short id.
+          perkSettle: raw.stocks.perkSettle,
+          companies: (raw.stocks.companies || []).map((c) => ({
+            name: c.name, price: c.price, nextTick: c.next_tick || c.nextTick || null,
+            perkOn: !!c.perkOn, perkStartsAt: c.perkStartsAt || null,
+          })),
+          history: (raw.stocks.history || []).map((h) => ({ id: h.company, price: h.price, at: h.at })),
+        };
+      }
+      (raw.events || []).forEach((e) => {
+        if (e && e.body && e.kind) out.events.push({ body: e.body, kind: e.kind, at: e.created_at });
+      });
+      if (Array.isArray(raw.courses)) {
+        let eduCrimePoints = 0; let coursesTaken = 0; let eduLandsAt = null;
+        raw.courses.forEach((c) => {
+          if (!c) return;
+          if (c.status === 'completed') {
+            coursesTaken++;
+            // The exact wording the DOM reader already looks for, taken from the course's own real text instead
+            // of guessing at page text -- so it stays a general crime-success bonus, not a crime-specific one.
+            const m = String(c.perk || '').match(/\+(\d+)\s*points?\s+to\s+every\s+crime.s\s+success\s+chance/i);
+            if (m) eduCrimePoints += +m[1];
+          } else if (Number.isFinite(c.ends_at)) {
+            if (eduLandsAt == null || c.ends_at < eduLandsAt) eduLandsAt = c.ends_at;
+          }
+        });
+        out.education = { eduCrimePoints, coursesTaken, eduLandsAt };
+      }
+      return out;
+    } catch (e) { return null; }
+  }
+
+  function onApiStateResponse(json) {
+    const ex = extractApiState(json);
+    if (ex) { apiState = ex; schedule(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+  }
+
+  function installApiWatch() {
+    const isStateUrl = (url) => { try { return new URL(url, location.href).pathname === '/api/state'; } catch (e) { return false; } };
+    const realFetch = pageWin.fetch;
+    if (typeof realFetch === 'function') {
+      pageWin.fetch = function (...args) {
+        const p = realFetch.apply(this, args);
+        p.then((res) => {
+          try { if (res && res.url && isStateUrl(res.url)) res.clone().json().then(onApiStateResponse).catch(() => {}); } catch (e) { /* ignore */ }
+        }).catch(() => {});
+        return p;
+      };
+    }
+    const RealXHR = pageWin.XMLHttpRequest;
+    if (RealXHR) {
+      const openOrig = RealXHR.prototype.open;
+      RealXHR.prototype.open = function (method, url, ...rest) { this.__msxUrl = url; return openOrig.call(this, method, url, ...rest); };
+      const sendOrig = RealXHR.prototype.send;
+      RealXHR.prototype.send = function (...args) {
+        this.addEventListener('loadend', () => {
+          try { if (this.__msxUrl && isStateUrl(this.__msxUrl) && this.responseText) onApiStateResponse(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
+        });
+        return sendOrig.apply(this, args);
+      };
+    }
+  }
+  installApiWatch();
+
+
   // ─── Reading the page ─────────────────────────────────────────────────────
   function readPlayerLevel() {
     const el = document.querySelector('.sidebar .profile small');
@@ -113,7 +297,9 @@
 
     const oddsText = card.querySelector('.odds strong')?.textContent || '';
     const successM = oddsText.match(/([\d.]+)\s*%/);
-    const success = successM ? parseFloat(successM[1]) / 100 : null;
+    const domSuccess = successM ? parseFloat(successM[1]) / 100 : null;
+    const api = apiState && apiState.crimes[norm(name)] || null;
+    const success = api ? api.chance / 100 : domSuccess;
 
     const mastText = card.querySelector('.rung-mastery')?.textContent || '';
     const mastM = mastText.match(/Mastery\s+(\d+)\s*\/\s*(\d+)/i);
@@ -132,7 +318,7 @@
 
     return {
       key: norm(name), name, district: districtName, level, nerve, cashMin, cashMax, success,
-      masteryLevel, masteryMax, progressCur, progressNeed, unlocked, card,
+      masteryLevel, masteryMax, progressCur, progressNeed, unlocked, card, api,
     };
   }
 
@@ -298,6 +484,60 @@
       .msx-stock small { color:var(--ms-smoke, #8d9289); font-size:11px; }
       .msx-stock .msx-range b { color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-trend { font-size:13px; }
+      .msx-stock .msx-moves, .msx-stock .msx-range, .msx-stock .msx-perk-status { flex-basis:100%; }
+      .msx-stock .msx-perk-status b { color:var(--ms-lime, #b4df87); }
+      .msx-stock .msx-moves b { font-weight:700; color:var(--ms-bone, #e7ede1); }
+      .msx-stock .msx-moves b.up { color:var(--ms-lime, #b4df87); }
+      .msx-stock .msx-moves b.down { color:var(--ms-red, #eb6561); }
+      .msx-stock .msx-moves i { font-style:normal; opacity:.7; }
+      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
+        border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
+      #msx-invest summary { cursor:pointer; font-size:16px; font-weight:700; }
+      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2 { margin:0; font-size:16px; font-weight:700; }
+      #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
+      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
+      #msx-mycrewjob .msx-mycrewjob-seats { margin:8px 0; display:flex; flex-direction:column; gap:2px; }
+      #msx-mycrewjob .msx-mycrewjob-seats .open { color:var(--ms-gold, #e9c46a); }
+      #msx-mycrewjob textarea { width:100%; min-height:160px; margin:10px 0; padding:10px 12px; border-radius:8px; resize:vertical;
+        color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.35); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3));
+        font-family:inherit; font-size:12.5px; line-height:1.5; white-space:pre-wrap; }
+      #msx-mycrewjob button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
+        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-mycrewjob button:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-invest .msx-inv-warn { margin:8px 0; color:var(--ms-gold, #e9c46a); }
+      #msx-invest .msx-inv-warn ul { margin:4px 0 0; padding-left:20px; }
+      #msx-invest .msx-inv-grid { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0; }
+      #msx-invest .msx-inv-party { flex:1 1 200px; display:flex; flex-direction:column; gap:4px; padding:10px 12px; border-radius:10px;
+        border:1px solid; background:rgba(0,0,0,.2); }
+      #msx-invest .msx-inv-party label { display:flex; flex-direction:column; gap:2px; width:auto; margin:0; padding:0; font-size:12px; color:var(--ms-smoke, #8d9289); }
+      #msx-invest .msx-inv-pct { font-size:15px; font-weight:700; }
+      #msx-invest .msx-inv-total { display:flex; flex-wrap:wrap; gap:6px 18px; margin:8px 0; }
+      #msx-invest .up { color:var(--ms-lime, #b4df87); }
+      #msx-invest .down { color:var(--ms-red, #eb6561); }
+      #msx-invest small { color:var(--ms-smoke, #8d9289); }
+      #msx-invest input[type=text], #msx-invest select { width:auto; min-width:0; max-width:100%; padding:5px 8px; border-radius:8px; color:inherit;
+        background:rgba(0,0,0,.35); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); font-size:13px; }
+      #msx-invest .msx-inv-hold { display:flex; flex-wrap:wrap; gap:6px; margin:6px 0; }
+      #msx-invest .msx-inv-hold input { width:110px; }
+      #msx-invest .msx-inv-add { display:flex; flex-wrap:wrap; gap:6px; }
+      #msx-invest .msx-inv-add input { width:110px; }
+      #msx-invest .msx-inv-buttons { display:flex; flex-wrap:wrap; gap:8px; margin:10px 0 2px; }
+      #msx-invest button { padding:5px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
+        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-invest button:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-invest .msx-inv-go { border-color:var(--ms-lime, #b4df87); }
+      #msx-invest .msx-inv-table, #msx-heists .msx-inv-table, #msx-crewjobs .msx-inv-table { border-collapse:collapse; margin:10px 0; display:block; overflow-x:auto; }
+      #msx-invest .msx-inv-table th, #msx-invest .msx-inv-table td,
+      #msx-heists .msx-inv-table th, #msx-heists .msx-inv-table td,
+      #msx-crewjobs .msx-inv-table th, #msx-crewjobs .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
+      #msx-heists small, #msx-crewjobs small { color:var(--ms-smoke, #8d9289); }
+      .msx-consumable { flex-wrap:wrap; row-gap:4px; }
+      .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
+      .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
+      .msx-item-icon { width:30px; height:30px; flex:none; }
+      #msx-invest .msx-inv-chart { width:100%; max-width:480px; height:auto; color:var(--ms-bone, #e7ede1); }
+      #msx-invest .msx-inv-legend { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; }
+      #msx-invest .msx-inv-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
       .msx-tag.stk.low { background:var(--ms-lime, #b4df87); color:var(--ms-ink, #182316); }
       .msx-tag.stk.high { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
       .msx-tag.stk.mid, .msx-tag.stk.flat { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
@@ -322,6 +562,29 @@
       .msx-legend-row.bad span { color:var(--ms-red, #eb6561); }
       .msx-legend-key { margin:6px 0 0; font-size:10.5px; color:var(--ms-smoke, #8d9289); line-height:1.35; }
       .msx-legend-key .ok { color:var(--ms-lime, #b4df87); } .msx-legend-key .warn { color:var(--ms-gold, #e9c46a); } .msx-legend-key .bad { color:var(--ms-red, #eb6561); }
+      #msx-account { margin:18px 0; padding:16px 18px; border-radius:12px; background:rgba(0,0,0,.28);
+        border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
+      #msx-account h2 { margin:0 0 2px; font-size:17px; }
+      #msx-account h3 { margin:16px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
+      #msx-account p { margin:4px 0; }
+      #msx-account .msx-acc-sub { color:var(--ms-smoke, #8d9289); }
+      #msx-account .msx-acc-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 4px; }
+      #msx-account input[type=text] { min-width:200px; padding:6px 10px; border-radius:8px; color:inherit; background:rgba(0,0,0,.35);
+        border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-account button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1);
+        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-account button:hover:not(:disabled) { border-color:var(--ms-lime, #b4df87); }
+      #msx-account button:disabled { opacity:.45; cursor:not-allowed; }
+      #msx-account [hidden] { display:none; }
+      #msx-account .msx-acc-buttons { display:flex; flex-wrap:wrap; gap:8px; margin:8px 0; }
+      #msx-account .msx-acc-check { display:flex; flex-direction:row; justify-content:flex-start; gap:10px; align-items:flex-start;
+        width:auto; max-width:100%; margin:6px 0; padding:0; text-align:left; cursor:pointer; }
+      #msx-account .msx-acc-check input[type=checkbox] { flex:0 0 auto; width:16px; height:16px; min-width:0; margin:2px 0 0; padding:0;
+        appearance:auto; -webkit-appearance:checkbox; accent-color:var(--ms-lime, #b4df87); }
+      #msx-account .msx-acc-status { font-weight:600; }
+      #msx-account .msx-acc-status.ok { color:var(--ms-lime, #b4df87); }
+      #msx-account .msx-acc-status.warn { color:var(--ms-gold, #e9c46a); }
+      #msx-account .msx-acc-status.note { color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ticker { display:flex; align-items:center; gap:6px; margin:0 0 8px; padding:5px 10px; border-radius:8px;
         background:rgba(0,0,0,.28); border:1px solid var(--ms-line, rgba(231,237,225,.15));
         color:var(--ms-bone, #e7ede1); font-size:12px; font-variant-numeric:tabular-nums; }
@@ -330,10 +593,17 @@
       .msx-ticker.soon .ms-icon { color:var(--ms-gold, #e9c46a); }
       .msx-ticker.stale { border-color:var(--ms-red, #eb6561); color:var(--ms-red, #eb6561); }
       .msx-ticker.stale .ms-icon { color:var(--ms-red, #eb6561); }
-      #msx-tools { position:fixed; right:12px; bottom:calc(12px + env(safe-area-inset-bottom, 0px)); z-index:9999; display:flex; gap:6px; }
+      .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
+      #msx-tools { position:fixed; right:0; top:50%; transform:translateY(-50%); z-index:9999; display:flex; flex-direction:row; align-items:center; }
+      #msx-tools .msx-tools-body { display:none; flex-direction:column; gap:6px; padding:8px; border-radius:10px 0 0 10px;
+        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); border-right:0; }
+      #msx-tools.open .msx-tools-body { display:flex; }
       #msx-tools button { padding:6px 10px; border-radius:8px; border:1px solid var(--ms-line-strong, rgba(231,237,225,.3));
-        background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1); font-size:12px; cursor:pointer; opacity:.75; }
+        background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1); font-size:12px; cursor:pointer; opacity:.75; white-space:nowrap; }
       #msx-tools button:hover { opacity:1; }
+      #msx-tools .msx-tools-toggle { width:22px; padding:10px 0; border-radius:8px 0 0 8px; border-right:0; font-size:11px; line-height:1;
+        writing-mode:vertical-rl; letter-spacing:.05em; }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
@@ -346,11 +616,17 @@
     if (document.getElementById('msx-tools')) return;
     const box = document.createElement('div');
     box.id = 'msx-tools';
+    const body = document.createElement('div');
+    body.className = 'msx-tools-body';
+    const toggle = document.createElement('button');
+    toggle.type = 'button'; toggle.className = 'msx-tools-toggle'; toggle.textContent = 'MSX'; toggle.title = 'Show or hide the MeowStreets Extra Info tools';
+    toggle.addEventListener('click', () => box.classList.toggle('open'));
+    box.appendChild(body); box.appendChild(toggle);
     const mk = (label, title, fn) => {
       const b = document.createElement('button');
       b.type = 'button'; b.textContent = label; b.title = title;
       b.addEventListener('click', fn);
-      box.appendChild(b);
+      body.appendChild(b);
     };
     mk('Scan page', 'Read-only: record what this page stores or shows (storage names, endpoints, progress bars, timers, page text)', () => { scanPage(true).catch((e) => toast('Scan failed: ' + e)); });
     mk('Export data', 'Save the logged MeowStreets data to a .json file', exportDb);
@@ -431,6 +707,25 @@
     return `<div class="msx-odds" title="${title.replace(/"/g, '&quot;')}">Odds: ${bits.join(' ')} ${end}</div>`;
   }
 
+  function oddsHtmlFromApi(c) {
+    const a = c.api;
+    const heatPts = Math.floor((a.heat || 0) / 4);
+    const fmt = (v) => (v < 0 ? '−' : '+') + Math.abs(v);
+    const bits = [`${a.baseChance} base`];
+    if (a.masteryBonus) bits.push(`${fmt(a.masteryBonus)} mastery`);
+    if (a.bonus) bits.push(`<span title="Merits, education, crew and perks, added together by the game itself">${fmt(a.bonus)} bonus</span>`);
+    if (heatPts) bits.push(`${fmt(-heatPts)} heat`);
+    const sum = a.baseChance + (a.masteryBonus || 0) + (a.bonus || 0) - heatPts;
+    const capped = a.chance === 95 && sum > 95;
+    const end = capped ? `= ${sum} → capped at 95%` : `= ${a.chance}%`;
+    const crew = apiState && apiState.crew;
+    const crewNote = crew && crew.buffActive && crew.buffUntil > Date.now()
+      ? ` The crew +5% window ends in ${Math.max(1, Math.round((crew.buffUntil - Date.now()) / 60000))} min (${new Date(crew.buffUntil).toUTCString().slice(17, 22)} UTC).` : '';
+    const critNote = a.criticalChance != null ? ` Clean-job chance: ${a.criticalChance}%.` : '';
+    const title = ('Exact numbers from the game\'s own data: base success + mastery bonus + bonus (merits, education, crew and perks, already combined by the game) − 1 per 4 heat, capped at 95%.' + crewNote + critNote).replace(/"/g, '&quot;');
+    return `<div class="msx-odds" title="${title}">Odds (exact): ${bits.join(' ')} ${end}</div>`;
+  }
+
   function dropsHtml(c) {
     const d = CRIMES[c.key]?.drops;
     if (!d) return '';
@@ -496,7 +791,8 @@
       }
       if (x === bestXp) parts.push('<span class="msx-tag xp">★ Best XP</span>');
       if (x === bestCash) parts.push('<span class="msx-tag cash">★ Best $</span>');
-      box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsHtml(c, data.heat[c.district], loadDb().mods || {}) + dropsHtml(c);
+      const oddsBlock = c.api ? oddsHtmlFromApi(c) : oddsHtml(c, data.heat[c.district], loadDb().mods || {});
+      box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
       host.appendChild(box);
 
       const best = [];
@@ -530,6 +826,8 @@
   const FLAT_RANGE = 0.02; // if the whole recorded range is under 2%, call it flat
 
   const PERIOD_MS = 15 * 60 * 1000;
+  const NEXT_MOVE_KEY = 'ms_next_stock_move';
+  let nextMoveAnchor = Number(GM_getValue(NEXT_MOVE_KEY, 0)) || 0;
   // Period id of a logged reading. Older readings stored a minute-based `slot`; ones that landed exactly on a
   // 15-minute mark came from a fallback clock while the page loaded and are ignored.
   const periodOf = (o) => (o.p != null ? o.p : (o.slot != null && o.slot % 15 !== 0 ? Math.round(o.slot / 15) : null));
@@ -587,116 +885,48 @@
     if (changed) { db.updated = now; saveDb(db); }
   }
 
-  // ─── Shared stock history on GitHub (two buttons on the Claw Street Ex page, nothing automatic) ───
-  // Stock prices are the same for every player, so they can be shared without revealing anything about you.
-  //  "Load shared history": downloads the community price history from GitHub (one request to raw.githubusercontent.com).
-  //  "Contribute stock data": copies your logged prices and opens a GitHub issue page. You paste them and press submit.
-  // Neither happens unless you press it. Nothing else you have logged (crimes, merits, cash, chat...) is ever included.
-  const GITHUB_REPO = 'tcstrayben/Meowstreetscript'; // the GitHub "user/repo" that holds the script and the shared stock data
-  const SHARED_KEY = 'ms_shared_stocks_v1';
-  const MAX_SHARE_PERIODS = 1500; // about 15 days of 15-minute prices per stock
-  const repoReady = () => !/YOURNAME/.test(GITHUB_REPO);
-  let sharedStocks = null; // { fetchedAt, updated, periods, stocks: { id: { period: price } } }
-  try { sharedStocks = JSON.parse(GM_getValue(SHARED_KEY, 'null')); } catch (e) { sharedStocks = null; }
-
-  // Accepts only the expected shape and keeps whole-number prices for whole-number periods.
-  function parseShared(text) {
-    const j = JSON.parse(text);
-    if (!j || j.format !== 1 || !j.stocks || typeof j.stocks !== 'object') throw new Error('unexpected file format');
-    const stocks = {};
-    let periods = 0;
-    Object.entries(j.stocks).forEach(([id, st]) => {
-      if (!/^[a-z0-9_-]{1,20}$/i.test(id) || !st || typeof st.prices !== 'object' || !st.prices) return;
-      const m = {};
-      Object.entries(st.prices).forEach(([period, v]) => {
-        const k = Number(period);
-        const price = Array.isArray(v) ? Number(v[0]) : Number(v);
-        if (Number.isInteger(k) && Number.isInteger(price) && price > 0 && price < 10000000) { m[k] = price; periods++; }
-      });
-      stocks[id] = m;
-    });
-    return { fetchedAt: Date.now(), updated: typeof j.updated === 'string' ? j.updated.slice(0, 40) : null, periods, stocks };
-  }
-
-  function loadSharedStocks() {
-    if (!repoReady()) { toast('Set GITHUB_REPO at the top of the script first (see SETUP.md).'); return; }
-    if (typeof GM_xmlhttpRequest !== 'function') { toast('Your userscript manager cannot make this request.'); return; }
-    toast('Downloading the shared stock history from GitHub...');
-    GM_xmlhttpRequest({
-      method: 'GET', url: `https://raw.githubusercontent.com/${GITHUB_REPO}/main/data/stocks.json`, timeout: 20000,
-      onload: (res) => {
-        try {
-          if (res.status !== 200) throw new Error('GitHub answered ' + res.status);
-          const shared = parseShared(res.responseText);
-          sharedStocks = shared;
-          GM_setValue(SHARED_KEY, JSON.stringify(shared));
-          toast(`Loaded ${shared.periods} shared price periods across ${Object.keys(shared.stocks).length} stocks` + (shared.updated ? ` (updated ${shared.updated.slice(0, 10)}).` : '.'));
-          schedule();
-        } catch (e) { toast('Could not read the shared history: ' + e.message); }
-      },
-      onerror: () => toast('Could not reach GitHub.'),
-      ontimeout: () => toast('GitHub took too long to answer.'),
-    });
-  }
-
-  // What would be sent: stock ids, 15-minute period numbers and whole-dollar prices. Nothing else.
-  function buildContribution() {
+  // The game's own /api/state response carries a short rolling price history (history[].id is the same short id
+  // used in the page's own URLs, so it lines up directly with how stocks are already keyed here), and the exact
+  // next-tick time per company. This only ever adds periods the DOM-based reader above did not already have; it
+  // never overwrites a period that is already stored.
+  function logStocksFromApi() {
+    if (!apiState || !apiState.stocks) return;
     const db = loadDb();
-    const out = { format: 1, script: typeof GM_info !== 'undefined' && GM_info.script ? GM_info.script.version : '', stocks: {} };
-    let total = 0;
-    Object.entries(db.stocks || {}).forEach(([id, st]) => {
-      const byPeriod = new Map();
-      (st.obs || []).forEach((o) => { const k = periodOf(o); if (k != null && Number.isInteger(o.price) && o.price > 0) byPeriod.set(k, o.price); });
-      const periods = [...byPeriod.keys()].sort((a, b) => a - b).slice(-MAX_SHARE_PERIODS);
-      if (!periods.length) return;
-      const prices = {};
-      periods.forEach((k) => { prices[k] = byPeriod.get(k); });
-      out.stocks[id] = { prices };
-      total += periods.length;
+    const now = new Date().toISOString();
+    let changed = false;
+    (apiState.stocks.history || []).forEach((h) => {
+      if (!h.id || !Number.isFinite(h.price) || !Number.isFinite(h.at)) return;
+      const period = Math.round(h.at / PERIOD_MS);
+      const rec = db.stocks[h.id] || (db.stocks[h.id] = { name: h.id, obs: [] });
+      if (rec.obs.some((o) => periodOf(o) === period)) return;
+      rec.obs.push({ t: now, p: period, price: h.price, delta: 0, src: 'api' });
+      rec.obs.sort((a, b) => (periodOf(a) ?? 0) - (periodOf(b) ?? 0));
+      if (rec.obs.length > MAX_STOCK_TICKS) rec.obs.shift();
+      changed = true;
     });
-    return total ? { payload: out, total } : null;
+    // The next-tick time is exact here, but companies[] only gives the game's own opaque id, not the short id
+    // used everywhere else -- match it to a known stock by name instead (name is stable and already recorded).
+    (apiState.stocks.companies || []).forEach((c) => {
+      if (!c.name || !c.nextTick) return;
+      const known = Object.values(db.stocks).find((rec) => rec.name && norm(rec.name) === norm(c.name));
+      if (known && Number.isFinite(c.nextTick) && Math.abs(c.nextTick - nextMoveAnchor) > 2000) {
+        nextMoveAnchor = c.nextTick;
+        try { GM_setValue(NEXT_MOVE_KEY, c.nextTick); } catch (e) { /* ignore */ }
+      }
+    });
+    if (changed) { db.updated = now; saveDb(db); }
   }
 
-  function contributeStocks() {
-    if (!repoReady()) { toast('Set GITHUB_REPO at the top of the script first (see SETUP.md).'); return; }
-    const c = buildContribution();
-    if (!c) { toast('No stock prices logged yet. Open Claw Street Ex and let it record some first.'); return; }
-    const text = JSON.stringify(c.payload);
-    let copied = false;
-    try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text, 'text'); copied = true; } } catch (e) { /* try the fallback */ }
-    if (!copied) {
-      try {
-        const ta = document.createElement('textarea');
-        ta.value = text; document.body.appendChild(ta); ta.select();
-        copied = document.execCommand('copy');
-        ta.remove();
-      } catch (e) { /* ignore */ }
-    }
-    const body = 'Paste the copied data between the two lines below (Ctrl+V), then press "Submit new issue". It is only stock ids, period numbers and prices, nothing personal.\n\n```json\n\n```\n';
-    const url = `https://github.com/${GITHUB_REPO}/issues/new?title=${encodeURIComponent('[stock-data] submission')}&body=${encodeURIComponent(body)}`;
-    if (typeof GM_openInTab === 'function') GM_openInTab(url, { active: true }); else window.open(url, '_blank');
-    toast(copied
-      ? `Copied ${c.total} price periods. In the GitHub tab, paste them between the two lines and press "Submit new issue".`
-      : 'Could not copy automatically. Use "Export data" instead, or try again.');
-  }
-
-  // The two buttons only exist on the Claw Street Ex pages.
-  function syncShareButtons() {
-    const box = document.getElementById('msx-tools');
-    if (!box) return;
-    const have = box.querySelectorAll('button[data-share]').length;
-    if (isStockPage() && !have) {
-      const mk = (label, title, fn) => {
-        const b = document.createElement('button');
-        b.type = 'button'; b.textContent = label; b.title = title; b.setAttribute('data-share', '1');
-        b.addEventListener('click', fn);
-        box.insertBefore(b, box.firstChild);
-      };
-      mk('Contribute stock data', 'Copies your logged stock prices (only ids, periods and prices) and opens a GitHub page where you paste and submit them', contributeStocks);
-      mk('Load shared history', 'Downloads the community stock price history from GitHub (one request, only when you press this)', loadSharedStocks);
-    } else if (!isStockPage() && have) {
-      box.querySelectorAll('button[data-share]').forEach((b) => b.remove());
-    }
+  // ─── Settings (kept on this computer, edited on the Account page) ─────────
+  const SETTINGS_KEY = 'ms_settings_v1';
+  const DEFAULT_SETTINGS = { capture: true, events: true };
+  let settings = { ...DEFAULT_SETTINGS };
+  try {
+    const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
+    if (saved && typeof saved === 'object') settings = { ...DEFAULT_SETTINGS, ...saved };
+  } catch (e) { /* use the defaults */ }
+  function saveSettings() {
+    try { GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
   }
 
   function stockStats(id, currentPrice) {
@@ -704,11 +934,14 @@
     // One price per price-period: keep the latest reading in each period.
     const bySlot = new Map();
     obs.forEach((o) => { const k = periodOf(o); if (k != null) bySlot.set(k, o.price); });
-    // Periods you did not record yourself are filled in from the shared history, if you have loaded it.
-    let sharedN = 0;
-    const shared = sharedStocks?.stocks?.[id];
-    if (shared) Object.keys(shared).forEach((k) => { const period = Number(k); if (!bySlot.has(period)) { bySlot.set(period, shared[k]); sharedN++; } });
-    const prices = [...bySlot.entries()].sort((a, b) => a[0] - b[0]).map((e) => e[1]);
+    const entries = [...bySlot.entries()].sort((a, b) => a[0] - b[0]);
+    const prices = entries.map((e) => e[1]);
+    // Each move between two neighbouring 15-minute periods: +1 up, -1 down, 0 unchanged. A gap (a period the script
+    // never saw) is skipped, because the price change across a gap is more than one move.
+    const moves = [];
+    for (let i = 1; i < entries.length; i++) {
+      if (entries[i][0] - entries[i - 1][0] === 1) moves.push(Math.sign(prices[i] - prices[i - 1]));
+    }
     const n = prices.length;
     if (!n) return null;
     const min = Math.min(...prices), max = Math.max(...prices);
@@ -731,11 +964,44 @@
     if (n >= MIN_TICKS_FOR_VERDICT) {
       verdict = flat ? 'flat' : (pct >= HIGH_PCT || pos >= HIGH_PCT) ? 'high' : (pct <= LOW_PCT || pos <= LOW_PCT) ? 'low' : 'mid';
     }
-    return { prices, n, sharedN, min, max, avg, pct, pos, trend, verdict };
+    return { prices, n, min, max, avg, pct, pos, trend, verdict, moves, mw: windowsOf(moves) };
   }
 
   const ordinal = (n) => { const r = n % 100; const sfx = r >= 11 && r <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'); return n + sfx; };
   const VERDICT_LABEL = { low: 'Looks LOW', high: 'Looks HIGH', mid: 'Mid-range', flat: 'Flat so far', learn: 'Learning' };
+
+  const MOVE_WINDOWS = [10, 25, 50];
+  function windowsOf(moves) {
+    const out = {};
+    MOVE_WINDOWS.forEach((w) => {
+      const last = moves.slice(-w);
+      const up = last.filter((m) => m > 0).length, down = last.filter((m) => m < 0).length;
+      out[w] = { up, down, flat: last.length - up - down, seen: last.length };
+    });
+    return out;
+  }
+  function movesHtml(windows) {
+    return MOVE_WINDOWS.map((w) => {
+      const c = windows[w];
+      if (!c.seen) return `Last ${w}: no moves yet`;
+      const seen = c.seen < w ? ` <i>(${c.seen} seen)</i>` : '';
+      return `Last ${w}: <b class="up">${c.up}↑</b> <b class="down">${c.down}↓</b> <b>${c.flat}=</b>${seen}`;
+    }).join(' · ');
+  }
+
+  // Perk on/off timing: only known from the game's own data (there is nothing like it on the page itself).
+  // Matched to a stock purely by name, the same way the next-tick time is.
+  function perkTimingHtml(name) {
+    const c = apiState && apiState.stocks && apiState.stocks.companies.find((x) => norm(x.name) === norm(name));
+    if (!c) return '';
+    const settle = apiState.stocks.perkSettle;
+    if (c.perkOn) return '<small class="msx-perk-status" title="This stock\'s perk is switched on right now.">Perk: <b>on</b></small>';
+    if (c.perkStartsAt && settle) {
+      const remain = c.perkStartsAt + settle - Date.now();
+      if (remain > 0) return `<small class="msx-perk-status" title="Perks take a day to settle in once you hold enough shares.">Perk settles in ${Math.max(1, Math.round(remain / 3600000))}h</small>`;
+    }
+    return '';
+  }
 
   function drawStocks(stocks) {
     document.querySelectorAll('.msx-stock').forEach((n) => n.remove());
@@ -749,13 +1015,14 @@
       const label = st.verdict === 'learn'
         ? `Learning ${st.n}/${MIN_TICKS_FOR_VERDICT}`
         : `${VERDICT_LABEL[st.verdict]} · ${Math.round(st.pos * 100)}% of range · ${ordinal(Math.round(st.pct * 100))} pct`;
-      const sharedNote = st.sharedN ? ` · ${st.sharedN} of ${st.n} periods from shared history` : '';
       const perkCost = s.perkShares ? ` · perk ≈ ${fmtMoney(s.perkShares * s.price)}` : '';
       box.innerHTML =
         `<span class="msx-tag stk ${st.verdict}" title="% of range: how far up between the lowest and highest price recorded (0% = lowest seen, 100% = highest seen). pct: the share of recorded price periods that were lower. HIGH or LOW shows when either is within 20% of an end.">${label}</span>` +
         `<span class="msx-trend" title="Average of the last 3 price moves vs the 3 before">${st.n >= 6 ? arrow : ''}</span>` +
+        `<small class="msx-moves" title="How many of the last 10 and last 25 price moves went up (↑), down (↓) or stayed the same (=). Only counts moves the script saw one after another, so a gap in the record is skipped.">${movesHtml(st.mw)}</small>` +
         `<small class="msx-range" title="Lowest / highest price this script has recorded, over ${st.n} price moves (avg $${st.avg.toFixed(1)})">` +
-        `Lowest seen <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${sharedNote}${perkCost}</small>`;
+        `Lowest seen <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${perkCost}</small>` +
+        perkTimingHtml(s.name);
       host.appendChild(box);
     });
   }
@@ -764,8 +1031,6 @@
   // The game only shows the next-move time on the Claw Street Ex page. We remember it there and,
   // because prices move every 15 minutes, project it forward on every other page.
   const TICK_PERIOD_MS = 15 * 60 * 1000;
-  const NEXT_MOVE_KEY = 'ms_next_stock_move';
-  let nextMoveAnchor = Number(GM_getValue(NEXT_MOVE_KEY, 0)) || 0;
 
   function syncNextMove() {
     const iso = document.querySelector('time[data-countdown]')?.getAttribute('datetime');
@@ -873,7 +1138,7 @@
         const s = Math.ceil(remain / 1000);
         const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
         const clock = h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
-        out = `Crew chain${chainState.count != null ? ' ×' + chainState.count : ''} ends in ${clock}`;
+        out = `Crew chain${chainState.count != null ? ' ×' + chainState.count : ''} ${clock}`;
         soon = remain <= 15 * 60 * 1000;
       }
       if (remain <= 0) stale = true;
@@ -883,7 +1148,181 @@
     txt.parentNode.classList.toggle('stale', stale);
   }
 
-  setInterval(() => { updateTicker(); updateChainPill(); }, 1000);
+  // Countdown text, "h:mm:ss" or "m:ss", shared by the pills below.
+  function fmtClock(ms) {
+    const s = Math.max(0, Math.ceil(ms / 1000));
+    const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
+    return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
+  }
+
+  // ─── Your crew job right now (sidebar, every page) ─────────────────────────
+  // Only known once the game's own data gives it an end time -- a job still recruiting members has none yet, so
+  // it stays hidden until it actually launches. Lives inside the crew chain's own box (same shield icon, same
+  // pill) rather than a separate one of its own, set off from the chain text by a dashed divider.
+  function updateCrewJobPill() {
+    const job = apiState && apiState.activeCrewJob;
+    const chainEl = document.querySelector('.msx-chain');
+    let seg = chainEl ? chainEl.querySelector('.msx-crewjob-inline') : null;
+    if (!job || !job.endsAt || !chainEl) { if (seg) seg.remove(); return; }
+    if (!seg) {
+      seg = document.createElement('span');
+      seg.className = 'msx-crewjob-inline';
+      chainEl.appendChild(seg);
+    }
+    const remain = job.endsAt - Date.now();
+    const text = remain > 0 ? fmtClock(remain) : 'done';
+    seg.title = `${job.name || 'Crew job'}: ${remain > 0 ? `done in ${text}` : 'ready to collect'}`;
+    seg.classList.toggle('soon', remain <= 0);
+    const html = `Crew Job: ${text}`;
+    if (seg.innerHTML !== html) seg.innerHTML = html;
+  }
+
+  // A plain heist-mask icon for the heist pill below -- drawn in the same flat style as the item/cat icons (not
+  // the game's own art) so it needs no request either.
+  const HEIST_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M4 20c4-6 12-9 20-9s16 3 20 9c-3 7-10 12-20 12S7 27 4 20Z" fill="#182316"/><ellipse cx="15" cy="19" rx="5" ry="4" fill="#E7EDE1"/><ellipse cx="33" cy="19" rx="5" ry="4" fill="#E7EDE1"/><circle cx="15" cy="19" r="2" fill="#182316"/><circle cx="33" cy="19" r="2" fill="#182316"/><path d="M2 18 8 20M46 18 40 20" stroke="#182316" stroke-width="2.4" stroke-linecap="round"/></svg>';
+
+  // ─── Your heist right now (sidebar, every page) ────────────────────────────
+  // Same idea as the crew job pill: only shown once it is actually underway (has an end time), not while still
+  // recruiting a clowder.
+  function updateHeistPill() {
+    const h = apiState && apiState.activeHeist;
+    let el = document.querySelector('.msx-heist');
+    if (!h || !h.endsAt) { if (el) el.remove(); return; }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('div');
+      el.className = 'msx-ticker msx-heist';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    const remain = h.endsAt - Date.now();
+    const text = remain > 0 ? fmtClock(remain) : 'done';
+    el.title = `${h.name || 'Heist'}: ${remain > 0 ? `results in ${text}` : 'results are in'}`;
+    el.classList.toggle('soon', remain <= 0);
+    const html = `${HEIST_ICON}${text}`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  // A small pill that only appears while it has something to say, built and removed on the fly (unlike the
+  // stock/chain pills, there is nothing on any page to fall back to while this has no data, so it simply is not
+  // shown then). `compute` returns null (hide) or { text, level: 'ok' | 'warn' | 'bad' }.
+  function ensureStatusPill(className, title, compute) {
+    const status = compute();
+    let el = document.querySelector('.' + className);
+    if (!status) { if (el) el.remove(); return; }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('div');
+      el.className = 'msx-ticker ' + className;
+      el.innerHTML = `<span class="${className}-text"></span>`;
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    el.title = title;
+    el.classList.toggle('soon', status.level === 'warn');
+    el.classList.toggle('stale', status.level === 'bad');
+    const txt = el.querySelector('.' + className + '-text');
+    if (txt.textContent !== status.text) txt.textContent = status.text;
+  }
+
+  // ─── Companion reminders (sidebar, every page) ─────────────────────────────
+  // Only ever known from the game's own data (see api-data-reference.md); there is nothing like it in the page
+  // text. Shows the soonest of feeding, grooming or an errand's return, or a warning once it is overdue.
+
+  // A plain cat-face icon for the companion pill below -- drawn in the same flat style as the item icons further
+  // down (not the game's own mascot art) so it needs no request either.
+  const CAT_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M10 20L16 6L22 20Z" fill="#8A8F86"/><path d="M38 20L32 6L26 20Z" fill="#8A8F86"/><path d="M12 18L16 10L19 18Z" fill="#182316" opacity=".35"/><path d="M36 18L32 10L29 18Z" fill="#182316" opacity=".35"/><ellipse cx="24" cy="27" rx="16" ry="14" fill="#8A8F86"/><ellipse cx="17" cy="26" rx="2.6" ry="3.4" fill="#182316"/><ellipse cx="31" cy="26" rx="2.6" ry="3.4" fill="#182316"/><path d="M24 31l-2.4 2.4h4.8Z" fill="#D9534F"/><path d="M24 33.4v2M24 35.4q-3 2-6 1.4M24 35.4q3 2 6 1.4" fill="none" stroke="#182316" stroke-width="1" stroke-linecap="round"/><path d="M6 24h8M6 29h7M34 24h8M35 29h7" stroke="#E7EDE1" stroke-width="1.1" stroke-linecap="round"/></svg>';
+
+  function updateCompanionPill() {
+    const co = apiState && apiState.companion;
+    let el = document.querySelector('.msx-companion');
+    if (!co) { if (el) el.remove(); return; }
+    const now = Date.now();
+    const name = co.name || 'Companion';
+    let text, level, detail;
+    if (co.overdue) { text = 'overdue'; level = 'bad'; detail = `${name}: care overdue`; }
+    else if (co.out && co.errandUntil > now) { text = fmtClock(co.errandUntil - now); level = 'ok'; detail = `${name}: out, back in ${text}`; }
+    else if (co.hungry) { text = 'hungry'; level = 'warn'; detail = `${name}: hungry now`; }
+    else {
+      const next = [co.mealAt, co.groomAt].filter((t) => t > now).sort((a, b) => a - b)[0];
+      if (!next) { text = 'due'; level = 'warn'; detail = `${name}: due now`; }
+      else {
+        const soon = next - now <= 15 * 60 * 1000;
+        text = fmtClock(next - now); level = soon ? 'warn' : 'ok';
+        detail = `${name}: next care in ${text}`;
+      }
+    }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('div');
+      el.className = 'msx-ticker msx-companion';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    el.title = detail;
+    el.classList.toggle('soon', level === 'warn');
+    el.classList.toggle('stale', level === 'bad');
+    const html = `${CAT_ICON}${text}`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  // ─── PvP status (sidebar, every page) ──────────────────────────────────────
+  // Mug protection and a bounty on you, both only known from the game's own data. Hidden while neither applies.
+  function updatePvpPill() {
+    ensureStatusPill('msx-pvp', 'Mug protection and any bounty on you, from the game’s own data', () => {
+      if (!apiState) return null;
+      const now = Date.now();
+      const bits = [];
+      if (apiState.protectedUntil > now) bits.push(`Protected ${fmtClock(apiState.protectedUntil - now)}`);
+      if (apiState.bountyOnMe > 0) bits.push(`Bounty on you: ${fmtMoney(apiState.bountyOnMe)}`);
+      if (!bits.length) return null;
+      return { text: bits.join(' · '), level: apiState.bountyOnMe > 0 ? 'warn' : 'ok' };
+    });
+  }
+
+  // ─── Can I use a Premium tuna / Catnip tea right now? (sidebar, every page) ─
+  // Every consumable shares a cooldown with the rest of its own family. Only these two families are confirmed
+  // from real data so far; add more here once another item's family key has been seen the same way. Icons are
+  // the game's own item art (from a screenshot of the page's own DOM, image src "/brand/items/<name>.svg"),
+  // copied in once rather than fetched -- that keeps this script's "no requests at all" claim exactly true,
+  // instead of adding a new kind of request just to show a picture.
+  const ITEM_ICONS = {
+    tuna: '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><ellipse cx="29" cy="11" rx="12" ry="4.2" transform="rotate(-22 29 11)" fill="#8A8F86"/><rect x="10" y="18" width="28" height="20" rx="2" fill="#8A8F86"/><rect x="10" y="26" width="28" height="6" fill="#D9534F"/><path d="M14 29h20" stroke="#E7EDE1" stroke-width="1.4" stroke-linecap="round"/><ellipse cx="24" cy="18" rx="14" ry="4.6" fill="#E7EDE1"/><path d="M15 17.5l4 1M22 16l3 1.5M29 18l4-1M18 20l3-.5" stroke="#8A8F86" stroke-width="1.1" stroke-linecap="round"/><ellipse cx="24" cy="18" rx="14" ry="4.6" fill="none" stroke="#8A8F86" stroke-width="1.4"/><rect x="33" y="5" width="5" height="2.4" rx="1.2" transform="rotate(-22 35.5 6.2)" fill="#E7EDE1"/></svg>',
+    catnip: '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><ellipse cx="23" cy="39" rx="17" ry="4.2" fill="#E7EDE1"/><ellipse cx="23" cy="38.4" rx="9" ry="2" fill="#8A8F86" opacity=".5"/><path d="M12 20h22v9c0 5-4 8-9 8h-4c-5 0-9-3-9-8Z" fill="#5B605A"/><path d="M34 23c6 0 7 3 6 6s-4 4-7 4" fill="none" stroke="#5B605A" stroke-width="3.2" stroke-linecap="round"/><ellipse cx="23" cy="20" rx="11" ry="3.2" fill="#182316"/><ellipse cx="23" cy="20" rx="6.5" ry="1.6" fill="#E9C46A" opacity=".65"/><path d="M19 14c-2-3 2-4 0-8M26 14c-2-3 2-4 0-8" fill="none" stroke="#8A8F86" stroke-width="1.5" stroke-linecap="round"/></svg>',
+  };
+  const CONSUMABLE_FAMILIES = [
+    { label: 'Premium tuna', family: 'tuna', resource: 'energy' },
+    { label: 'Catnip tea', family: 'catnip', resource: 'nerve' },
+  ];
+  function updateConsumablesPill() {
+    if (!apiState) { document.querySelector('.msx-consumable')?.remove(); return; }
+    const now = Date.now();
+    let anyCapped = false;
+    const bits = CONSUMABLE_FAMILIES.map((f) => {
+      const expires = apiState.cooldowns[f.family];
+      const capped = apiState.usedUp.includes(f.family);
+      const full = apiState.caps && apiState.caps[f.resource] != null && apiState[f.resource] >= apiState.caps[f.resource];
+      let text;
+      if (capped) { anyCapped = true; text = 'capped'; }
+      else if (expires && expires > now) text = fmtClock(expires - now);
+      else text = full ? `${f.resource} full` : 'ready';
+      return `<span class="msx-item" title="${f.label}">${ITEM_ICONS[f.family] || ''}${text}</span>`;
+    });
+    let el = document.querySelector('.msx-consumable');
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('div');
+      el.className = 'msx-ticker msx-consumable';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    el.title = 'Whether Premium tuna and Catnip tea are off cooldown, from the game’s own data';
+    el.classList.toggle('soon', anyCapped);
+    const html = bits.join('');
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
+  setInterval(() => { updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
 
   // ─── Page scanner: what does this page store or expose? ───────────────────
   // Read-only. It looks at what the page already has (browser storage names, page globals, endpoints the page
@@ -895,7 +1334,6 @@
   const SCAN_TEXT_CAP = 8000;
   const MAX_SCANNED_PAGES = 40;
   const SENSITIVE = /token|auth|session|jwt|pass|secret|key|cookie|email|csrf|posthog|^ph_|distinct|user|uid/i;
-  const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
 
   function scanStorage(st) {
     const out = [];
@@ -955,7 +1393,7 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, script, style').forEach((n) => n.remove());
     clone.querySelectorAll('div, p, li, h1, h2, h3, h4, tr, dt, dd, article, section, br').forEach((n) => n.appendChild(document.createTextNode('\n')));
     return clone.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, cap);
   }
@@ -1054,6 +1492,29 @@
     let touched = false;
     // Remember when each page was last read, for the "Script data" checklist.
     const touch = (key) => { (mods.at || (mods.at = {}))[key] = now; touched = true; };
+
+    // The game's own /api/state response, when seen: the real merit ranks (the Merits page redesign stopped
+    // showing them as readable text) and the real crew +5% window, no card-math guessing needed.
+    if (apiState && apiState.at !== mods.apiAt) {
+      if (Object.keys(apiState.meritLines).length) {
+        mods.merits = {};
+        Object.entries(apiState.meritLines).forEach(([lineName, l]) => { mods.merits[lineName] = l.ranks; });
+        found = true; touch('merits');
+      }
+      if (apiState.crew) {
+        const pct = mods.crewPctSeen || 5;
+        mods.crewBonus = { pct, until: apiState.crew.buffActive ? apiState.crew.buffUntil : 0 };
+        if (apiState.crew.buffActive) mods.crewPctSeen = pct;
+        found = true; touch('crew');
+      }
+      if (apiState.education) {
+        mods.eduCrimePoints = apiState.education.eduCrimePoints;
+        mods.coursesTaken = apiState.education.coursesTaken;
+        mods.eduLandsAt = apiState.education.eduLandsAt;
+        found = true; touch('education');
+      }
+      mods.apiAt = apiState.at;
+    }
 
     if (path === '/merits') {
       const ranks = {};
@@ -1293,6 +1754,7 @@
 
   function captureNow(path) {
     viewTimer = null;
+    if (!settings.capture) return;
     if (currentPath() !== path) return; // you have moved on
     const main = document.querySelector('.main-content') || document.querySelector('main');
     if (!main) return;
@@ -1302,6 +1764,7 @@
   }
 
   function noteView() {
+    if (!settings.capture) return; // switched off on the Account page
     const path = currentPath();
     if (path !== viewPath) { // a new page view
       viewPath = path;
@@ -1359,15 +1822,99 @@
       return { kind: 'train', stat: m[1].toLowerCase(), gym: m[2], gain: +m[4], energy: +m[5], happinessCost: +m[6] };
     }
     if ((m = text.match(/^Used (.+?)\. Restored (\d+) (\w+)/i))) return { kind: 'use', item: m[1], restored: +m[2], stat: m[3].toLowerCase() };
+    // A specific gym move ("You put 48 clean hooks into the heavy bag. +9.81 strength, -60 energy, -30 happiness.")
+    // instead of the generic "Trained STAT at GYM." wording; same numbers, so keep it in the same 'train' kind.
+    if ((m = text.match(/^(.+?)\.\s*\+([\d.]+)\s*(\w+),\s*.(\d+)\s*energy,\s*.(\d+)\s*happiness/i))) {
+      return { kind: 'train', stat: m[3].toLowerCase(), desc: m[1], gain: +m[2], energy: +m[4], happinessCost: +m[5] };
+    }
     if ((m = text.match(/^Award unlocked: (.+?)\./i))) return { kind: 'award', award: m[1] };
     if ((m = text.match(/^(?:Deposited|Withdrew) \$([\d,]+)/i))) return { kind: 'bank', amount: moneyOf(m[1]), direction: /^Deposited/i.test(text) ? 'in' : 'out' };
-    if ((m = text.match(/^(.+?) launched with (\d+)% chance/i))) return { kind: 'heist', job: m[1], chancePct: +m[2] };
+    // The bigger crew heists ("the cold store", "Oceans 11") say "launched with N% success chance"; the plain crew
+    // heists (Fish market skim) say "launched with N% chance". Both count as a launch.
+    if ((m = text.match(/^(.+?) launched with (\d+)%(?: success)? chance/i))) return { kind: 'heist', sub: 'launched', job: m[1], chancePct: +m[2] };
     if ((m = text.match(/^Moved into (.+?) for \$([\d,]+)\. Happiness cap is now (\d+)/i))) return { kind: 'home', home: m[1], cost: moneyOf(m[2]), happinessCap: +m[3] };
+
+    // ── PvP: fights, muggings, bounties, jail ──
+    if ((m = text.match(/^(.+?) won a fight against you and is deciding what to do\.?/i))) return { kind: 'pvp', sub: 'lost_pending', who: m[1] };
+    if ((m = text.match(/^(.+?) left you at the vet\.?/i))) return { kind: 'pvp', sub: 'lost_vet', who: m[1] };
+    if ((m = text.match(/^(.+?) beat you but chose to walk away\.?/i))) return { kind: 'pvp', sub: 'lost_spared', who: m[1] };
+    if ((m = text.match(/^(.+?) fought you off \((\d+)% odds\)\.?/i))) return { kind: 'pvp', sub: 'mug_failed', who: m[1], oddsPct: +m[2] };
+    if ((m = text.match(/^You mugged (.+?) for \$([\d,]+) and collected \$([\d,]+) in bounties \((\d+)% odds\)\.(?: \+(\d+) XP\.)?/i))) {
+      return { kind: 'pvp', sub: 'mugged_bounty', who: m[1], cash: moneyOf(m[2]), bounty: moneyOf(m[3]), oddsPct: +m[4], xp: m[5] ? +m[5] : 0 };
+    }
+    if ((m = text.match(/^You mugged (.+?) for \$([\d,]+)\.?$/i))) return { kind: 'pvp', sub: 'mugged', who: m[1], cash: moneyOf(m[2]) };
+    if ((m = text.match(/^(.+?) mugged you for \$([\d,]+)\.?/i))) return { kind: 'pvp', sub: 'was_mugged', who: m[1], cash: moneyOf(m[2]) };
+    if ((m = text.match(/^You beat (.+?) in (\d+) exchanges, with (\d+) health left\.(?: \+(\d+) XP\.)?/i))) {
+      return { kind: 'pvp', sub: 'won', who: m[1], exchanges: +m[2], healthLeft: +m[3], xp: m[4] ? +m[4] : 0 };
+    }
+    if ((m = text.match(/^(.+?) put a \$([\d,]+) bounty on you\.?/i))) return { kind: 'pvp', sub: 'bounty_on_you', who: m[1], amount: moneyOf(m[2]) };
+    if ((m = text.match(/^(.+?) collected your \$([\d,]+) bounty on (.+?)\.?$/i))) return { kind: 'pvp', sub: 'bounty_collected', who: m[1], amount: moneyOf(m[2]), target: m[3] };
+    if ((m = text.match(/^Posted a \$([\d,]+) bounty on (.+?)\. \$([\d,]+) fee paid\.?/i))) return { kind: 'pvp', sub: 'bounty_posted', amount: moneyOf(m[1]), target: m[2], fee: moneyOf(m[3]) };
+    if ((m = text.match(/^(.+?) sprang you from the cells\.?/i))) return { kind: 'pvp', sub: 'sprung', who: m[1] };
+
+    // ── Companion ──
+    if ((m = text.match(/^(.+?) drops one (.+?) at your feet\.?/i))) return { kind: 'companion', sub: 'gift', item: m[2] };
+    if ((m = text.match(/^(.+?) sits still for the brush\./i))) return { kind: 'companion', sub: 'brushed' };
+    if ((m = text.match(/^(.+?) heads out\. Back in ([^;]+);/i))) return { kind: 'companion', sub: 'errand', back: m[2] };
+    if ((m = text.match(/^You brushed (.+?).s cat until it shone\.(?: \+(\d+) nerve\.)?/i))) return { kind: 'companion', sub: 'brushed_other', who: m[1], nerve: m[2] ? +m[2] : 0 };
+
+    // ── Crew: membership, treasury, crew jobs ──
+    if ((m = text.match(/^(.+?) joined the crew\.?/i))) return { kind: 'crew', sub: 'joined', who: m[1] };
+    if ((m = text.match(/^(.+?) paid you \$([\d,]+) from the (.+?) treasury\.?/i))) return { kind: 'crew', sub: 'treasury_paid', who: m[1], amount: moneyOf(m[2]), treasury: m[3] };
+    if ((m = text.match(/^(.+?) planned \(#(\d+)\) and your seat cost (\d+) nerve\./i))) return { kind: 'crew', sub: 'job_planned', job: m[1], id: +m[2], nerve: +m[3] };
+    if ((m = text.match(/^(.+?) came off: \$([\d,]+) to the treasury and (\d+) respect\.?/i))) return { kind: 'crew', sub: 'job_done', job: m[1], amount: moneyOf(m[2]), respect: +m[3] };
+    if ((m = text.match(/^Joined the (.+?) as (.+?) for (\d+) nerve\./i))) return { kind: 'crew', sub: 'job_joined', job: m[1], role: m[2], nerve: +m[3] };
+    if ((m = text.match(/^You are off the job\.?$/i))) return { kind: 'crew', sub: 'left_job' };
+
+    // ── Bigger crew heists (a stake, a kit, recruiting a "clowder") ──
+    if ((m = text.match(/^Created (.+?) . the cold store, tier (\d+)\. Your \$([\d,]+) stake, \$([\d,]+) for the kit, (\d+) energy and (\d+) nerve/i))) {
+      return { kind: 'heist', sub: 'created', job: m[1], tier: +m[2], stake: moneyOf(m[3]), kit: moneyOf(m[4]), energy: +m[5], nerve: +m[6] };
+    }
+    if ((m = text.match(/^Joined the clowder on (.+?)\. Your \$([\d,]+) stake, (\d+) energy and (\d+) nerve/i))) {
+      return { kind: 'heist', sub: 'joined', job: m[1], stake: moneyOf(m[2]), energy: +m[3], nerve: +m[4] };
+    }
+    if ((m = text.match(/^Heist underway: (\d+)% chance\. Results and payouts arrive in ([^.]+)\.?/i))) return { kind: 'heist', sub: 'underway', chancePct: +m[1], arrives: m[2] };
+    if ((m = text.match(/^(.+?) succeeded\. Your share was \$([\d,]+) . your \$([\d,]+) stake plus \$([\d,]+) of the \$([\d,]+) pool . and (\d+) XP\.?/i))) {
+      return { kind: 'heist', sub: 'succeeded', job: m[1], share: moneyOf(m[2]), stake: moneyOf(m[3]), poolShare: moneyOf(m[4]), pool: moneyOf(m[5]), xp: +m[6] };
+    }
+    if ((m = text.match(/^(.+?) failed\. \$([\d,]+) of your \$([\d,]+) stake was returned and (\d+) XP\.?/i))) {
+      return { kind: 'heist', sub: 'failed', job: m[1], returned: moneyOf(m[2]), stake: moneyOf(m[3]), xp: +m[4] };
+    }
+    if ((m = text.match(/^(.+?): Recruitment expired\. Your \$([\d,]+) stake, (\d+) energy and (\d+) nerve were returned\.?/i))) {
+      return { kind: 'heist', sub: 'expired', job: m[1], stake: moneyOf(m[2]), energy: +m[3], nerve: +m[4] };
+    }
+    if ((m = text.match(/^Ready for the heist\.?$/i))) return { kind: 'heist', sub: 'ready' };
+
+    // ── Jobs (shifts and wages) ──
+    if ((m = text.match(/^Started a (.+?) shift as (.+?)\. \$([\d,]+) in wages are ready at ([\d:]+) UTC\.?/i))) {
+      return { kind: 'job', sub: 'started', job: m[1], role: m[2], wages: moneyOf(m[3]), readyAt: m[4] };
+    }
+    if ((m = text.match(/^Collected \$([\d,]+) in wages(?:, (\d+) XP| and (\d+) XP)?(?:.*?(\d+) job points?)?(?: for (\d+) hours?)?\./i))) {
+      return { kind: 'job', sub: 'wages', cash: moneyOf(m[1]), xp: (m[2] || m[3]) ? +(m[2] || m[3]) : 0, jobPoints: m[4] ? +m[4] : 0, hours: m[5] ? +m[5] : null };
+    }
+
+    // ── Contracts / one-off tasks: "<name>: earned $X and Y XP." ──
+    if ((m = text.match(/^(.+?): earned \$([\d,]+) and (\d+) XP\.?$/i))) return { kind: 'task', task: m[1], cash: moneyOf(m[2]), xp: +m[3] };
+
+    // ── Trading (player exchange) ──
+    if ((m = text.match(/^Listed (\d+) . (.+?) at \$([\d,]+) each\. \$([\d,]+) listing fee paid\.?/i))) {
+      return { kind: 'listing', sub: 'listed', qty: +m[1], item: m[2], price: moneyOf(m[3]), fee: moneyOf(m[4]) };
+    }
+    if ((m = text.match(/^Listing cancelled\./i))) return { kind: 'listing', sub: 'cancelled' };
+    if ((m = text.match(/^(.+?) bought your listing #(\d+)\. You received \$([\d,]+)\.?/i))) return { kind: 'listing', sub: 'sold', who: m[1], id: +m[2], cash: moneyOf(m[3]) };
+    if ((m = text.match(/^Bought (\d+) . (.+?) for \$([\d,]+) plus a \$([\d,]+) exchange tax\.?/i))) {
+      return { kind: 'item', sub: 'bought', qty: +m[1], item: m[2], price: moneyOf(m[3]), tax: moneyOf(m[4]) };
+    }
+    if ((m = text.match(/^Bought (.+?)\.?$/i))) return { kind: 'item', sub: 'bought', qty: 1, item: m[1] };
+
+    // ── Joining a gym / other institution for a flat fee ──
+    if ((m = text.match(/^Joined the (.+?) for \$([\d,]+)\. You now train there\.?/i))) return { kind: 'join', place: m[1], cost: moneyOf(m[2]) };
+
     return { kind: 'other' };
   }
 
   function readEvents() {
-    if (currentPath() !== '/mews') return;
+    if (!settings.events || currentPath() !== '/mews') return;
     const store = loadEvents();
     let added = 0;
     document.querySelectorAll('.main-content time[datetime]').forEach((tm) => {
@@ -1389,6 +1936,537 @@
     try { GM_setValue(EVENTS_KEY, JSON.stringify(store)); } catch (e) { /* ignore */ }
   }
 
+  // The game's own /api/state response carries a rolling list of Mews lines, each already tagged with the game's
+  // own category name (`kind`). Unlike the DOM reading above, this is not limited to the Mews page: the game
+  // fetches this response on most navigations, so it can add lines this script never had a chance to read from
+  // the page, and it can tag a line this script's own wording-matching did not recognise ("other") with the real
+  // category, without guessing. It never replaces the rich fields the wording-matching already pulls out.
+  function readEventsFromApi() {
+    if (!settings.events || !apiState || !apiState.events.length) return;
+    const store = loadEvents();
+    let added = 0, enriched = 0;
+    apiState.events.forEach((e) => {
+      if (!e.body || !Number.isFinite(e.at)) return;
+      const t = new Date(e.at).toISOString();
+      const text = String(e.body).replace(/\s*\[(?:view|spend)\]\s*$/i, '').replace(/\s+/g, ' ').trim();
+      if (!text || text.length > 400) return;
+      const key = t + '|' + text;
+      if (eventKeys.has(key)) {
+        const existing = store.events.find((ev) => ev.t === t && ev.text === text);
+        if (existing && existing.apiKind !== e.kind) { existing.apiKind = e.kind; enriched++; }
+        return;
+      }
+      eventKeys.add(key);
+      store.events.push({ t, text, ...parseEvent(text), apiKind: e.kind });
+      added++;
+    });
+    if (!added && !enriched) return;
+    store.events.sort((a, b) => a.t.localeCompare(b.t));
+    while (store.events.length > MAX_EVENTS) store.events.shift();
+    try { GM_setValue(EVENTS_KEY, JSON.stringify(store)); } catch (e2) { /* ignore */ }
+  }
+
+  // ─── Investment Tracker (Claw Street Ex page) ─────────────────────────────
+  // Up to three parties (for example "Me" and "Crew") pool money in one fund. Each party owns a percentage of the fund:
+  // adding money to a party buys it fund units at the fund's current value, so profit already made stays with the money
+  // that was there. Every stock buy and sell in the Mews log after you press Start is replayed against the fund, so the
+  // profit is split by those percentages. Holdings are valued at what was paid for them until they are sold; the
+  // unrealised gain at today's price is shown separately. The tracker only reads the Mews log the script has saved.
+  const INVEST_KEY = 'ms_invest_v1';
+  const PARTY_COUNT = 3;
+  const PARTY_COLORS = ['#b4df87', '#e9c46a', '#7fb7e9'];
+  let invest = null;
+  let investOpenParty = -1; // which party's "Invest" or "Withdraw" box is open
+  let investOpenMode = 'in';
+  let investConfirmReset = false;
+  let investSig = '';
+  let lastStocksForInvest = [];
+
+  const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
+  const money0 = (n) => (n < 0 ? '-' : '') + '$' + Math.round(Math.abs(n)).toLocaleString();
+  const signed0 = (n) => (n > 0 ? '+' : '') + money0(n);
+  const pct1 = (n) => (n * 100).toFixed(1) + '%';
+
+  function loadInvest() {
+    if (invest) return invest;
+    let saved = null;
+    try { saved = JSON.parse(GM_getValue(INVEST_KEY, 'null')); } catch (e) { saved = null; }
+    invest = { v: 1, active: false, startedAt: null, names: ['Me', 'Crew', ''], cash: [0, 0, 0], holds: [], invests: [] };
+    if (saved && typeof saved === 'object') {
+      Object.keys(invest).forEach((k) => { if (saved[k] != null) invest[k] = saved[k]; });
+    }
+    return invest;
+  }
+  function saveInvest() {
+    try { GM_setValue(INVEST_KEY, JSON.stringify(invest)); } catch (e) { /* ignore */ }
+  }
+  const partyUsed = (st, i) => String(st.names[i] || '').trim() !== '';
+
+  // Replays the opening position, the money added since, and every stock trade in the Mews log after Start.
+  function computeInvest(st, events) {
+    const fund = { cash: 0, hold: {}, units: [0, 0, 0], put: [0, 0, 0] };
+    const nav = () => {
+      const units = fund.units.reduce((a, b) => a + b, 0);
+      const value = fund.cash + Object.values(fund.hold).reduce((a, h) => a + h.cost, 0);
+      return units > 0 && value > 0 ? value / units : 1;
+    };
+    for (let i = 0; i < PARTY_COUNT; i++) {
+      if (!partyUsed(st, i)) continue;
+      const c = Math.max(0, Number(st.cash[i]) || 0);
+      fund.cash += c; fund.units[i] += c; fund.put[i] += c;
+    }
+    (st.holds || []).forEach((h) => {
+      const qty = Math.max(0, Number(h.qty) || 0), cost = qty * Math.max(0, Number(h.avg) || 0);
+      if (!qty || !partyUsed(st, h.p)) return;
+      const rec = fund.hold[h.stock] || (fund.hold[h.stock] = { qty: 0, cost: 0 });
+      rec.qty += qty; rec.cost += cost; fund.units[h.p] += cost; fund.put[h.p] += cost;
+    });
+
+    const startMs = Date.parse(st.startedAt) || 0;
+    const stockNames = new Set(Object.values(loadDb().stocks).map((s) => String(s.name).toLowerCase()));
+    Object.keys(fund.hold).forEach((k) => stockNames.add(k.toLowerCase()));
+    const steps = [];
+    (st.invests || []).forEach((v) => steps.push({ ms: Date.parse(v.t), kind: 'invest', v }));
+    events.forEach((e) => {
+      if (e.kind !== 'trade') return;
+      const ms = Date.parse(e.t);
+      if (!(ms >= startMs)) return;
+      if (stockNames.size && !stockNames.has(String(e.item).toLowerCase())) return;
+      steps.push({ ms, kind: 'trade', e });
+    });
+    steps.sort((a, b) => a.ms - b.ms);
+
+    const series = []; // profit per party after each sale
+    const snap = (ms) => {
+      const units = fund.units.reduce((a, b) => a + b, 0);
+      const value = fund.cash + Object.values(fund.hold).reduce((a, h) => a + h.cost, 0);
+      series.push({ ms, profit: fund.units.map((u, i) => (units > 0 ? (u / units) * value : 0) - fund.put[i]) });
+    };
+    let ignoredSells = 0, trades = 0;
+    // Buys bigger than the cash the fund had at that moment. Money added with Invest while that stock is still held
+    // (between the buy and the sale of that stock) covers the shortfall, oldest first. Once the stock is sold, the
+    // buy's shortfall can no longer be covered, because the profit has already been split without that money.
+    const over = [];
+    steps.forEach((s) => {
+      if (s.kind === 'invest') {
+        let amt = Number(s.v.amount) || 0;
+        if (!amt || !partyUsed(st, s.v.p)) return;
+        const n = nav();
+        if (amt < 0) {
+          // A withdrawal: only cash can be paid out, and never more than the party's share of the fund is worth.
+          amt = -Math.min(-amt, Math.max(0, fund.cash), fund.units[s.v.p] * n);
+          if (!amt) return;
+        }
+        fund.units[s.v.p] += amt / n; fund.put[s.v.p] += amt; fund.cash += amt;
+        let left = amt > 0 ? amt : 0;
+        over.forEach((o) => {
+          if (o.closed || o.remaining <= 0 || left <= 0) return;
+          const take = Math.min(left, o.remaining);
+          o.remaining -= take; left -= take;
+        });
+        return;
+      }
+      const e = s.e;
+      trades++;
+      if (e.side === 'bought') {
+        if (e.total > fund.cash + 0.5) over.push({ t: e.t, item: e.item, qty: e.qty, total: e.total, had: Math.max(0, fund.cash), remaining: e.total - Math.max(0, fund.cash), closed: false });
+        const rec = fund.hold[e.item] || (fund.hold[e.item] = { qty: 0, cost: 0 });
+        rec.qty += e.qty; rec.cost += e.total; fund.cash -= e.total;
+      } else {
+        over.forEach((o) => { if (o.item === e.item) o.closed = true; });
+        const rec = fund.hold[e.item];
+        const q = Math.min(e.qty, rec ? rec.qty : 0);
+        if (q < e.qty) ignoredSells++;
+        if (q <= 0) return;
+        const proceeds = e.total * (q / e.qty);
+        rec.cost -= (rec.cost / rec.qty) * q; rec.qty -= q; fund.cash += proceeds;
+        if (rec.qty <= 0) delete fund.hold[e.item];
+        snap(s.ms);
+      }
+    });
+
+    const overBuys = over.filter((o) => o.remaining > 0.5);
+    const units = fund.units.reduce((a, b) => a + b, 0);
+    const heldCost = Object.values(fund.hold).reduce((a, h) => a + h.cost, 0);
+    const value = fund.cash + heldCost;
+    return { fund, units, value, heldCost, series, ignoredSells, trades, overBuys };
+  }
+
+  function investChartSvg(st, res) {
+    const pts = res.series;
+    if (!pts.length) return '<p class="msx-inv-note">The profit chart appears after the first sale.</p>';
+    const t0 = Date.parse(st.startedAt) || pts[0].ms, t1 = Math.max(pts[pts.length - 1].ms, t0 + 1);
+    const all = [0].concat(...pts.map((p) => p.profit));
+    let lo = Math.min(...all), hi = Math.max(...all);
+    if (hi - lo < 1) { hi += 1; lo -= 1; }
+    const W = 320, H = 110, PAD = 6;
+    const X = (ms) => PAD + ((ms - t0) / (t1 - t0)) * (W - 2 * PAD);
+    const Y = (v) => H - PAD - ((v - lo) / (hi - lo)) * (H - 2 * PAD);
+    let svg = `<svg viewBox="0 0 ${W} ${H}" class="msx-inv-chart" role="img" aria-label="Profit over time per party">` +
+      `<line x1="0" x2="${W}" y1="${Y(0)}" y2="${Y(0)}" stroke="currentColor" stroke-opacity=".3" stroke-dasharray="3 3"/>`;
+    for (let i = 0; i < PARTY_COUNT; i++) {
+      if (!partyUsed(st, i)) continue;
+      const path = [[t0, 0]].concat(pts.map((p) => [p.ms, p.profit[i]])).map((p) => `${X(p[0]).toFixed(1)},${Y(p[1]).toFixed(1)}`).join(' ');
+      svg += `<polyline points="${path}" fill="none" stroke="${PARTY_COLORS[i]}" stroke-width="2"/>`;
+    }
+    return svg + '</svg>';
+  }
+
+  function investSetupHtml(st) {
+    const stockOpts = Object.values(loadDb().stocks).map((s) => s.name).sort();
+    let h = '<p class="msx-inv-note">Set who is in the fund and what each party has right now. Leave a party\'s name empty to skip it. After you press Start, every stock buy and sell in your Mews log is added to the right parties by their share of the fund.</p><div class="msx-inv-grid">';
+    for (let i = 0; i < PARTY_COUNT; i++) {
+      h += `<div class="msx-inv-party" style="border-color:${PARTY_COLORS[i]}"><b>Party ${i + 1}</b>` +
+        `<label>Name <input type="text" data-inv="name" data-i="${i}" value="${escHtml(st.names[i] || '')}" placeholder="unused"></label>` +
+        `<label>Cash $ <input type="text" inputmode="numeric" data-inv="cash" data-i="${i}" value="${st.cash[i] || ''}" placeholder="0"></label></div>`;
+    }
+    h += '</div><h4>Stocks held right now</h4>';
+    st.holds.forEach((x, k) => {
+      h += `<div class="msx-inv-hold"><select data-inv="hp" data-k="${k}">` +
+        [0, 1, 2].filter((i) => partyUsed(st, i)).map((i) => `<option value="${i}"${i === x.p ? ' selected' : ''}>${escHtml(st.names[i])}</option>`).join('') + '</select>' +
+        `<select data-inv="hs" data-k="${k}">` + stockOpts.map((n) => `<option${n === x.stock ? ' selected' : ''}>${escHtml(n)}</option>`).join('') + '</select>' +
+        `<input type="text" inputmode="numeric" data-inv="hq" data-k="${k}" value="${x.qty || ''}" placeholder="shares">` +
+        `<input type="text" inputmode="decimal" data-inv="ha" data-k="${k}" value="${x.avg || ''}" placeholder="avg price $">` +
+        `<button type="button" data-inv="hdel" data-k="${k}">Remove</button></div>`;
+    });
+    h += '<div class="msx-inv-buttons"><button type="button" data-inv="hadd">Add a holding</button><button type="button" data-inv="start" class="msx-inv-go">Start tracking</button></div>';
+    return h;
+  }
+
+  function investRunHtml(st, res, prices) {
+    const used = [0, 1, 2].filter((i) => partyUsed(st, i));
+    let unreal = 0, unrealKnown = true;
+    Object.keys(res.fund.hold).forEach((name) => {
+      const h = res.fund.hold[name], p = prices[name.toLowerCase()];
+      if (p == null) { unrealKnown = false; return; }
+      unreal += h.qty * p - h.cost;
+    });
+    const share = (i) => (res.units > 0 ? res.fund.units[i] / res.units : 0);
+    const realised = (i) => share(i) * res.value - res.fund.put[i];
+    const totalReal = used.reduce((a, i) => a + realised(i), 0);
+    let h = `<p class="msx-inv-note">Tracking since ${escHtml(new Date(st.startedAt).toLocaleString())} · ${res.trades} stock trades read from your Mews log.</p>`;
+    h += `<div class="msx-inv-total"><span>Fund value <b>${money0(res.value)}</b> <small>(cash ${money0(res.fund.cash)} + shares at cost ${money0(res.heldCost)})</small></span>` +
+      `<span>Profit taken <b class="${totalReal >= 0 ? 'up' : 'down'}">${signed0(totalReal)}</b></span>` +
+      `<span>Unrealised <b class="${unreal >= 0 ? 'up' : 'down'}">${unrealKnown ? signed0(unreal) : 'needs prices'}</b></span></div>`;
+    if (res.fund.cash < 0) h += `<p class="msx-inv-warn">Your buys are ${money0(-res.fund.cash)} more than the money put into the fund. Add money with Invest, or the split will be off.</p>`;
+    if (res.overBuys.length) {
+      h += `<div class="msx-inv-warn">${res.overBuys.length} buy(s) were bigger than the money the fund had at the time. Add the missing money with Invest for the party that paid it while you still hold the stock (before you sell it), or the split will be off:<ul>` +
+        res.overBuys.slice(-5).map((b) => `<li>${escHtml(new Date(b.t).toLocaleString())}: bought ${Math.round(b.qty).toLocaleString()} × ${escHtml(b.item)} for ${money0(b.total)}, the fund had ${money0(b.had)}: <b>${money0(b.remaining)} short</b>${b.remaining < b.total - b.had - 0.5 ? ' (partly covered)' : ''}</li>`).join('') +
+        (res.overBuys.length > 5 ? `<li>and ${res.overBuys.length - 5} earlier</li>` : '') + '</ul></div>';
+    }
+    if (res.ignoredSells) h += `<p class="msx-inv-warn">${res.ignoredSells} sale(s) were of shares the fund never bought (bought before you pressed Start), so they were skipped or trimmed.</p>`;
+    if (!settings.events) h += '<p class="msx-inv-warn">"Log my Mews events" is off on the Account page, so trades are not being read.</p>';
+    h += '<div class="msx-inv-grid">';
+    used.forEach((i) => {
+      const un = unrealKnown ? share(i) * unreal : null;
+      h += `<div class="msx-inv-party" style="border-color:${PARTY_COLORS[i]}"><b>${escHtml(st.names[i])}</b><span class="msx-inv-pct">${pct1(share(i))} of the fund</span>` +
+        `<span title="Money added with Invest, minus money taken out with Withdraw">Money in ${money0(res.fund.put[i])}</span><span>Worth ${money0(share(i) * res.value)}</span>` +
+        `<span>Profit <b class="${realised(i) >= 0 ? 'up' : 'down'}">${signed0(realised(i))}</b>${un == null ? '' : ` <small>(${signed0(un)} unrealised)</small>`}</span>`;
+      if (investOpenParty === i) {
+        const out = investOpenMode === 'out';
+        h += `<div class="msx-inv-add"><input type="text" inputmode="numeric" data-inv="amt" data-i="${i}" placeholder="${out ? 'amount to take out $' : 'amount $'}"><button type="button" data-inv="invok" data-i="${i}">${out ? 'Withdraw' : 'Add'}</button><button type="button" data-inv="invno">Cancel</button></div>`;
+      } else {
+        h += `<div class="msx-inv-add"><button type="button" data-inv="invopen" data-i="${i}">Invest</button><button type="button" data-inv="outopen" data-i="${i}">Withdraw</button></div>`;
+      }
+      h += '</div>';
+    });
+    h += '</div>';
+    const names = Object.keys(res.fund.hold);
+    if (names.length) {
+      h += '<table class="msx-inv-table"><thead><tr><th>Shares held</th><th>Total</th>' + used.map((i) => `<th>${escHtml(st.names[i])}</th>`).join('') + '<th>Avg cost</th></tr></thead><tbody>';
+      names.forEach((n) => {
+        const r = res.fund.hold[n];
+        h += `<tr><td>${escHtml(n)}</td><td>${Math.round(r.qty).toLocaleString()}</td>` + used.map((i) => `<td>${(r.qty * share(i)).toFixed(1)}</td>`).join('') + `<td>$${(r.cost / r.qty).toFixed(1)}</td></tr>`;
+      });
+      h += '</tbody></table>';
+    }
+    h += '<h4>Profit taken over time</h4>' + investChartSvg(st, res) +
+      '<div class="msx-inv-legend">' + used.map((i) => `<span><i style="background:${PARTY_COLORS[i]}"></i>${escHtml(st.names[i])}</span>`).join('') + '</div>';
+    h += `<div class="msx-inv-buttons"><button type="button" data-inv="reset">${investConfirmReset ? 'Click again to erase the tracker and start over' : 'Reset tracker'}</button></div>`;
+    return h;
+  }
+
+  function renderInvest(panel, stocks, force) {
+    const st = loadInvest();
+    const prices = {};
+    (stocks || []).forEach((s) => { prices[String(s.name).toLowerCase()] = s.price; });
+    const ev = loadEvents().events;
+    const sig = JSON.stringify(st) + '|' + ev.length + '|' + (ev.length ? ev[ev.length - 1].t : '') + '|' + (st.active ? JSON.stringify(prices) : '') + '|' + investOpenParty + investOpenMode + '|' + investConfirmReset;
+    if (!force && sig === investSig) return;
+    if (!force && panel.contains(document.activeElement) && /^(INPUT|SELECT)$/.test(document.activeElement.tagName)) return;
+    investSig = sig;
+    panel.querySelector('.msx-inv-body').innerHTML = st.active ? investRunHtml(st, computeInvest(st, ev), prices) : investSetupHtml(st);
+  }
+
+  function investClick(e, panel) {
+    const el = e.target.closest('[data-inv]');
+    if (!el) return;
+    const st = loadInvest();
+    const act = el.dataset.inv, i = Number(el.dataset.i), k = Number(el.dataset.k);
+    if (act === 'hadd') {
+      const first = [0, 1, 2].find((x) => partyUsed(st, x));
+      const stock = Object.values(loadDb().stocks).map((s) => s.name).sort()[0];
+      if (first == null || !stock) { toast('Name a party first, and open the stock page once so the stocks are known.'); return; }
+      st.holds.push({ p: first, stock, qty: 0, avg: 0 });
+    } else if (act === 'hdel') {
+      st.holds.splice(k, 1);
+    } else if (act === 'start') {
+      if (![0, 1, 2].some((x) => partyUsed(st, x))) { toast('Give at least one party a name first.'); return; }
+      st.holds = st.holds.filter((x) => Number(x.qty) > 0 && partyUsed(st, x.p));
+      st.active = true; st.startedAt = new Date().toISOString(); st.invests = [];
+    } else if (act === 'invopen' || act === 'outopen') {
+      investOpenParty = i; investOpenMode = act === 'outopen' ? 'out' : 'in';
+      saveInvest(); renderInvest(panel, null, true);
+      panel.querySelector('[data-inv="amt"]')?.focus();
+      return;
+    } else if (act === 'invno') {
+      investOpenParty = -1;
+    } else if (act === 'invok') {
+      const raw = panel.querySelector('[data-inv="amt"]')?.value || '';
+      const amount = moneyOf(raw.replace(/[$\s]/g, ''));
+      if (!(amount > 0)) { toast('Type an amount above 0.'); return; }
+      let signedAmount = amount;
+      if (investOpenMode === 'out') {
+        const res = computeInvest(st, loadEvents().events);
+        const worth = res.units > 0 ? (res.fund.units[i] / res.units) * res.value : 0;
+        if (amount > worth + 0.5) { toast('That is more than ' + (st.names[i] || 'this party') + ' has in the fund (' + money0(worth) + ').'); return; }
+        if (amount > res.fund.cash + 0.5) { toast('Only ' + money0(res.fund.cash) + ' of the fund is cash right now; the rest is in shares. Sell first.'); return; }
+        signedAmount = -amount;
+      }
+      st.invests.push({ t: new Date().toISOString(), p: i, amount: signedAmount });
+      investOpenParty = -1;
+    } else if (act === 'reset') {
+      if (!investConfirmReset) { investConfirmReset = true; renderInvest(panel, null, true); return; }
+      investConfirmReset = false; investOpenParty = -1;
+      st.active = false; st.startedAt = null; st.invests = [];
+    } else { return; }
+    saveInvest();
+    renderInvest(panel, lastStocksForInvest, true);
+  }
+
+  function investChange(e) {
+    const el = e.target.closest('[data-inv]');
+    if (!el) return;
+    const st = loadInvest();
+    const act = el.dataset.inv, i = Number(el.dataset.i), k = Number(el.dataset.k);
+    if (act === 'name') st.names[i] = el.value.trim();
+    else if (act === 'cash') st.cash[i] = moneyOf(el.value.replace(/[$\s]/g, '')) || 0;
+    else if (act === 'hp') st.holds[k].p = Number(el.value);
+    else if (act === 'hs') st.holds[k].stock = el.value;
+    else if (act === 'hq') st.holds[k].qty = moneyOf(el.value) || 0;
+    else if (act === 'ha') st.holds[k].avg = moneyOf(el.value.replace(/[$\s]/g, '')) || 0;
+    else return;
+    saveInvest();
+    if (act === 'name') renderInvest(el.closest('#msx-invest'), lastStocksForInvest, true); // party lists in the holdings rows follow the names
+  }
+
+  function ensureInvestPanel(stocks) {
+    lastStocksForInvest = stocks;
+    let panel = document.getElementById('msx-invest');
+    if (!panel) {
+      const table = document.querySelector('.watch-table');
+      if (!table) return;
+      panel = document.createElement('details');
+      panel.id = 'msx-invest';
+      panel.innerHTML = '<summary>Investment Tracker</summary><div class="msx-inv-body"></div>';
+      panel.addEventListener('click', (e) => investClick(e, panel));
+      panel.addEventListener('change', investChange);
+      table.insertAdjacentElement('afterend', panel);
+      investSig = '';
+    }
+    renderInvest(panel, stocks, false);
+  }
+
+  // ─── Heists and crew jobs: XP/energy, XP/nerve, $/energy, $/nerve ─────────
+  // Built entirely from the game's own data (see api-data-reference.md); neither page has any other reading on
+  // it. Heists: nerve is the same (10) for every heist type, so energy is the axis that actually tells them
+  // apart; the $ figure is an exact expected value, not a guess -- the split rule (half the profit pool shared
+  // evenly, half by role skill) was confirmed from the game's own handbook, and "profit" in the data already
+  // is the average per-cat share, checked against the user's own completed heist. Crew jobs: nerve is the only
+  // resource that varies, and the payout ("cut") is a flat amount per member regardless of role, confirmed
+  // against the user's own completed crew job.
+  function fmtDuration(ms) {
+    const m = Math.round(ms / 60000);
+    if (m < 60) return m + 'm';
+    const h = Math.floor(m / 60), mm = m % 60;
+    return h + 'h' + (mm ? ` ${mm}m` : '');
+  }
+
+  // ─── Copy your crew job to Discord (Crew page) ─────────────────────────────
+  // Builds a plain-text message from the crew job you are actually in right now (recruiting or already
+  // launched): which seats are filled, which are open and what stat each open seat wants (crewJobRoles, the
+  // game's own data, not a guess), and the payout. A button copies it to the clipboard for you to paste --
+  // nothing is ever sent anywhere by this script itself; pasting it into Discord is still something you do.
+  function copyToClipboard(text) {
+    try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text, 'text'); return true; } } catch (e) { /* fall through */ }
+    try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); return true; } } catch (e) { /* fall through */ }
+    return false;
+  }
+
+  function buildCrewJobMessage(job, roles, crewName) {
+    const title = job.name || 'Crew job';
+    const filled = job.members || [];
+    const seatsTotal = job.maxMembers || filled.length;
+    const openCount = Math.max(0, seatsTotal - filled.length);
+    const roleTitle = (key) => (roles && roles[key] && roles[key].title) || key || 'Unknown role';
+    const lines = [];
+    lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${job.tier ? ` (tier ${job.tier})` : ''}`);
+    if (job.status === 'planning') {
+      lines.push(`Recruiting — ${filled.length}/${seatsTotal} seats filled${job.minMembers ? `, ${job.minMembers} minimum to launch` : ''}`);
+    } else {
+      const remain = job.endsAt ? job.endsAt - Date.now() : null;
+      lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
+    }
+    if (filled.length) {
+      lines.push('', '✅ Filled:');
+      filled.forEach((m) => lines.push(`• ${roleTitle(m.role)} — ${m.name || 'someone'}${m.level != null ? ` (Lv ${m.level})` : ''}`));
+    }
+    if (job.status === 'planning' && openCount > 0) {
+      const filledRoles = new Set(filled.map((m) => m.role));
+      const openRoles = (job.roles || []).filter((r) => !filledRoles.has(r));
+      lines.push('', '🟡 Open:');
+      if (openRoles.length) {
+        openRoles.forEach((rk) => {
+          const stat = roles && roles[rk] && roles[rk].stat;
+          lines.push(`• ${roleTitle(rk)}${stat ? ` — needs ${stat}` : ''}`);
+        });
+      } else {
+        lines.push(`• ${openCount} seat${openCount === 1 ? '' : 's'} open`);
+      }
+    }
+    const payoutBits = [];
+    if (job.cut != null) payoutBits.push(`💰 ${money0(job.cut)} each`);
+    if (job.take != null) payoutBits.push(`treasury ${money0(job.take)}`);
+    if (job.respect != null) payoutBits.push(`+${job.respect} respect`);
+    const oddsBits = [];
+    if (job.chance != null) oddsBits.push(`🎲 ${job.chance}% chance`);
+    if (job.nerve != null) oddsBits.push(`${job.nerve} nerve`);
+    if (job.stake) oddsBits.push(`${money0(job.stake)} stake`);
+    if (payoutBits.length || oddsBits.length) lines.push('');
+    if (payoutBits.length) lines.push(payoutBits.join(' · '));
+    if (oddsBits.length) lines.push(oddsBits.join(' · '));
+    return lines.join('\n');
+  }
+
+  function ensureMyCrewJobPanel() {
+    if (location.pathname.replace(/\/+$/, '') !== '/crew') { document.getElementById('msx-mycrewjob')?.remove(); return; }
+    const job = apiState && apiState.myCrewJob;
+    if (!job) { document.getElementById('msx-mycrewjob')?.remove(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    let panel = document.getElementById('msx-mycrewjob');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'msx-mycrewjob';
+      panel.innerHTML = '<h2>Your crew job</h2><p class="msx-inv-note">Ready to post in Discord: who has a seat, which seats are still open (and what stat they want), and the payout.</p>' +
+        '<textarea readonly></textarea><button type="button">📋 Copy for Discord</button>';
+      panel.querySelector('button').addEventListener('click', () => {
+        const ta = panel.querySelector('textarea');
+        const ok = copyToClipboard(ta.value);
+        if (!ok) { ta.focus(); ta.select(); }
+        toast(ok ? 'Copied — paste it in Discord.' : 'Couldn’t copy automatically — the text is selected, press Ctrl+C.');
+      });
+      const anchor = document.getElementById('msx-crewjobs');
+      if (anchor) host.insertBefore(panel, anchor); else host.appendChild(panel);
+    }
+    const msg = buildCrewJobMessage(job, apiState.crewJobRoles, apiState.crew && apiState.crew.name);
+    const ta = panel.querySelector('textarea');
+    if (ta.value !== msg) ta.value = msg;
+  }
+
+  function ensureHeistsPanel() {
+    if (location.pathname.replace(/\/+$/, '') !== '/heists') { document.getElementById('msx-heists')?.remove(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    let panel = document.getElementById('msx-heists');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'msx-heists';
+      panel.innerHTML = '<h2>Heist XP/energy and $/energy</h2><div class="msx-calc-body"></div>';
+      host.appendChild(panel);
+    }
+    const body = panel.querySelector('.msx-calc-body');
+    const heists = apiState?.heists || [];
+    if (!heists.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own heist data (open this page once it has loaded).</p>'; return; }
+    const xp = apiState.heistXp || { success: 20, fail: 5 };
+    let h = '<p class="msx-inv-note">Nerve costs the same (10) for every heist, so energy is what actually tells them apart. The $ figure is an exact expected value: chance × profit − (1 − chance) × what a bust costs you, using your own real chance for each job.</p>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Heist</th><th>Chance</th><th>Energy</th><th>Stake</th><th>Profit / cat</th><th>Bust returns</th><th>XP/energy</th><th>$/energy</th><th>Run</th></tr></thead><tbody>';
+    heists.forEach((t) => {
+      const c = t.chance / 100;
+      const dollarEv = c * t.profit + (1 - c) * (t.failReturn - t.stake);
+      const xpEv = c * xp.success + (1 - c) * xp.fail;
+      h += `<tr><td>${escHtml(t.name)}<br><small>${escHtml(t.short || '')}</small></td><td>${t.chance}%</td><td>${t.energy}</td>` +
+        `<td>${money0(t.stake)}</td><td>${money0(t.profit)}</td><td>${money0(t.failReturn)}</td>` +
+        `<td>${(xpEv / t.energy).toFixed(2)}</td><td>${signed0(dollarEv / t.energy)}</td><td>${fmtDuration(t.duration)}</td></tr>`;
+    });
+    h += '</tbody></table><p class="msx-inv-note">Also costs 10 nerve per cat either way. A kit (10% of the stake) is not included here.</p>';
+    body.innerHTML = h;
+  }
+
+  function ensureCrewJobsPanel() {
+    if (location.pathname.replace(/\/+$/, '') !== '/crew') { document.getElementById('msx-crewjobs')?.remove(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    let panel = document.getElementById('msx-crewjobs');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'msx-crewjobs';
+      panel.innerHTML = '<h2>Crew job XP/nerve and $/nerve</h2><div class="msx-calc-body"></div>';
+      host.appendChild(panel);
+    }
+    const body = panel.querySelector('.msx-calc-body');
+    const tiers = apiState?.crewJobTiers || [];
+    if (!tiers.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own crew job data (open this page once it has loaded).</p>'; return; }
+    let h = '<p class="msx-inv-note">The $ you personally get ("cut") is fixed per member, the same for every role. This assumes a bust pays nothing personally, only the crew’s treasury ("take") and respect are separate from your own cut.</p>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Job</th><th>Chance</th><th>Nerve</th><th>Your cut</th><th>To treasury</th><th>Respect</th><th>XP/nerve</th><th>$/nerve</th><th>Run</th></tr></thead><tbody>';
+    tiers.forEach((t) => {
+      const c = t.chance / 100;
+      const xpEv = c * t.xp + (1 - c) * t.xpFail;
+      const dollarEv = c * t.cut;
+      h += `<tr><td>${escHtml(t.name)}<br><small>tier ${t.tier} · level ${t.level}+</small></td><td>${t.chance}%</td><td>${t.nerve}</td>` +
+        `<td>${money0(t.cut)}</td><td>${money0(t.take)}</td><td>${t.respect}</td>` +
+        `<td>${(xpEv / t.nerve).toFixed(2)}</td><td>${signed0(dollarEv / t.nerve)}</td><td>${fmtDuration(t.duration)}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    body.innerHTML = h;
+  }
+
+  // ─── Account page panel ───────────────────────────────────────────────────
+  // Settings for the script, added at the bottom of the Account page. The script never reads that page.
+  function ensureAccountPanel() {
+    const existing = document.getElementById('msx-account');
+    if (currentPath() !== '/account') { if (existing) existing.remove(); return; }
+    if (existing) { updateAccountPanel(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    const box = document.createElement('section');
+    box.id = 'msx-account';
+    box.innerHTML =
+      '<h2>MeowStreets Extra Info</h2>' +
+      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer; it sends nothing anywhere.</p>' +
+      '<h3>Recording</h3>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-capture"> Save each page I view (kept on this computer; never account, payment or other players\' pages, never chat)</label>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
+      '<h3>Your data</h3>' +
+      '<p>Everything the script has logged (crime readings, stock prices, Mews events, page captures) can be saved to a file on your computer.</p>' +
+      '<div class="msx-acc-buttons"><button type="button" id="msx-acc-export">Export data</button></div>';
+    host.appendChild(box);
+
+    box.querySelector('#msx-acc-export').addEventListener('click', exportDb);
+    box.querySelector('#msx-acc-capture').addEventListener('change', (e) => { settings.capture = e.target.checked; saveSettings(); });
+    box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
+    updateAccountPanel();
+  }
+
+  function updateAccountPanel() {
+    const box = document.getElementById('msx-account');
+    if (!box) return;
+    const cap = box.querySelector('#msx-acc-capture');
+    const ev = box.querySelector('#msx-acc-events');
+    if (cap.checked !== settings.capture) cap.checked = settings.capture;
+    if (ev.checked !== settings.events) ev.checked = settings.events;
+  }
+
   // ─── Wiring ───────────────────────────────────────────────────────────────
   let observer = null;
   let timer = null;
@@ -1399,10 +2477,12 @@
     try {
       injectStyle();
       ensureExportButton();
-      syncShareButtons();
+      ensureAccountPanel();
       noteView();
       readModifiers();
+      logStocksFromApi();
       readEvents();
+      readEventsFromApi();
       readGym();
       readTraining();
       if (isCrimesPage() && document.querySelector('.ladders article.rung')) {
@@ -1416,10 +2496,19 @@
       updateLegend();
       syncChain();
       ensureChainPill();
+      updateCrewJobPill();
+      updateHeistPill();
+      updateCompanionPill();
+      updatePvpPill();
+      updateConsumablesPill();
+      ensureMyCrewJobPanel();
+      ensureHeistsPanel();
+      ensureCrewJobsPanel();
       if (isStockPage() && document.querySelector('.watch-table')) {
         const stocks = readStocks();
         logStocks(stocks);
         drawStocks(stocks);
+        ensureInvestPanel(stocks);
       }
     } catch (e) {
       console.error('[MeowStreets Extra Info]', e);
@@ -1436,7 +2525,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob');
         if (muts.every(own)) return;
         schedule();
       });
@@ -1464,12 +2553,17 @@
       if (!remote) return;
       try { chainState = JSON.parse(newValue); } catch (e) { /* ignore */ }
     });
+    GM_addValueChangeListener(SETTINGS_KEY, (name, oldValue, newValue, remote) => {
+      if (!remote) return;
+      try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(newValue) }; } catch (e) { return; }
+      updateAccountPanel();
+      updateLegend();
+    });
+    GM_addValueChangeListener(INVEST_KEY, (name, oldValue, newValue, remote) => {
+      if (remote) { invest = null; investSig = ''; }
+    });
     GM_addValueChangeListener(EVENTS_KEY, (name, oldValue, newValue, remote) => {
       if (remote) { eventsCache = null; eventKeys = null; }
-    });
-    GM_addValueChangeListener(SHARED_KEY, (name, oldValue, newValue, remote) => {
-      if (!remote) return;
-      try { sharedStocks = JSON.parse(newValue); } catch (e) { /* ignore */ }
     });
     GM_addValueChangeListener(NEXT_MOVE_KEY, (name, oldValue, newValue, remote) => {
       if (remote) nextMoveAnchor = Number(newValue) || 0;
@@ -1478,8 +2572,6 @@
 
   if (typeof GM_registerMenuCommand === 'function') {
     GM_registerMenuCommand('MeowStreets: export data', exportDb);
-    GM_registerMenuCommand('MeowStreets: load shared stock history', loadSharedStocks);
-    GM_registerMenuCommand('MeowStreets: contribute stock data', contributeStocks);
     GM_registerMenuCommand('MeowStreets: scan this page', () => { scanPage(true).catch(() => {}); });
   }
 

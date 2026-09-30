@@ -16,7 +16,5 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-      - name: Run the tests
-        run: node --test scripts/merge-stock-data.test.js
       - name: Check the userscript parses
         run: node --check meowstreets-info.user.js

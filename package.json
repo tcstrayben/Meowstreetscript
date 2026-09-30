@@ -1,8 +1,5 @@
 {
   "name": "meowstreets-extra-info",
   "private": true,
-  "description": "MeowStreets Extra Info userscript and the community stock price data",
-  "scripts": {
-    "test": "node --test scripts/merge-stock-data.test.js"
-  }
+  "description": "MeowStreets Extra Info userscript -- reads the MeowStreets pages you're already looking at and draws extra numbers next to them. Display-only, no requests of its own."
 }
