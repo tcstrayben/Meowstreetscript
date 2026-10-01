@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.16.0
+// @version      0.16.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -633,16 +633,7 @@
       .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
-      .msx-ws .msx-ws-top { display:flex; align-items:center; gap:8px; }
-      .msx-ws .msx-ws-bar { position:relative; flex:1 1 auto; max-width:180px; height:6px; border-radius:3px;
-        background:linear-gradient(90deg, var(--ms-lime, #b4df87) 0 20%, var(--ms-slate, #2e342d) 20% 80%, var(--ms-red, #eb6561) 80% 100%); }
-      .msx-ws .msx-ws-bar i { position:absolute; top:-3px; width:3px; height:12px; margin-left:-1.5px; border-radius:1px; background:var(--ms-bone, #e7ede1); }
-      .msx-ws .msx-ws-bar u { position:absolute; top:0; width:1px; height:6px; background:var(--ms-ink, #182316); text-decoration:none; }
-      .msx-tag.ws.good { background:var(--ms-lime, #b4df87); color:var(--ms-ink, #182316); }
-      .msx-tag.ws.pricey { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
-      .msx-tag.ws.mid { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
-      .msx-ws .msx-ws-off { opacity:.75; }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -2774,7 +2765,6 @@
   // Page layout from a real dev-tools capture (Screenshot 333, 2026-10-01): every item is a `.ws-row`, its name
   // in `.ws-text > b` and its price in `.ws-each > b`. The box below goes inside `.ws-text`, under the name.
   const MAX_SHOP_TICKS = 2000; // one reading per item per price period (an hour) -- about 12 weeks of hours seen
-  const WS_LOW = 0.2, WS_HIGH = 0.8; // the same "within 20% of an end" rule the stock verdict uses
 
   // One reading per price period per item (`priceUntil` marks the end of each period). Runs whenever the game's
   // own /api/state passes by, on any page, so prices are caught even when the Whiskers page isn't open.
@@ -2807,37 +2797,21 @@
       const pct = Math.round((1 - rate) * 1000) / 10;
       const pay = Math.round(it.price * rate);
       const named = sources.filter((s) => s.owned).map((s) => `${escHtml(s.name)} −${s.pct}%`);
-      // Not yet known whether the game's listed price already has the discount taken off. When the page shows the
-      // discounted figure, it clearly does; when it shows the full one, it may come off at checkout instead.
-      const note = pagePrice === pay && pay !== it.price ? ' <small>(the page price already includes it)</small>'
-        : ' <small title="Not confirmed yet whether the game takes this off at checkout or the listed price already has it. Compare with what you are actually charged.">(?)</small>';
-      return `<div class="msx-ws-disc">Store ${money0(it.price)}${named.length ? ' · ' + named.join(' · ') : ''} → −${pct}% total ` +
-        `(${money0(it.price - pay)}) = you pay <b>${money0(pay)}</b>${note}</div>`;
+      const label = named.length ? named.join(' · ') : `Discount −${pct}%`;
+      // Not yet known whether the game's listed price already has the discount taken off. When the page already
+      // shows the discounted figure, say so instead of taking it off a second time.
+      if (pagePrice === pay && pay !== it.price) return `<div class="msx-ws-disc">${label} <small>(already in the price)</small></div>`;
+      return `<div class="msx-ws-disc">${label} → you pay <b>${money0(pay)}</b></div>`;
     }
-    const missing = sources.filter((s) => !s.owned);
-    if (!missing.length) return '';
-    return '<div class="msx-ws-off">Not owned: ' + missing.map((s) =>
-      `${escHtml(s.name)} <small>(${escHtml(s.from)})</small> −${s.pct}% would save ${money0(it.price * s.pct / 100)}`).join(' · ') + '</div>';
+    // No discount owned: show nothing (user request, 0.16.1 -- listing the ones you could get was too much).
+    return '';
   }
 
-  function whiskersHtml(it, rec, pagePrice) {
+  // Kept deliberately short (user request, 0.16.1): just the game's own range, plus a discount line only when
+  // one is owned. The hourly price history is still recorded (db.shopPrices, in the export), just not shown.
+  function whiskersHtml(it, pagePrice) {
     let h = '';
-    if (it.min != null && it.max > it.min) {
-      const span = it.max - it.min;
-      const pos = Math.min(1, Math.max(0, (it.price - it.min) / span));
-      const ref = it.ref != null ? it.ref : (it.min + it.max) / 2;
-      const [cls, label] = pos <= WS_LOW ? ['good', 'GOOD DEAL'] : pos >= WS_HIGH ? ['pricey', 'PRICEY']
-        : ['mid', it.price < ref ? 'Below avg' : it.price > ref ? 'Above avg' : 'Average'];
-      const barTitle = `Where ${money0(it.price)} sits between the game's own lowest (${money0(it.min)}) and highest (${money0(it.max)}) price for this item. Bottom 20% = good deal, top 20% = pricey. The thin line is the average.`;
-      h += `<div class="msx-ws-top"><span class="msx-ws-bar" title="${escHtml(barTitle)}"><u style="left:${(((ref - it.min) / span) * 100).toFixed(1)}%"></u>` +
-        `<i style="left:${(pos * 100).toFixed(1)}%"></i></span><span class="msx-tag ws ${cls}">${label}</span></div>`;
-      h += `<div>Range <b>${money0(it.min)} – ${money0(it.max)}</b> · avg ${money0(ref)} · ${Math.round(pos * 100)}% of the way up</div>`;
-      const prices = rec && rec.obs ? rec.obs.map((o) => o.price) : [];
-      const seen = prices.length
-        ? `Seen by you: low <b>${money0(Math.min(...prices))}</b> · high <b>${money0(Math.max(...prices))}</b> <small>(${prices.length} hour${prices.length === 1 ? '' : 's'} seen)</small>`
-        : 'Seen by you: nothing yet';
-      h += `<div>${seen}${it.until ? ` · next price ${fmtTime(it.until)}` : ''}</div>`;
-    }
+    if (it.min != null && it.max > it.min) h += `<div>Range <b>${money0(it.min)} – ${money0(it.max)}</b></div>`;
     if (it.consumable) h += whiskersDiscountHtml(it, pagePrice);
     return h;
   }
@@ -2845,7 +2819,6 @@
   function drawWhiskers() {
     if (location.pathname.replace(/\/+$/, '') !== '/whiskers' || !apiState) return;
     const items = new Map((apiState.shopItems || []).map((it) => [norm(it.name), it]));
-    const db = loadDb();
     document.querySelectorAll('.ws-row').forEach((row) => {
       const text = row.querySelector('.ws-text');
       const nameEl = text && text.querySelector(':scope > b');
@@ -2853,7 +2826,7 @@
       const it = items.get(norm(nameEl.textContent));
       let box = text.querySelector(':scope > .msx-ws');
       const pagePrice = num((row.querySelector('.ws-each b')?.textContent || '').replace(/[^\d.,]/g, ''));
-      const html = it ? whiskersHtml(it, db.shopPrices[norm(it.name)], pagePrice) : '';
+      const html = it ? whiskersHtml(it, pagePrice) : '';
       if (!html) { if (box) box.remove(); return; }
       if (!box) { box = document.createElement('div'); box.className = 'msx-ws'; text.appendChild(box); }
       if (box.__msxHtml !== html) { box.innerHTML = html; box.__msxHtml = html; }
