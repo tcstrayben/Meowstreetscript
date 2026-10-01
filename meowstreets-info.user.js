@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.16.1
+// @version      0.17.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -90,7 +90,7 @@
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
-        storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [],
+        storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0,
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
@@ -292,6 +292,7 @@
       // found by their own description text ("Market consumables cost 15% less." on a job perk, "... and
       // market consumables cost 5% less" on a course), so a new one written the same way is picked up too.
       if (raw.modifiers && Number.isFinite(raw.modifiers.marketRate)) out.marketRate = raw.modifiers.marketRate;
+      if (raw.weekly && Number.isFinite(raw.weekly.resetAt)) out.weeklyResetAt = raw.weekly.resetAt; // for the cat clock's tooltip
       const pctLess = (text) => { const m = String(text || '').match(/market consumables cost (\d+)% less/i); return m ? Number(m[1]) : null; };
       (raw.perks || []).forEach((p) => {
         const pct = p && pctLess(p.description);
@@ -634,6 +635,10 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
+      .sidebar .brand:has(.msx-clock) { min-width:0; }
+      .sidebar .brand:has(.msx-clock) .brand-logo { flex:0 1 auto; min-width:0; }
+      .msx-clock { display:inline-flex; flex:none; color:var(--ms-lime, #b4df87); cursor:default; }
+      .msx-clock-row { margin:2px 0 6px; font-size:11px; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; white-space:nowrap; cursor:default; }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -1439,7 +1444,62 @@
     if (el.innerHTML !== html) el.innerHTML = html;
   }
 
-  setInterval(() => { updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
+  // ─── Cat clock (next to the sidebar logo, every page) ─────────────────────
+  // The game runs on UTC: the Whiskers daily limit, the 12-a-day tuna/catnip uses and contracts all reset at
+  // 00:00 UTC (the Whiskers page says "Resets 00:00 UTC"; the game's own `contractResetAt` lands exactly there).
+  // A cat-face clock goes beside the logo (`.sidebar .brand`, seen in a dev-tools capture, Screenshot 335) and a
+  // short line under that row counts down to the reset. The weekly reset is in the tooltip only.
+  const UTC_DAY_MS = 86400000;
+  function ensureCatClock() {
+    const brand = document.querySelector('.sidebar .brand');
+    if (!brand) return;
+    if (!brand.querySelector('.msx-clock')) {
+      const icon = document.createElement('span');
+      icon.className = 'msx-clock';
+      icon.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+        '<path d="M5 9 L5.5 2.5 L10 6.2 Z M19 9 L18.5 2.5 L14 6.2 Z" fill="currentColor"/>' +
+        '<circle cx="12" cy="13.5" r="8" fill="var(--ms-asphalt, #1c201c)" stroke="currentColor" stroke-width="1.6"/>' +
+        '<path d="M1 13 L4.5 13.6 M1 16 L4.5 15.2 M23 13 L19.5 13.6 M23 16 L19.5 15.2" stroke="currentColor" stroke-width=".9" stroke-linecap="round"/>' +
+        '<line class="msx-clock-h" x1="12" y1="13.5" x2="12" y2="9.5" stroke="var(--ms-bone, #e7ede1)" stroke-width="1.8" stroke-linecap="round"/>' +
+        '<line class="msx-clock-m" x1="12" y1="13.5" x2="12" y2="7.2" stroke="var(--ms-bone, #e7ede1)" stroke-width="1.1" stroke-linecap="round"/>' +
+        '<circle cx="12" cy="13.5" r="1" fill="currentColor"/></svg>';
+      brand.appendChild(icon);
+    }
+    if (!document.querySelector('.msx-clock-row')) {
+      const row = document.createElement('div');
+      row.className = 'msx-clock-row';
+      brand.after(row);
+    }
+    updateCatClock();
+  }
+
+  function updateCatClock() {
+    const row = document.querySelector('.msx-clock-row');
+    if (!row) return;
+    const now = Date.now();
+    const d = new Date(now);
+    const h = d.getUTCHours(), m = d.getUTCMinutes();
+    const reset = (Math.floor(now / UTC_DAY_MS) + 1) * UTC_DAY_MS;
+    const left = Math.ceil((reset - now) / 1000);
+    const text = `reset in ${Math.floor(left / 3600)}:${String(Math.floor(left / 60) % 60).padStart(2, '0')}:${String(left % 60).padStart(2, '0')} · ` +
+      `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')} UTC`;
+    if (row.textContent !== text) row.textContent = text;
+    const weekly = apiState && apiState.weeklyResetAt > now ? apiState.weeklyResetAt : 0;
+    const dateTime = (ts) => new Date(ts).toLocaleString([], { weekday: 'short', hour: 'numeric', minute: '2-digit' });
+    const title = `Game time is UTC. Daily reset (Whiskers limit, tuna/catnip uses, contracts) at 00:00 UTC = ${fmtTime(reset)} your time.` +
+      (weekly ? ` Weekly reset: ${dateTime(weekly)}.` : '');
+    setTitle(row, title);
+    const icon = document.querySelector('.msx-clock');
+    if (icon) {
+      setTitle(icon, title);
+      const hourDeg = ((h % 12) + m / 60) * 30, minDeg = m * 6;
+      const hand = (sel, deg) => { const el = icon.querySelector(sel); const v = `rotate(${deg} 12 13.5)`; if (el && el.getAttribute('transform') !== v) el.setAttribute('transform', v); };
+      hand('.msx-clock-h', hourDeg);
+      hand('.msx-clock-m', minDeg);
+    }
+  }
+
+  setInterval(() => { updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
 
   // ─── Page scanner: what does this page store or expose? ───────────────────
   // Read-only. It looks at what the page already has (browser storage names, page globals, endpoints the page
@@ -1871,7 +1931,7 @@
 
   function ensureLegend() {
     if (document.querySelector('.msx-legend')) return;
-    const anchor = document.querySelector('.sidebar .brand') || document.querySelector('.sidebar .profile');
+    const anchor = document.querySelector('.sidebar .msx-clock-row') || document.querySelector('.sidebar .brand') || document.querySelector('.sidebar .profile');
     if (!anchor || !anchor.parentNode) return;
     const el = document.createElement('details');
     el.className = 'msx-legend';
@@ -2894,6 +2954,7 @@
         logObservations(data);
       }
       if (isStockPage()) syncNextMove();
+      ensureCatClock();
       ensureTicker();
       ensureLegend();
       updateLegend();
@@ -2932,7 +2993,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
         if (muts.every(own)) return;
         schedule();
       });
