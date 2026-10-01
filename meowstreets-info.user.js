@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.9
+// @version      0.16.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -90,7 +90,7 @@
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
-        storeItems: {}, listings: [],
+        storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [],
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
@@ -274,6 +274,33 @@
       out.storeItems = {};
       (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack }; });
       (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice != null ? g.sellPrice : g.sellBack }; });
+      // For the Whiskers & Co. page itself: every store item's price, plus -- for the ones whose price moves
+      // hourly (only Premium tuna and Catnip tea so far) -- the game's own stated `priceRange` [min, max], its
+      // `reference_price` (the range's exact midpoint every time seen) and `priceUntil` (on the hour).
+      // "Consumable" = has a `resource` it restores and isn't an island-only item; that's a best reading of
+      // what the Staff discount text's "market consumables" covers, not confirmed by the game.
+      out.shopItems = (raw.items || []).filter((it) => it && it.name && Number.isFinite(it.price)).map((it) => {
+        const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
+        return {
+          name: it.name, price: it.price, ref: Number.isFinite(it.reference_price) ? it.reference_price : null,
+          min: range ? range[0] : null, max: range ? range[1] : null, until: it.priceUntil || 0,
+          consumable: !!it.resource && !it.island,
+        };
+      });
+      // Everything that can make store consumables cheaper. `modifiers.marketRate` is the game's own combined
+      // price multiplier (1 = no discount; the 15% Staff discount would make it 0.85). The named sources are
+      // found by their own description text ("Market consumables cost 15% less." on a job perk, "... and
+      // market consumables cost 5% less" on a course), so a new one written the same way is picked up too.
+      if (raw.modifiers && Number.isFinite(raw.modifiers.marketRate)) out.marketRate = raw.modifiers.marketRate;
+      const pctLess = (text) => { const m = String(text || '').match(/market consumables cost (\d+)% less/i); return m ? Number(m[1]) : null; };
+      (raw.perks || []).forEach((p) => {
+        const pct = p && pctLess(p.description);
+        if (pct) out.marketDiscounts.push({ name: p.name, from: (p.job ? p.job.charAt(0).toUpperCase() + p.job.slice(1) + ' ' : '') + 'job perk', pct, owned: !!p.owned });
+      });
+      (raw.courses || []).forEach((c) => {
+        const pct = c && pctLess(c.perk);
+        if (pct) out.marketDiscounts.push({ name: c.name, from: 'course', pct, owned: c.status === 'completed' });
+      });
       // Open marketplace listings only -- what you could actually buy right now. `seller` is the same public
       // display name the Trading page itself already shows next to the listing, not private data.
       if (Array.isArray(raw.listings)) {
@@ -435,6 +462,7 @@
     } catch (e) { /* fall through to a fresh db */ }
     if (!db) db = { version: 1, crimes: {}, masteryThresholds: {}, heatLog: [], playerLevels: [] };
     if (!db.stocks) db.stocks = {};
+    if (!db.shopPrices) db.shopPrices = {};
     dbCache = db;
     return db;
   }
@@ -602,6 +630,19 @@
       #msx-trading .msx-inv-table th, #msx-trading .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
+      .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
+        border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
+      .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
+      .msx-ws .msx-ws-top { display:flex; align-items:center; gap:8px; }
+      .msx-ws .msx-ws-bar { position:relative; flex:1 1 auto; max-width:180px; height:6px; border-radius:3px;
+        background:linear-gradient(90deg, var(--ms-lime, #b4df87) 0 20%, var(--ms-slate, #2e342d) 20% 80%, var(--ms-red, #eb6561) 80% 100%); }
+      .msx-ws .msx-ws-bar i { position:absolute; top:-3px; width:3px; height:12px; margin-left:-1.5px; border-radius:1px; background:var(--ms-bone, #e7ede1); }
+      .msx-ws .msx-ws-bar u { position:absolute; top:0; width:1px; height:6px; background:var(--ms-ink, #182316); text-decoration:none; }
+      .msx-tag.ws.good { background:var(--ms-lime, #b4df87); color:var(--ms-ink, #182316); }
+      .msx-tag.ws.pricey { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
+      .msx-tag.ws.mid { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
+      .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
+      .msx-ws .msx-ws-off { opacity:.75; }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -2729,6 +2770,96 @@
     body.innerHTML = h;
   }
 
+  // ─── Whiskers & Co. (/whiskers) ───────────────────────────────────────────
+  // Page layout from a real dev-tools capture (Screenshot 333, 2026-10-01): every item is a `.ws-row`, its name
+  // in `.ws-text > b` and its price in `.ws-each > b`. The box below goes inside `.ws-text`, under the name.
+  const MAX_SHOP_TICKS = 2000; // one reading per item per price period (an hour) -- about 12 weeks of hours seen
+  const WS_LOW = 0.2, WS_HIGH = 0.8; // the same "within 20% of an end" rule the stock verdict uses
+
+  // One reading per price period per item (`priceUntil` marks the end of each period). Runs whenever the game's
+  // own /api/state passes by, on any page, so prices are caught even when the Whiskers page isn't open.
+  function logShopPricesFromApi() {
+    if (!apiState || !apiState.shopItems) return;
+    const db = loadDb();
+    let changed = false;
+    apiState.shopItems.forEach((it) => {
+      if (it.min == null || !it.until) return;
+      const key = norm(it.name);
+      const rec = db.shopPrices[key] || (db.shopPrices[key] = { name: it.name, obs: [] });
+      if (rec.min !== it.min || rec.max !== it.max || rec.ref !== it.ref) { rec.name = it.name; rec.min = it.min; rec.max = it.max; rec.ref = it.ref; changed = true; }
+      const same = rec.obs.find((o) => o.until === it.until);
+      if (same) { if (same.price !== it.price) { same.price = it.price; changed = true; } return; }
+      rec.obs.push({ t: new Date().toISOString(), until: it.until, price: it.price });
+      rec.obs.sort((a, b) => a.until - b.until);
+      if (rec.obs.length > MAX_SHOP_TICKS) rec.obs.shift();
+      changed = true;
+    });
+    if (changed) { db.updated = new Date().toISOString(); saveDb(db); }
+  }
+
+  // The discount line, laid out like the crime odds breakdown: each source and its share, then the total.
+  // The total is always the game's own `marketRate`, never the sources added up by hand (whether two
+  // discounts add or multiply isn't known yet).
+  function whiskersDiscountHtml(it, pagePrice) {
+    const rate = apiState.marketRate;
+    const sources = apiState.marketDiscounts || [];
+    if (rate < 1) {
+      const pct = Math.round((1 - rate) * 1000) / 10;
+      const pay = Math.round(it.price * rate);
+      const named = sources.filter((s) => s.owned).map((s) => `${escHtml(s.name)} −${s.pct}%`);
+      // Not yet known whether the game's listed price already has the discount taken off. When the page shows the
+      // discounted figure, it clearly does; when it shows the full one, it may come off at checkout instead.
+      const note = pagePrice === pay && pay !== it.price ? ' <small>(the page price already includes it)</small>'
+        : ' <small title="Not confirmed yet whether the game takes this off at checkout or the listed price already has it. Compare with what you are actually charged.">(?)</small>';
+      return `<div class="msx-ws-disc">Store ${money0(it.price)}${named.length ? ' · ' + named.join(' · ') : ''} → −${pct}% total ` +
+        `(${money0(it.price - pay)}) = you pay <b>${money0(pay)}</b>${note}</div>`;
+    }
+    const missing = sources.filter((s) => !s.owned);
+    if (!missing.length) return '';
+    return '<div class="msx-ws-off">Not owned: ' + missing.map((s) =>
+      `${escHtml(s.name)} <small>(${escHtml(s.from)})</small> −${s.pct}% would save ${money0(it.price * s.pct / 100)}`).join(' · ') + '</div>';
+  }
+
+  function whiskersHtml(it, rec, pagePrice) {
+    let h = '';
+    if (it.min != null && it.max > it.min) {
+      const span = it.max - it.min;
+      const pos = Math.min(1, Math.max(0, (it.price - it.min) / span));
+      const ref = it.ref != null ? it.ref : (it.min + it.max) / 2;
+      const [cls, label] = pos <= WS_LOW ? ['good', 'GOOD DEAL'] : pos >= WS_HIGH ? ['pricey', 'PRICEY']
+        : ['mid', it.price < ref ? 'Below avg' : it.price > ref ? 'Above avg' : 'Average'];
+      const barTitle = `Where ${money0(it.price)} sits between the game's own lowest (${money0(it.min)}) and highest (${money0(it.max)}) price for this item. Bottom 20% = good deal, top 20% = pricey. The thin line is the average.`;
+      h += `<div class="msx-ws-top"><span class="msx-ws-bar" title="${escHtml(barTitle)}"><u style="left:${(((ref - it.min) / span) * 100).toFixed(1)}%"></u>` +
+        `<i style="left:${(pos * 100).toFixed(1)}%"></i></span><span class="msx-tag ws ${cls}">${label}</span></div>`;
+      h += `<div>Range <b>${money0(it.min)} – ${money0(it.max)}</b> · avg ${money0(ref)} · ${Math.round(pos * 100)}% of the way up</div>`;
+      const prices = rec && rec.obs ? rec.obs.map((o) => o.price) : [];
+      const seen = prices.length
+        ? `Seen by you: low <b>${money0(Math.min(...prices))}</b> · high <b>${money0(Math.max(...prices))}</b> <small>(${prices.length} hour${prices.length === 1 ? '' : 's'} seen)</small>`
+        : 'Seen by you: nothing yet';
+      h += `<div>${seen}${it.until ? ` · next price ${fmtTime(it.until)}` : ''}</div>`;
+    }
+    if (it.consumable) h += whiskersDiscountHtml(it, pagePrice);
+    return h;
+  }
+
+  function drawWhiskers() {
+    if (location.pathname.replace(/\/+$/, '') !== '/whiskers' || !apiState) return;
+    const items = new Map((apiState.shopItems || []).map((it) => [norm(it.name), it]));
+    const db = loadDb();
+    document.querySelectorAll('.ws-row').forEach((row) => {
+      const text = row.querySelector('.ws-text');
+      const nameEl = text && text.querySelector(':scope > b');
+      if (!nameEl) return;
+      const it = items.get(norm(nameEl.textContent));
+      let box = text.querySelector(':scope > .msx-ws');
+      const pagePrice = num((row.querySelector('.ws-each b')?.textContent || '').replace(/[^\d.,]/g, ''));
+      const html = it ? whiskersHtml(it, db.shopPrices[norm(it.name)], pagePrice) : '';
+      if (!html) { if (box) box.remove(); return; }
+      if (!box) { box = document.createElement('div'); box.className = 'msx-ws'; text.appendChild(box); }
+      if (box.__msxHtml !== html) { box.innerHTML = html; box.__msxHtml = html; }
+    });
+  }
+
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   function ensureAccountPanel() {
@@ -2805,6 +2936,8 @@
       ensureHeistsPanel();
       ensureCrewJobsPanel();
       ensureTradingPanel();
+      logShopPricesFromApi();
+      drawWhiskers();
       if (isStockPage() && document.querySelector('.watch-table')) {
         const stocks = readStocks();
         logStocks(stocks);
@@ -2826,7 +2959,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws');
         if (muts.every(own)) return;
         schedule();
       });
@@ -2846,6 +2979,7 @@
         const at = incoming.mods.at || (incoming.mods.at = {});
         Object.keys(localAt).forEach((k) => { if (!(at[k] >= localAt[k])) at[k] = localAt[k]; });
         if (!incoming.stocks) incoming.stocks = {};
+        if (!incoming.shopPrices) incoming.shopPrices = {};
         dbCache = incoming;
       } catch (e) { dbCache = null; }
       updateLegend(); // show the newly saved read times right away
