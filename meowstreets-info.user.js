@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.7
+// @version      0.15.8
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -565,6 +565,12 @@
       #msx-mycrewjob button, #msx-myheist button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-mycrewjob button:hover, #msx-myheist button:hover { border-color:var(--ms-lime, #b4df87); }
+      .msx-gymlock { display:block; width:fit-content; margin-top:8px; padding:4px 10px; border-radius:8px; cursor:pointer;
+        font-size:12px; font-family:inherit; color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25);
+        border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-gymlock:hover { border-color:var(--ms-lime, #b4df87); }
+      .msx-gymlock.locked { color:var(--ms-red, #eb6561); border-color:var(--ms-red, #eb6561); background:rgba(235,101,97,.12); }
+      button.msx-train-locked { opacity:.45; cursor:not-allowed !important; }
       #msx-invest .msx-inv-warn { margin:8px 0; color:var(--ms-gold, #e9c46a); }
       #msx-invest .msx-inv-warn ul { margin:4px 0 0; padding-left:20px; }
       #msx-invest .msx-inv-grid { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0; }
@@ -1470,7 +1476,10 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, .msx-gymlock, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
+    // A locked Train button is this script's own doing, not something the game itself did -- a page capture
+    // should reflect the real page, so the lock is undone on the clone (never on the live page) before saving.
+    clone.querySelectorAll('button.msx-train-locked').forEach((n) => { n.disabled = false; n.classList.remove('msx-train-locked'); });
     clone.querySelectorAll('div, p, li, h1, h2, h3, h4, tr, dt, dd, article, section, br').forEach((n) => n.appendChild(document.createTextNode('\n')));
     return clone.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, cap);
   }
@@ -1736,6 +1745,51 @@
     if (db.gymLog.length > MAX_GYM_OBS) db.gymLog.shift();
     db.updated = obs.t;
     saveDb(db);
+  }
+
+  // ─── Cat Tree: lock a stat so its Train button can't be clicked (user request) ─────────────
+  // Still strictly read-only: this never clicks or submits anything on its own. It only disables the game's own
+  // Train button for a stat you've chosen to lock, so a stray click -- or just habit -- can't train it by
+  // accident; unlocking it is instant too. Checked against a real capture of the page (dev tools, 2026-10-01):
+  // each stat is an `article.station-card` whose Train button carries `aria-label="Train <stat>"` -- a reliable,
+  // real selector, not a guess. The lock itself is kept in this browser's storage (not exported, not sent
+  // anywhere), the same place everything else here is kept.
+  const GYM_LOCK_KEY = 'ms_gym_locks_v1';
+  function loadGymLocks() { try { return JSON.parse(GM_getValue(GYM_LOCK_KEY, '{}')) || {}; } catch (e) { return {}; } }
+  function saveGymLocks(locks) { GM_setValue(GYM_LOCK_KEY, JSON.stringify(locks)); }
+
+  function applyGymLocks() {
+    if (location.pathname.replace(/\/+$/, '') !== '/cat-tree') return;
+    const locks = loadGymLocks();
+    document.querySelectorAll('article.station-card').forEach((card) => {
+      const btn = card.querySelector('button[aria-label^="Train "]');
+      if (!btn) return;
+      const stat = btn.getAttribute('aria-label').replace(/^Train\s+/i, '').trim().toLowerCase();
+      const statCap = stat.charAt(0).toUpperCase() + stat.slice(1);
+      const host = btn.closest('.card-do') || card;
+      let toggle = host.querySelector('.msx-gymlock');
+      if (!toggle) {
+        toggle = document.createElement('button');
+        toggle.type = 'button';
+        toggle.className = 'msx-gymlock';
+        host.appendChild(toggle);
+        toggle.addEventListener('click', (e) => {
+          e.preventDefault(); e.stopPropagation();
+          const cur = loadGymLocks();
+          cur[stat] = !cur[stat];
+          saveGymLocks(cur);
+          applyGymLocks();
+        });
+      }
+      const locked = !!locks[stat];
+      toggle.textContent = locked ? `🔒 ${statCap} locked` : `🔓 Lock ${statCap}`;
+      setTitle(toggle, locked
+        ? `Train is disabled here until you unlock it. This never trains or clicks anything for you -- it only blocks your own click.`
+        : `Disable the Train button here, so ${statCap} can't be trained by a stray click. Never clicks it for you either way.`);
+      toggle.classList.toggle('locked', locked);
+      btn.disabled = locked;
+      btn.classList.toggle('msx-train-locked', locked);
+    });
   }
 
   // ─── "Script data" checklist (top of the sidebar) ─────────────────────────
@@ -2725,6 +2779,7 @@
       readEvents();
       readEventsFromApi();
       readGym();
+      applyGymLocks();
       readTraining();
       if (isCrimesPage() && document.querySelector('.ladders article.rung')) {
         const data = readAll();
