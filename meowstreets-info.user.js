@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.8
+// @version      0.15.9
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -265,13 +265,15 @@
       // own data to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/
       // Bandages/Vet discharge note at exactly their store prices; `inventory`'s own item ids confirm the rest,
       // e.g. "jacket"/"baton"/"catnip"/"collar"). Gear (weapons/armor) is added the same way.
-      // `sellPrice` (what Whiskers & Co. pays you for it) has only ever been seen on crime-drop collectibles
-      // ("Lucky fish bone", "Dockside pearl") -- never on anything with a `price` (buyable tools, consumables,
-      // gear), which suggests Whiskers & Co. only buys back loot, not things it also sells you. Left as
-      // whatever the game's own data says either way, not assumed.
+      // Sell-back: crime-drop collectibles ("Lucky fish bone", "Dockside pearl") use `sellPrice`; a game update
+      // on 2026-10-01 added genuine sell-back to regular store items too (seen so far on Premium tuna and
+      // Catnip tea specifically), under a *different* field name, `sellBack` -- both are checked. That same
+      // update also made those two items' own buy `price` swing hourly within a stated `priceRange`, around a
+      // `reference_price` (its exact midpoint in both cases seen), until `priceUntil` -- not a static catalog
+      // price for everything any more, just read fresh every time, same as before.
       out.storeItems = {};
-      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price, sellPrice: it.sellPrice }; });
-      (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice }; });
+      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack }; });
+      (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice != null ? g.sellPrice : g.sellBack }; });
       // Open marketplace listings only -- what you could actually buy right now. `seller` is the same public
       // display name the Trading page itself already shows next to the listing, not private data.
       if (Array.isArray(raw.listings)) {
@@ -2704,9 +2706,10 @@
       'the same total it shows you when you click to buy. "Vs store" checks that total against Whiskers & Co.\'s ' +
       'own buy price; "Sells back for" is what Whiskers & Co. pays you for it if you already own one or buy this ' +
       'listing -- when that\'s more than the listing\'s total cost, buying it and selling it straight back is ' +
-      'instant profit, flagged below. Not every item has a store buy price (crime drops, for example) or a ' +
-      'confirmed sell-back price (only seen so far on crime-drop collectibles, never on anything Whiskers & Co. ' +
-      'also sells) -- those show a dash rather than a guess.</p>';
+      'instant profit, flagged below. A few items (Premium tuna and Catnip tea, so far) have their own buy ' +
+      'price swing hourly, so "Vs store" is only ever accurate as of this page load for those. Not every item ' +
+      'has a store buy price (crime drops, for example) or a confirmed sell-back price -- those show a dash ' +
+      'rather than a guess.</p>';
     h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers buy price</th>' +
       '<th>Vs store</th><th>Sells back for</th><th>Resell profit</th><th>Open listings</th></tr></thead><tbody>';
     rows.forEach((r) => {
