@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.4
+// @version      0.15.7
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -91,7 +91,7 @@
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
         storeItems: {}, listings: [],
-        heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJob: null, crewJobRoles: null,
+        heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
         if (!c || !c.name) return;
@@ -134,9 +134,16 @@
       // failReturn, chance and energy/nerve cost are the game's own, real numbers for a heist launched right now.
       // "profit" is the average per-cat profit on success, confirmed against the user's own completed heist
       // (stake + profit matched the average of the real per-member payouts exactly).
+      // bands[].minLevel is the real minimum player level per heist tier (heistQuote.targets itself is already
+      // filtered to what this player can see, so it never says this directly) -- matched by `tier` below.
+      const heistMinLevelByTier = {};
+      if (raw.heistRules && Array.isArray(raw.heistRules.bands)) {
+        raw.heistRules.bands.forEach((b) => { if (b && b.tier != null) heistMinLevelByTier[b.tier] = b.minLevel; });
+      }
       if (raw.heistQuote && Array.isArray(raw.heistQuote.targets)) {
         out.heists = raw.heistQuote.targets.map((t) => ({
-          name: t.name, short: t.short, badge: t.badge, stake: t.stake, profit: t.profit, failReturn: t.failReturn,
+          name: t.name, short: t.short, badge: t.badge, tier: t.tier, minLevel: heistMinLevelByTier[t.tier] != null ? heistMinLevelByTier[t.tier] : null,
+          stake: t.stake, profit: t.profit, failReturn: t.failReturn,
           chance: t.baseChance, maxChance: t.maxChance, bestChance: t.bestChance, duration: t.duration,
           minMembers: t.minMembers, energy: t.energy, nerve: t.nerve, kitCost: t.kitCost,
         }));
@@ -149,7 +156,11 @@
         }));
       }
       if (raw.heistRules) out.heistXp = { success: raw.heistRules.successXp, fail: raw.heistRules.failureXp };
-      // The crew job / heist you are actually in right now, not just the reference lists above.
+      // The crew jobs / heists you are actually in right now, not just the reference lists above. A player can
+      // be a member of more than one at once (e.g. already running one job while a seat is reserved in a second
+      // one still recruiting), so these are arrays, not a single job -- the Discord panel below lets you switch
+      // between them. `minLevel` is looked up by matching this instance's own tier/name against the reference
+      // list above, since the live job/heist entry itself never states its own level requirement directly.
       // Crew job: `status: "running"` plus `mine: true` is now confirmed real data (checked against 6 live
       // captures of the same in-progress job -- always exactly one match, always the same id `activeJobId`
       // already pointed at), so that is the primary signal; matching by `activeJobId` is kept as a fallback in
@@ -158,31 +169,56 @@
       // to work with before the job actually launches; the sidebar pill still only shows once there's an end
       // time (its own check on `endsAt`, unchanged).
       if (Array.isArray(raw.crewJobs)) {
-        const mine = raw.crewJobs.find((x) => x && x.mine && (x.status === 'running' || x.status === 'planning'))
-          || (raw.activeJobId != null ? raw.crewJobs.find((x) => x && x.id === raw.activeJobId) : null);
-        if (mine) {
-          out.activeCrewJob = { name: mine.tierName || mine.name || null, endsAt: mine.ends_at || null };
-          out.myCrewJob = {
-            name: mine.tierName || mine.name || null, tier: mine.tier, status: mine.status, endsAt: mine.ends_at || null,
+        let mineJobs = raw.crewJobs.filter((x) => x && x.mine && (x.status === 'running' || x.status === 'planning'));
+        if (!mineJobs.length && raw.activeJobId != null) {
+          const byId = raw.crewJobs.find((x) => x && x.id === raw.activeJobId);
+          if (byId) mineJobs = [byId];
+        }
+        out.myCrewJobs = mineJobs.map((mine) => {
+          const name = mine.tierName || mine.name || null;
+          const tierDef = (raw.crewJobTiers || []).find((t) => t && t.name === name) || (raw.crewJobTiers || []).find((t) => t && t.tier === mine.tier);
+          return {
+            id: mine.id, name, tier: mine.tier, minLevel: tierDef ? tierDef.level : null, status: mine.status, endsAt: mine.ends_at || null,
             roles: Array.isArray(mine.roles) ? mine.roles.slice() : [],
             members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready })),
             minMembers: mine.minMembers, maxMembers: mine.maxMembers,
             cut: mine.cut, take: mine.take, respect: mine.respectReward, nerve: mine.nerve, stake: mine.stake,
             chance: mine.chance != null ? mine.chance : mine.previewChance,
           };
-        }
+        });
+        // The soonest-ending running job drives the sidebar pill (unchanged behaviour from when there was only
+        // ever one job to consider); a job still only planning has no end time to show there yet.
+        const withEnd = out.myCrewJobs.filter((j) => j.endsAt).sort((a, b) => a.endsAt - b.endsAt);
+        if (withEnd.length) out.activeCrewJob = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
       }
       // Role -> {title, stat}, the game's own data (crewJobRoles) -- which stat a seat actually uses, not a guess.
       if (raw.crewJobRoles && typeof raw.crewJobRoles === 'object') {
         out.crewJobRoles = {};
         Object.entries(raw.crewJobRoles).forEach(([k, v]) => { if (v) out.crewJobRoles[k] = { title: v.title || k, stat: v.stat || null }; });
       }
-      // Heist: no "running"-equivalent status or `mine` flag has been seen yet -- every real capture so far
-      // shows only "completed"/"cancelled"/"recruiting" -- so `activeHeistId` matched against `heists` by id is
-      // still the only confirmed way to find the one underway.
-      if (raw.activeHeistId != null && Array.isArray(raw.heists)) {
-        const h = raw.heists.find((x) => x && x.id === raw.activeHeistId);
-        if (h) out.activeHeist = { name: h.targetName || h.name || null, endsAt: h.ends_at || null };
+      // Heist: `status: "running"` is now confirmed real data too (seen directly in a live capture, correcting
+      // an earlier note here that said it never had been) -- matched against this account's own id, since
+      // heists carry no `mine` flag the way crew jobs do. The exact word used while a heist is still recruiting
+      // (as opposed to running/completed/cancelled, the three confirmed so far) has never actually been seen,
+      // so "anything not finished yet" is matched rather than hardcoding "running" alone -- the same
+      // not-yet-decided spirit as crew jobs' own "running" + "planning". `activeHeistId` is kept as a fallback
+      // for the one case that can't rely on membership matching at all: a brand new heist with no members yet.
+      const myId = raw.player && raw.player.id;
+      if (Array.isArray(raw.heists)) {
+        let mineHeists = raw.heists.filter((h) => h && h.status !== 'completed' && h.status !== 'cancelled' &&
+          Array.isArray(h.members) && h.members.some((m) => m && m.user_id === myId));
+        if (!mineHeists.length && raw.activeHeistId != null) {
+          const byId = raw.heists.find((x) => x && x.id === raw.activeHeistId);
+          if (byId) mineHeists = [byId];
+        }
+        out.myHeists = mineHeists.map((h) => ({
+          id: h.id, name: h.targetName || h.name || null, tier: h.tier, minLevel: heistMinLevelByTier[h.tier] != null ? heistMinLevelByTier[h.tier] : null,
+          status: h.status, endsAt: h.ends_at || null, chance: h.chance, stake: h.stake, profit: h.profit, failReturn: h.failReturn,
+          minMembers: h.minMembers, maxMembers: h.maxMembers, energy: h.energy, nerve: h.nerve,
+          members: (h.members || []).map((m) => ({ role: m.role, name: m.name })),
+        }));
+        const withEnd = out.myHeists.filter((h) => h.endsAt).sort((a, b) => a.endsAt - b.endsAt);
+        if (withEnd.length) out.activeHeist = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
       }
       if (raw.companion && typeof raw.companion === 'object') {
         const co = raw.companion;
@@ -224,15 +260,18 @@
         });
         out.education = { eduCrimePoints, coursesTaken, eduLandsAt };
       }
-      // Whiskers & Co.'s own price for every item, keyed by the game's own item id (the same id that a
-      // trading listing's `item` field uses -- confirmed by matching real listings in the user's own data
-      // to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/Bandages/
-      // Vet discharge note at exactly their store prices). Gear (weapons/armor) is added the same way, since
-      // it uses the same `id`/`name`/`price` shape. Not every tradeable item has a store price at all (crime
-      // drops like "fishbone"/"pearl" are never sold by Whiskers & Co.) -- those are simply left out here.
+      // Whiskers & Co.'s own buy price and sell-back price for every item, keyed by the game's own item id (the
+      // same id that a trading listing's `item` field uses -- confirmed by matching real listings in the user's
+      // own data to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/
+      // Bandages/Vet discharge note at exactly their store prices; `inventory`'s own item ids confirm the rest,
+      // e.g. "jacket"/"baton"/"catnip"/"collar"). Gear (weapons/armor) is added the same way.
+      // `sellPrice` (what Whiskers & Co. pays you for it) has only ever been seen on crime-drop collectibles
+      // ("Lucky fish bone", "Dockside pearl") -- never on anything with a `price` (buyable tools, consumables,
+      // gear), which suggests Whiskers & Co. only buys back loot, not things it also sells you. Left as
+      // whatever the game's own data says either way, not assumed.
       out.storeItems = {};
-      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price }; });
-      (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price }; });
+      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price, sellPrice: it.sellPrice }; });
+      (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice }; });
       // Open marketplace listings only -- what you could actually buy right now. `seller` is the same public
       // display name the Trading page itself already shows next to the listing, not private data.
       if (Array.isArray(raw.listings)) {
@@ -507,20 +546,25 @@
       .msx-stock .msx-moves b.up { color:var(--ms-lime, #b4df87); }
       .msx-stock .msx-moves b.down { color:var(--ms-red, #eb6561); }
       .msx-stock .msx-moves i { font-style:normal; opacity:.7; }
-      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
+      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
       #msx-invest summary { cursor:pointer; font-size:16px; font-weight:700; }
-      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
+      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-myheist h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
       #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
-      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
+      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note, #msx-myheist .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
       #msx-mycrewjob .msx-mycrewjob-seats { margin:8px 0; display:flex; flex-direction:column; gap:2px; }
       #msx-mycrewjob .msx-mycrewjob-seats .open { color:var(--ms-gold, #e9c46a); }
-      #msx-mycrewjob textarea { width:100%; min-height:160px; margin:10px 0; padding:10px 12px; border-radius:8px; resize:vertical;
+      #msx-mycrewjob .msx-jobtabs, #msx-myheist .msx-jobtabs { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
+      #msx-mycrewjob .msx-jobtab, #msx-myheist .msx-jobtab { padding:4px 10px; border-radius:999px; cursor:pointer; font-size:12.5px;
+        color:var(--ms-smoke, #8d9289); background:rgba(0,0,0,.2); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-mycrewjob .msx-jobtab.active, #msx-myheist .msx-jobtab.active { color:var(--ms-bone, #e7ede1); border-color:var(--ms-lime, #b4df87); background:rgba(180,223,135,.12); }
+      #msx-mycrewjob .msx-jobtab:hover, #msx-myheist .msx-jobtab:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-mycrewjob textarea, #msx-myheist textarea { width:100%; min-height:160px; margin:10px 0; padding:10px 12px; border-radius:8px; resize:vertical;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.35); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3));
         font-family:inherit; font-size:12.5px; line-height:1.5; white-space:pre-wrap; }
-      #msx-mycrewjob button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
+      #msx-mycrewjob button, #msx-myheist button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      #msx-mycrewjob button:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-mycrewjob button:hover, #msx-myheist button:hover { border-color:var(--ms-lime, #b4df87); }
       #msx-invest .msx-inv-warn { margin:8px 0; color:var(--ms-gold, #e9c46a); }
       #msx-invest .msx-inv-warn ul { margin:4px 0 0; padding-left:20px; }
       #msx-invest .msx-inv-grid { display:flex; flex-wrap:wrap; gap:10px; margin:8px 0; }
@@ -1426,7 +1470,7 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
     clone.querySelectorAll('div, p, li, h1, h2, h3, h4, tr, dt, dd, article, section, br').forEach((n) => n.appendChild(document.createTextNode('\n')));
     return clone.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, cap);
   }
@@ -2336,7 +2380,8 @@
     return false;
   }
 
-  function buildCrewJobMessage(job, roles, crewName) {
+  function buildCrewJobMessage(job, crewName) {
+    const roles = apiState && apiState.crewJobRoles;
     const title = job.name || 'Crew job';
     const filled = job.members || [];
     const seatsTotal = job.maxMembers || filled.length;
@@ -2344,6 +2389,7 @@
     const roleTitle = (key) => (roles && roles[key] && roles[key].title) || key || 'Unknown role';
     const lines = [];
     lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${job.tier ? ` (tier ${job.tier})` : ''}`);
+    if (job.minLevel != null) lines.push(`🔒 Level ${job.minLevel}+`);
     if (job.status === 'planning') {
       lines.push(`Recruiting — ${filled.length}/${seatsTotal} seats filled${job.minMembers ? `, ${job.minMembers} minimum to launch` : ''}`);
     } else {
@@ -2381,30 +2427,119 @@
     return lines.join('\n');
   }
 
-  function ensureMyCrewJobPanel() {
-    if (location.pathname.replace(/\/+$/, '') !== '/crew') { document.getElementById('msx-mycrewjob')?.remove(); return; }
-    const job = apiState && apiState.myCrewJob;
-    if (!job) { document.getElementById('msx-mycrewjob')?.remove(); return; }
+  // Same idea as the crew job message, but for a heist you're actually in. Heists carry no role->stat lookup
+  // the way crew jobs do (checked -- there's no `heistRoles` anywhere in the game's own data), so an open seat
+  // just says how many are left, not what it wants.
+  function buildHeistMessage(heist, crewName) {
+    const title = heist.name || 'Heist';
+    const filled = heist.members || [];
+    const seatsTotal = heist.maxMembers || filled.length;
+    const openCount = Math.max(0, seatsTotal - filled.length);
+    const lines = [];
+    lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${heist.tier ? ` (tier ${heist.tier})` : ''}`);
+    if (heist.minLevel != null) lines.push(`🔒 Level ${heist.minLevel}+`);
+    if (heist.status !== 'running') {
+      lines.push(`Recruiting — ${filled.length}/${seatsTotal} in the clowder${heist.minMembers ? `, ${heist.minMembers} minimum to launch` : ''}`);
+    } else {
+      const remain = heist.endsAt ? heist.endsAt - Date.now() : null;
+      lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
+    }
+    if (filled.length) {
+      lines.push('', '✅ In the clowder:');
+      filled.forEach((m) => lines.push(`• ${m.role || 'someone'}${m.name ? ` — ${m.name}` : ''}`));
+    }
+    if (heist.status !== 'running' && openCount > 0) lines.push('', `🟡 ${openCount} seat${openCount === 1 ? '' : 's'} open`);
+    const payoutBits = [];
+    if (heist.stake != null) payoutBits.push(`💰 ${money0(heist.stake)} stake`);
+    if (heist.profit != null) payoutBits.push(`+${money0(heist.profit)} profit each`);
+    if (heist.failReturn != null) payoutBits.push(`${money0(heist.failReturn)} back on a bust`);
+    const oddsBits = [];
+    if (heist.chance != null) oddsBits.push(`🎲 ${heist.chance}% chance`);
+    if (heist.energy != null) oddsBits.push(`${heist.energy} energy`);
+    if (heist.nerve != null) oddsBits.push(`${heist.nerve} nerve`);
+    if (payoutBits.length || oddsBits.length) lines.push('');
+    if (payoutBits.length) lines.push(payoutBits.join(' · '));
+    if (oddsBits.length) lines.push(oddsBits.join(' · '));
+    return lines.join('\n');
+  }
+
+  // Shared by the crew job and heist "Copy for Discord" panels: when there's more than one you're in at once
+  // (e.g. one already underway while a seat is reserved in a second, still-recruiting one), a row of tabs lets
+  // you switch which one's message is shown -- the panel never has to guess which one you meant to post.
+  // The click handler reads `panel.__msxJobs` fresh every time rather than closing over it, so a tab clicked
+  // after the underlying data has moved on (a new member joined, the chance changed, ...) never posts stale text.
+  function ensureJobMessagesPanel(panelId, pathMatch, anchorId, heading, note, jobs, buildMessage, crewName) {
+    if (location.pathname.replace(/\/+$/, '') !== pathMatch) { document.getElementById(panelId)?.remove(); return; }
+    if (!jobs || !jobs.length) { document.getElementById(panelId)?.remove(); return; }
     const host = document.querySelector('.main-content') || document.querySelector('main');
     if (!host) return;
-    let panel = document.getElementById('msx-mycrewjob');
+    let panel = document.getElementById(panelId);
+    const renderSelected = () => {
+      const js = panel.__msxJobs || [];
+      if (!js.length) return;
+      let selected = panel.dataset.selectedId;
+      if (!js.some((j) => String(j.id) === selected)) selected = String(js[0].id);
+      panel.dataset.selectedId = selected;
+      panel.querySelectorAll('.msx-jobtab').forEach((btn) => btn.classList.toggle('active', btn.dataset.id === selected));
+      const job = js.find((j) => String(j.id) === selected) || js[0];
+      const msg = panel.__msxBuildMessage(job, panel.__msxCrewName);
+      const ta = panel.querySelector('textarea');
+      if (ta.value !== msg) ta.value = msg;
+    };
     if (!panel) {
       panel = document.createElement('section');
-      panel.id = 'msx-mycrewjob';
-      panel.innerHTML = '<h2>Your crew job</h2><p class="msx-inv-note">Ready to post in Discord: who has a seat, which seats are still open (and what stat they want), and the payout.</p>' +
-        '<textarea readonly></textarea><button type="button">📋 Copy for Discord</button>';
-      panel.querySelector('button').addEventListener('click', () => {
+      panel.id = panelId;
+      panel.innerHTML = `<h2>${heading}</h2><p class="msx-inv-note">${note}</p><div class="msx-jobtabs"></div><textarea readonly></textarea><button type="button" class="msx-copybtn">📋 Copy for Discord</button>`;
+      panel.querySelector('.msx-copybtn').addEventListener('click', () => {
         const ta = panel.querySelector('textarea');
         const ok = copyToClipboard(ta.value);
         if (!ok) { ta.focus(); ta.select(); }
         toast(ok ? 'Copied — paste it in Discord.' : 'Couldn’t copy automatically — the text is selected, press Ctrl+C.');
       });
-      const anchor = document.getElementById('msx-crewjobs');
+      panel.querySelector('.msx-jobtabs').addEventListener('click', (e) => {
+        const btn = e.target.closest('.msx-jobtab');
+        if (!btn) return;
+        panel.dataset.selectedId = btn.dataset.id;
+        renderSelected();
+      });
+      const anchor = document.getElementById(anchorId);
       if (anchor) host.insertBefore(panel, anchor); else host.appendChild(panel);
     }
-    const msg = buildCrewJobMessage(job, apiState.crewJobRoles, apiState.crew && apiState.crew.name);
-    const ta = panel.querySelector('textarea');
-    if (ta.value !== msg) ta.value = msg;
+    panel.__msxJobs = jobs;
+    panel.__msxBuildMessage = buildMessage;
+    panel.__msxCrewName = crewName;
+    // The heading and note both depend on how many jobs there are right now (singular/plural, the "click a
+    // tab" hint) -- a second one can start recruiting after the panel already exists, so these are kept live
+    // rather than only ever set at creation.
+    const h2 = panel.querySelector('h2');
+    if (h2 && h2.textContent !== heading) h2.textContent = heading;
+    const noteEl = panel.querySelector('.msx-inv-note');
+    if (noteEl && noteEl.innerHTML !== note) noteEl.innerHTML = note;
+    const tabsEl = panel.querySelector('.msx-jobtabs');
+    let selected = panel.dataset.selectedId;
+    if (!jobs.some((j) => String(j.id) === selected)) selected = String(jobs[0].id);
+    panel.dataset.selectedId = selected;
+    const tabsHtml = jobs.length > 1
+      ? jobs.map((j) => `<button type="button" class="msx-jobtab${String(j.id) === selected ? ' active' : ''}" data-id="${escHtml(String(j.id))}">${escHtml(j.name || 'Job')}</button>`).join('')
+      : '';
+    if (tabsEl.innerHTML !== tabsHtml) tabsEl.innerHTML = tabsHtml;
+    renderSelected();
+  }
+
+  function ensureMyCrewJobPanel() {
+    const jobs = (apiState && apiState.myCrewJobs) || [];
+    ensureJobMessagesPanel('msx-mycrewjob', '/crew', 'msx-crewjobs', 'Your crew job' + (jobs.length > 1 ? 's' : ''),
+      'Ready to post in Discord: who has a seat, which seats are still open (and what stat they want), and the payout.' +
+      (jobs.length > 1 ? ' Click a job\'s name above to switch which one\'s message is shown.' : ''),
+      jobs, buildCrewJobMessage, apiState && apiState.crew && apiState.crew.name);
+  }
+
+  function ensureMyHeistPanel() {
+    const jobs = (apiState && apiState.myHeists) || [];
+    ensureJobMessagesPanel('msx-myheist', '/heists', 'msx-heists', 'Your heist' + (jobs.length > 1 ? 's' : ''),
+      'Ready to post in Discord: who\'s in the clowder, how many seats are open, and the payout.' +
+      (jobs.length > 1 ? ' Click a heist\'s name above to switch which one\'s message is shown.' : ''),
+      jobs, buildHeistMessage, apiState && apiState.crew && apiState.crew.name);
   }
 
   function ensureHeistsPanel() {
@@ -2465,8 +2600,7 @@
   }
 
   function ensureTradingPanel() {
-    // Best guess at the URL for the Trading page (not yet confirmed on the live site) -- matches every other
-    // page's own name (/crimes, /crew, /heists, ...). If this is wrong the panel just never shows; harmless.
+    // Confirmed on the live site (2026-09-30): the Trading page really is at /trading.
     if (location.pathname.replace(/\/+$/, '') !== '/trading') { document.getElementById('msx-trading')?.remove(); return; }
     const host = document.querySelector('.main-content') || document.querySelector('main');
     if (!host) return;
@@ -2475,7 +2609,8 @@
       panel = document.createElement('section');
       panel.id = 'msx-trading';
       panel.innerHTML = '<h2>Listed vs Whiskers & Co. price</h2><div class="msx-calc-body"></div>';
-      host.appendChild(panel);
+      // At the top of the page (user request), not appended after everything else on it.
+      host.insertBefore(panel, host.firstChild);
     }
     const body = panel.querySelector('.msx-calc-body');
     const listings = apiState?.listings || [];
@@ -2497,26 +2632,41 @@
     const rows = [...cheapest.entries()].map(([id, l]) => {
       const s = store[id];
       const total = l.price + taxOn(l.price);
-      return { name: s ? s.name : id, storePrice: s ? s.price : null, listedPrice: l.price, total, seller: l.seller, count: counts.get(id) };
+      const buyPrice = s ? s.price : null;
+      const sellPrice = s ? s.sellPrice : null;
+      // Positive = free money (buy the listing, sell it straight back to Whiskers & Co. for more than it cost).
+      const sellProfit = sellPrice != null ? sellPrice - total : null;
+      // Negative = cheaper than the store; positive = the store is the better buy.
+      const buyDiff = buyPrice != null ? total - buyPrice : null;
+      return { name: s ? s.name : id, buyPrice, sellPrice, listedPrice: l.price, total, seller: l.seller, count: counts.get(id), sellProfit, buyDiff };
     }).sort((a, b) => {
-      // Best bargains first (total cost furthest below the store price); items with no known store price last.
-      const da = a.storePrice != null ? a.total - a.storePrice : Infinity;
-      const db = b.storePrice != null ? b.total - b.storePrice : Infinity;
-      return da - db;
+      // Best opportunity first, whichever kind it is: the biggest sell-back profit, or failing that the
+      // biggest discount off the store's buy price. Items with neither sit at the bottom.
+      const opportunity = (r) => Math.max(r.sellProfit != null ? r.sellProfit : -Infinity, r.buyDiff != null ? -r.buyDiff : -Infinity);
+      return opportunity(b) - opportunity(a);
     });
-    let h = '<p class="msx-inv-note">The cheapest currently-open listing for each item, against Whiskers & Co.\'s ' +
-      'own price for it. "With tax" is what buying it would actually cost: the listed price plus the Trading ' +
-      'page\'s own stated 2% buyer\'s tax (rounded up), the same total it shows you when you click to buy. ' +
-      'Items Whiskers & Co. never sells (crime drops, for example) have no store price to compare against.</p>';
-    h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers price</th><th>Vs store</th><th>Open listings</th></tr></thead><tbody>';
+    let h = '<p class="msx-inv-note">The cheapest currently-open listing for each item. "With tax" is what buying ' +
+      'it would actually cost: the listed price plus the Trading page\'s own stated 2% buyer\'s tax (rounded up), ' +
+      'the same total it shows you when you click to buy. "Vs store" checks that total against Whiskers & Co.\'s ' +
+      'own buy price; "Sells back for" is what Whiskers & Co. pays you for it if you already own one or buy this ' +
+      'listing -- when that\'s more than the listing\'s total cost, buying it and selling it straight back is ' +
+      'instant profit, flagged below. Not every item has a store buy price (crime drops, for example) or a ' +
+      'confirmed sell-back price (only seen so far on crime-drop collectibles, never on anything Whiskers & Co. ' +
+      'also sells) -- those show a dash rather than a guess.</p>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers buy price</th>' +
+      '<th>Vs store</th><th>Sells back for</th><th>Resell profit</th><th>Open listings</th></tr></thead><tbody>';
     rows.forEach((r) => {
       let vs = '<span class="msx-unk">no store price</span>';
-      if (r.storePrice != null) {
-        const diff = r.total - r.storePrice;
-        vs = diff < 0 ? `<b>${signed0(diff)} cheaper</b>` : diff > 0 ? `${signed0(diff)} pricier -- buy from the store instead` : 'same as the store';
+      if (r.buyPrice != null) {
+        vs = r.buyDiff < 0 ? `<b>${signed0(r.buyDiff)} cheaper</b>` : r.buyDiff > 0 ? `${signed0(r.buyDiff)} pricier -- buy from the store instead` : 'same as the store';
+      }
+      let profit = '—';
+      if (r.sellProfit != null) {
+        profit = r.sellProfit > 0 ? `<b>${signed0(r.sellProfit)} profit -- buy &amp; sell back</b>` : signed0(r.sellProfit);
       }
       h += `<tr><td>${escHtml(r.name)}</td><td>${money0(r.listedPrice)}${r.seller ? ` <small>(${escHtml(r.seller)})</small>` : ''}</td>` +
-        `<td>${money0(r.total)}</td><td>${r.storePrice != null ? money0(r.storePrice) : '—'}</td><td>${vs}</td><td>${r.count}</td></tr>`;
+        `<td>${money0(r.total)}</td><td>${r.buyPrice != null ? money0(r.buyPrice) : '—'}</td><td>${vs}</td>` +
+        `<td>${r.sellPrice != null ? money0(r.sellPrice) : '—'}</td><td>${profit}</td><td>${r.count}</td></tr>`;
     });
     h += '</tbody></table>';
     body.innerHTML = h;
@@ -2593,6 +2743,7 @@
       updatePvpPill();
       updateConsumablesPill();
       ensureMyCrewJobPanel();
+      ensureMyHeistPanel();
       ensureHeistsPanel();
       ensureCrewJobsPanel();
       ensureTradingPanel();
@@ -2617,7 +2768,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-trading');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading');
         if (muts.every(own)) return;
         schedule();
       });
