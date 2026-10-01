@@ -4,6 +4,10 @@
 // @version      0.15.4
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
+// @homepageURL  https://github.com/tcstrayben/Meowstreetscript
+// @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
+// @updateURL    https://raw.githubusercontent.com/tcstrayben/Meowstreetscript/main/meowstreets-info.user.js
+// @downloadURL  https://raw.githubusercontent.com/tcstrayben/Meowstreetscript/main/meowstreets-info.user.js
 // @match        https://meowstreets.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
