@@ -1,13 +1,9 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.15.1
+// @version      0.15.4
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
-// @homepageURL  https://github.com/tcstrayben/Meowstreetscript
-// @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
-// @updateURL    https://raw.githubusercontent.com/tcstrayben/Meowstreetscript/main/meowstreets-info.user.js
-// @downloadURL  https://raw.githubusercontent.com/tcstrayben/Meowstreetscript/main/meowstreets-info.user.js
 // @match        https://meowstreets.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
@@ -90,6 +86,7 @@
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
+        storeItems: {}, listings: [],
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJob: null, crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
@@ -222,6 +219,22 @@
           }
         });
         out.education = { eduCrimePoints, coursesTaken, eduLandsAt };
+      }
+      // Whiskers & Co.'s own price for every item, keyed by the game's own item id (the same id that a
+      // trading listing's `item` field uses -- confirmed by matching real listings in the user's own data
+      // to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/Bandages/
+      // Vet discharge note at exactly their store prices). Gear (weapons/armor) is added the same way, since
+      // it uses the same `id`/`name`/`price` shape. Not every tradeable item has a store price at all (crime
+      // drops like "fishbone"/"pearl" are never sold by Whiskers & Co.) -- those are simply left out here.
+      out.storeItems = {};
+      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price }; });
+      (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price }; });
+      // Open marketplace listings only -- what you could actually buy right now. `seller` is the same public
+      // display name the Trading page itself already shows next to the listing, not private data.
+      if (Array.isArray(raw.listings)) {
+        out.listings = raw.listings
+          .filter((l) => l && l.status === 'open' && l.item && Number.isFinite(l.price))
+          .map((l) => ({ item: l.item, quantity: l.quantity, price: l.price, seller: l.seller || null }));
       }
       return out;
     } catch (e) { return null; }
@@ -490,12 +503,12 @@
       .msx-stock .msx-moves b.up { color:var(--ms-lime, #b4df87); }
       .msx-stock .msx-moves b.down { color:var(--ms-red, #eb6561); }
       .msx-stock .msx-moves i { font-style:normal; opacity:.7; }
-      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
+      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
       #msx-invest summary { cursor:pointer; font-size:16px; font-weight:700; }
-      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2 { margin:0; font-size:16px; font-weight:700; }
+      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
       #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
-      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
+      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
       #msx-mycrewjob .msx-mycrewjob-seats { margin:8px 0; display:flex; flex-direction:column; gap:2px; }
       #msx-mycrewjob .msx-mycrewjob-seats .open { color:var(--ms-gold, #e9c46a); }
       #msx-mycrewjob textarea { width:100%; min-height:160px; margin:10px 0; padding:10px 12px; border-radius:8px; resize:vertical;
@@ -526,11 +539,13 @@
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-invest button:hover { border-color:var(--ms-lime, #b4df87); }
       #msx-invest .msx-inv-go { border-color:var(--ms-lime, #b4df87); }
-      #msx-invest .msx-inv-table, #msx-heists .msx-inv-table, #msx-crewjobs .msx-inv-table { border-collapse:collapse; margin:10px 0; display:block; overflow-x:auto; }
+      #msx-invest .msx-inv-table, #msx-heists .msx-inv-table, #msx-crewjobs .msx-inv-table, #msx-trading .msx-inv-table { border-collapse:collapse; margin:10px 0; display:block; overflow-x:auto; }
       #msx-invest .msx-inv-table th, #msx-invest .msx-inv-table td,
       #msx-heists .msx-inv-table th, #msx-heists .msx-inv-table td,
-      #msx-crewjobs .msx-inv-table th, #msx-crewjobs .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
-      #msx-heists small, #msx-crewjobs small { color:var(--ms-smoke, #8d9289); }
+      #msx-crewjobs .msx-inv-table th, #msx-crewjobs .msx-inv-table td,
+      #msx-trading .msx-inv-table th, #msx-trading .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
+      #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
+      #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -1129,8 +1144,8 @@
     if (chainState) {
       const ageMs = Date.now() - (chainState.syncedAt || 0);
       stale = ageMs > CHAIN_STALE_MS;
-      txt.parentNode.title = `Time until your crew chain dies. Last synced from the Crew page ${Math.floor(ageMs / 60000)} min ago` +
-        (stale ? ' (stale: open the Crew page to refresh; other crew members may have extended it)' : '.');
+      setTitle(txt.parentNode, `Time until your crew chain dies. Last synced from the Crew page ${Math.floor(ageMs / 60000)} min ago` +
+        (stale ? ' (stale: open the Crew page to refresh; other crew members may have extended it)' : '.'));
       const remain = chainState.expires - Date.now();
       if (remain <= 0) {
         out = 'Crew chain: check Crew page';
@@ -1155,6 +1170,16 @@
     return h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
   }
 
+  // A wall-clock time ("3:42 PM"), for tooltips below: unlike a countdown, it doesn't change every second, so it
+  // never fights with the browser's own hover tooltip (which otherwise flickers each time the title attribute
+  // it's reading is touched, even when set to the exact same text).
+  const fmtTime = (ts) => new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' });
+
+  // Every pill below is redrawn once a second (for the live countdowns in their visible text), but a browser's
+  // native tooltip flickers if the element's `title` is written to at all while it's showing, even to an
+  // identical value -- so every title assignment on a per-second timer goes through here instead of `el.title =`.
+  function setTitle(el, text) { if (el.title !== text) el.title = text; }
+
   // ─── Your crew job right now (sidebar, every page) ─────────────────────────
   // Only known once the game's own data gives it an end time -- a job still recruiting members has none yet, so
   // it stays hidden until it actually launches. Lives inside the crew chain's own box (same shield icon, same
@@ -1171,7 +1196,7 @@
     }
     const remain = job.endsAt - Date.now();
     const text = remain > 0 ? fmtClock(remain) : 'done';
-    seg.title = `${job.name || 'Crew job'}: ${remain > 0 ? `done in ${text}` : 'ready to collect'}`;
+    setTitle(seg, `${job.name || 'Crew job'}: ${remain > 0 ? `finishes at ${fmtTime(job.endsAt)}` : 'ready to collect'}`);
     seg.classList.toggle('soon', remain <= 0);
     const html = `Crew Job: ${text}`;
     if (seg.innerHTML !== html) seg.innerHTML = html;
@@ -1197,7 +1222,7 @@
     }
     const remain = h.endsAt - Date.now();
     const text = remain > 0 ? fmtClock(remain) : 'done';
-    el.title = `${h.name || 'Heist'}: ${remain > 0 ? `results in ${text}` : 'results are in'}`;
+    setTitle(el, `${h.name || 'Heist'}: ${remain > 0 ? `results at ${fmtTime(h.endsAt)}` : 'results are in'}`);
     el.classList.toggle('soon', remain <= 0);
     const html = `${HEIST_ICON}${text}`;
     if (el.innerHTML !== html) el.innerHTML = html;
@@ -1218,7 +1243,7 @@
       el.innerHTML = `<span class="${className}-text"></span>`;
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
-    el.title = title;
+    setTitle(el, title);
     el.classList.toggle('soon', status.level === 'warn');
     el.classList.toggle('stale', status.level === 'bad');
     const txt = el.querySelector('.' + className + '-text');
@@ -1241,7 +1266,7 @@
     const name = co.name || 'Companion';
     let text, level, detail;
     if (co.overdue) { text = 'overdue'; level = 'bad'; detail = `${name}: care overdue`; }
-    else if (co.out && co.errandUntil > now) { text = `out ${fmtClock(co.errandUntil - now)}`; level = 'ok'; detail = `${name}: out, back in ${fmtClock(co.errandUntil - now)}`; }
+    else if (co.out && co.errandUntil > now) { text = `out ${fmtClock(co.errandUntil - now)}`; level = 'ok'; detail = `${name}: out, back at ${fmtTime(co.errandUntil)}`; }
     else if (co.hungry) { text = 'hungry'; level = 'warn'; detail = `${name}: hungry now`; }
     else {
       // mealAt/groomAt are two different, unrelated timers -- always say which one this is, so the pill never
@@ -1253,7 +1278,7 @@
       else {
         const soon = next.at - now <= 15 * 60 * 1000;
         text = `${next.label} ${fmtClock(next.at - now)}`; level = soon ? 'warn' : 'ok';
-        detail = `${name}: next ${next.label} in ${fmtClock(next.at - now)}`;
+        detail = `${name}: next ${next.label} at ${fmtTime(next.at)}`;
       }
     }
     if (!el) {
@@ -1263,7 +1288,7 @@
       el.className = 'msx-ticker msx-companion';
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
-    el.title = detail;
+    setTitle(el, detail);
     el.classList.toggle('soon', level === 'warn');
     el.classList.toggle('stale', level === 'bad');
     const html = `${CAT_ICON}${text}`;
@@ -1320,7 +1345,7 @@
       el.className = 'msx-ticker msx-consumable';
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
-    el.title = 'Whether Premium tuna and Catnip tea are off cooldown, from the game’s own data';
+    setTitle(el, 'Whether Premium tuna and Catnip tea are off cooldown, from the game’s own data');
     el.classList.toggle('soon', anyCapped);
     const html = bits.join('');
     if (el.innerHTML !== html) el.innerHTML = html;
@@ -2435,6 +2460,64 @@
     body.innerHTML = h;
   }
 
+  function ensureTradingPanel() {
+    // Best guess at the URL for the Trading page (not yet confirmed on the live site) -- matches every other
+    // page's own name (/crimes, /crew, /heists, ...). If this is wrong the panel just never shows; harmless.
+    if (location.pathname.replace(/\/+$/, '') !== '/trading') { document.getElementById('msx-trading')?.remove(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    let panel = document.getElementById('msx-trading');
+    if (!panel) {
+      panel = document.createElement('section');
+      panel.id = 'msx-trading';
+      panel.innerHTML = '<h2>Listed vs Whiskers & Co. price</h2><div class="msx-calc-body"></div>';
+      host.appendChild(panel);
+    }
+    const body = panel.querySelector('.msx-calc-body');
+    const listings = apiState?.listings || [];
+    const store = apiState?.storeItems || {};
+    if (!listings.length) { body.innerHTML = '<p class="msx-inv-note">No open listings read yet (open this page once it has loaded).</p>'; return; }
+    // Cheapest open listing per item, since that is the one worth comparing against the store.
+    const cheapest = new Map();
+    const counts = new Map();
+    listings.forEach((l) => {
+      counts.set(l.item, (counts.get(l.item) || 0) + 1);
+      const cur = cheapest.get(l.item);
+      if (!cur || l.price < cur.price) cheapest.set(l.item, l);
+    });
+    // The Trading page's own text states the buyer's tax exactly: "A buyer pays a 2% tax on top of the price."
+    // Rounding is up, not nearest -- confirmed against the user's own real trades (a $100 buy taxed exactly $2,
+    // a $105 buy taxed $3, which is only 2% rounded up, not down or to the nearest dollar).
+    const TRADE_TAX_RATE = 0.02;
+    const taxOn = (price) => Math.ceil(price * TRADE_TAX_RATE);
+    const rows = [...cheapest.entries()].map(([id, l]) => {
+      const s = store[id];
+      const total = l.price + taxOn(l.price);
+      return { name: s ? s.name : id, storePrice: s ? s.price : null, listedPrice: l.price, total, seller: l.seller, count: counts.get(id) };
+    }).sort((a, b) => {
+      // Best bargains first (total cost furthest below the store price); items with no known store price last.
+      const da = a.storePrice != null ? a.total - a.storePrice : Infinity;
+      const db = b.storePrice != null ? b.total - b.storePrice : Infinity;
+      return da - db;
+    });
+    let h = '<p class="msx-inv-note">The cheapest currently-open listing for each item, against Whiskers & Co.\'s ' +
+      'own price for it. "With tax" is what buying it would actually cost: the listed price plus the Trading ' +
+      'page\'s own stated 2% buyer\'s tax (rounded up), the same total it shows you when you click to buy. ' +
+      'Items Whiskers & Co. never sells (crime drops, for example) have no store price to compare against.</p>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers price</th><th>Vs store</th><th>Open listings</th></tr></thead><tbody>';
+    rows.forEach((r) => {
+      let vs = '<span class="msx-unk">no store price</span>';
+      if (r.storePrice != null) {
+        const diff = r.total - r.storePrice;
+        vs = diff < 0 ? `<b>${signed0(diff)} cheaper</b>` : diff > 0 ? `${signed0(diff)} pricier -- buy from the store instead` : 'same as the store';
+      }
+      h += `<tr><td>${escHtml(r.name)}</td><td>${money0(r.listedPrice)}${r.seller ? ` <small>(${escHtml(r.seller)})</small>` : ''}</td>` +
+        `<td>${money0(r.total)}</td><td>${r.storePrice != null ? money0(r.storePrice) : '—'}</td><td>${vs}</td><td>${r.count}</td></tr>`;
+    });
+    h += '</tbody></table>';
+    body.innerHTML = h;
+  }
+
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   function ensureAccountPanel() {
@@ -2508,6 +2591,7 @@
       ensureMyCrewJobPanel();
       ensureHeistsPanel();
       ensureCrewJobsPanel();
+      ensureTradingPanel();
       if (isStockPage() && document.querySelector('.watch-table')) {
         const stocks = readStocks();
         logStocks(stocks);
@@ -2529,7 +2613,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-trading');
         if (muts.every(own)) return;
         schedule();
       });

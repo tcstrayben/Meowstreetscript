@@ -12,6 +12,7 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 - **Heists & Crew pages:** exact XP/energy, XP/nerve, $/energy, $/nerve for every heist and every crew job tier.
 - **"Copy for Discord" (Crew page):** while you're actually in a crew job, a ready-to-paste message with who has a seat, which seats are open and what stat each wants, and the payout — one button copies it to your clipboard.
 - **Investment Tracker (Claw Street Ex):** tracks money put into and pulled out of crew stock investments, and what's actually been made.
+- **Trading page:** the cheapest currently-open listing for every item, next to Whiskers & Co.'s own price for it (tax included), so an underpriced listing — or an overpriced one not worth buying over the store — is obvious at a glance.
 - **Account page:** a settings panel with two switches for what gets recorded, and an Export data button.
 - **Records what you view:** each page you open is saved on your computer once it has settled (never account, payment or other players' pages, and never chat), plus a log of your Mews events (crime results, trades, heists, training and so on) so the game's real rates can be worked out. It never runs on a timer and never requests a page for you.
 - **Export:** a button that saves everything the script has logged to a `.json` file on your computer.
