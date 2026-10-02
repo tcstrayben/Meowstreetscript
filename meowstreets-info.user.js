@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.7
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
+// @version      0.18.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -11,8 +11,6 @@
 // @match        https://meowstreets.com/*
 // @grant        GM_getValue
 // @grant        GM_setValue
-// @grant        GM_download
-// @grant        GM_registerMenuCommand
 // @grant        unsafeWindow
 // @grant        GM_addValueChangeListener
 // @grant        GM_setClipboard
@@ -22,7 +20,7 @@
   'use strict';
 
   // Only ever run on https://meowstreets.com/... pages (crimes, merits, and so on). The @match line already
-  // limits this; the check is a second guard, and the scanner repeats it before reading anything.
+  // limits this; the check is a second guard.
   const SITE_ORIGIN = 'https://meowstreets.com';
   if (location.origin !== SITE_ORIGIN) return;
 
@@ -32,7 +30,7 @@
   // requests the page itself makes (its own /api/state call) for exact numbers, the same way it reads rendered
   // text -- see api-data-reference.md. Only specific known fields are ever kept; the rest (which includes your
   // email and other players' data) is discarded at once, never saved. Everything it records stays in this
-  // browser (Tampermonkey storage) until you press "Export data".
+  // browser (Tampermonkey storage) and is only used for what the script shows.
 
   // ─── Config ───────────────────────────────────────────────────────────────
   const REFRESH_DEBOUNCE_MS = 250; // wait for the React page to settle before redrawing
@@ -504,6 +502,7 @@
     if (!db) db = { version: 1, crimes: {}, masteryThresholds: {}, heatLog: [], playerLevels: [] };
     if (!db.stocks) db.stocks = {};
     if (!db.shopPrices) db.shopPrices = {};
+    delete db.pageScans; // page capture was removed in 0.18.0; drop any old captures from storage
     dbCache = db;
     return db;
   }
@@ -568,19 +567,6 @@
     });
 
     if (changed) { db.updated = now; saveDb(db); }
-  }
-
-  function exportDb() {
-    const db = loadDb();
-    const json = JSON.stringify({ ...db, events: loadEvents().events }, null, 2);
-    const url = URL.createObjectURL(new Blob([json], { type: 'application/json' }));
-    const name = 'meowstreets-data-' + new Date().toISOString().slice(0, 10) + '.json';
-    try {
-      GM_download({ url, name, saveAs: true, onload: () => URL.revokeObjectURL(url) });
-    } catch (e) {
-      const a = document.createElement('a');
-      a.href = url; a.download = name; a.click();
-    }
   }
 
   // ─── Drawing ──────────────────────────────────────────────────────────────
@@ -763,42 +749,12 @@
       .msx-ticker.stale .ms-icon { color:var(--ms-red, #eb6561); }
       .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
-      #msx-tools { position:fixed; right:0; top:50%; transform:translateY(-50%); z-index:9999; display:flex; flex-direction:row; align-items:center; }
-      #msx-tools .msx-tools-body { display:none; flex-direction:column; gap:6px; padding:8px; border-radius:10px 0 0 10px;
-        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); border-right:0; }
-      #msx-tools.open .msx-tools-body { display:flex; }
-      #msx-tools button { padding:6px 10px; border-radius:8px; border:1px solid var(--ms-line-strong, rgba(231,237,225,.3));
-        background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1); font-size:12px; cursor:pointer; opacity:.75; white-space:nowrap; }
-      #msx-tools button:hover { opacity:1; }
-      #msx-tools .msx-tools-toggle { width:22px; padding:10px 0; border-radius:8px 0 0 8px; border-right:0; font-size:11px; line-height:1;
-        writing-mode:vertical-rl; letter-spacing:.05em; }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
       #msx-toast.show { opacity:1; }
     `;
     document.head.appendChild(s);
-  }
-
-  function ensureExportButton() {
-    if (document.getElementById('msx-tools')) return;
-    const box = document.createElement('div');
-    box.id = 'msx-tools';
-    const body = document.createElement('div');
-    body.className = 'msx-tools-body';
-    const toggle = document.createElement('button');
-    toggle.type = 'button'; toggle.className = 'msx-tools-toggle'; toggle.textContent = 'MSX'; toggle.title = 'Show or hide the MeowStreets Extra Info tools';
-    toggle.addEventListener('click', () => box.classList.toggle('open'));
-    box.appendChild(body); box.appendChild(toggle);
-    const mk = (label, title, fn) => {
-      const b = document.createElement('button');
-      b.type = 'button'; b.textContent = label; b.title = title;
-      b.addEventListener('click', fn);
-      body.appendChild(b);
-    };
-    mk('Scan page', 'Read-only: record what this page stores or shows (storage names, endpoints, progress bars, timers, page text)', () => { scanPage(true).catch((e) => toast('Scan failed: ' + e)); });
-    mk('Export data', 'Save the logged MeowStreets data to a .json file', exportDb);
-    document.body.appendChild(box);
   }
 
   function clearDrawn() {
@@ -1147,7 +1103,7 @@
 
   // ─── Settings (kept on this computer, edited on the Account page) ─────────
   const SETTINGS_KEY = 'ms_settings_v1';
-  const DEFAULT_SETTINGS = { capture: true, events: true };
+  const DEFAULT_SETTINGS = { events: true };
   let settings = { ...DEFAULT_SETTINGS };
   try {
     const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
@@ -1632,70 +1588,7 @@
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
     updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
 
-  // ─── Page scanner: what does this page store or expose? ───────────────────
-  // Read-only. It looks at what the page already has (browser storage names, page globals, endpoints the page
-  // has called, progress bars, timers, the page text) and saves a summary per page into the exported data.
-  // It calls nothing. It runs by itself once when you open a page (after the page has settled) and again only if the
-  // page's content changes a lot (a tab opened, a list finished loading), and whenever you press "Scan page". It never
-  // runs on a timer, and it never visits or requests a page for you: it only reads the page you are already looking at.
-  // Sensitive-looking values (tokens, cookies, ids) are never saved, only their names. Chat is never read.
-  const SCAN_TEXT_CAP = 8000;
-  const MAX_SCANNED_PAGES = 40;
-  const SENSITIVE = /token|auth|session|jwt|pass|secret|key|cookie|email|csrf|posthog|^ph_|distinct|user|uid/i;
-
-  function scanStorage(st) {
-    const out = [];
-    try {
-      for (let i = 0; i < st.length; i++) {
-        const k = st.key(i);
-        const v = st.getItem(k) || '';
-        out.push({ key: k, length: v.length, value: SENSITIVE.test(k) ? '[not saved: sensitive-looking name]' : v.slice(0, 400) });
-      }
-    } catch (e) { /* storage blocked */ }
-    return out;
-  }
-
-  function scanGlobals() {
-    const out = [];
-    try {
-      const frame = document.createElement('iframe');
-      frame.style.display = 'none';
-      document.body.appendChild(frame);
-      const base = new Set(Object.getOwnPropertyNames(frame.contentWindow));
-      frame.remove();
-      Object.keys(pageWin).forEach((k) => {
-        if (base.has(k) || /^(webkit|on|__ph|posthog)/i.test(k)) return;
-        try {
-          const v = pageWin[k];
-          const t = typeof v;
-          let info = t;
-          if (v && t === 'object') info = Array.isArray(v) ? `array[${v.length}]` : `object{${Object.keys(v).slice(0, 15).join(', ')}}`;
-          else if (t === 'string' || t === 'number' || t === 'boolean') info = SENSITIVE.test(k) ? t : `${t}: ${String(v).slice(0, 80)}`;
-          out.push({ name: k, info });
-        } catch (e) { out.push({ name: k, info: 'unreadable' }); }
-      });
-    } catch (e) { /* ignore */ }
-    return out.slice(0, 80);
-  }
-
-  function scanEndpoints() {
-    const map = {};
-    try {
-      performance.getEntriesByType('resource').forEach((e) => {
-        if (!/^(fetch|xmlhttprequest|beacon)$/.test(e.initiatorType)) return;
-        try {
-          const u = new URL(e.name);
-          // Keep the path and the query key names only, never query values.
-          const k = u.origin + u.pathname + (u.search ? '?' + [...u.searchParams.keys()].join('&') : '');
-          map[k] = (map[k] || 0) + 1;
-        } catch (err) { /* bad url */ }
-      });
-    } catch (e) { /* ignore */ }
-    return Object.entries(map).map(([url, count]) => ({ url, count })).slice(0, 60);
-  }
-
-  const notChat = (el) => !el.closest('.chat-panel, .chat-messages, .right-column');
-
+  // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
   function readMainText(cap) {
     const root = document.querySelector('.main-content') || document.querySelector('main');
@@ -1707,70 +1600,6 @@
     clone.querySelectorAll('button.msx-train-locked').forEach((n) => { n.disabled = false; n.classList.remove('msx-train-locked'); });
     clone.querySelectorAll('div, p, li, h1, h2, h3, h4, tr, dt, dd, article, section, br').forEach((n) => n.appendChild(document.createTextNode('\n')));
     return clone.textContent.replace(/[ \t]+/g, ' ').replace(/\n\s*\n+/g, '\n').trim().slice(0, cap);
-  }
-
-  function scanDom() {
-    const bars = [];
-    document.querySelectorAll('[role="progressbar"]').forEach((b) => {
-      if (bars.length < 80) bars.push({ label: b.getAttribute('aria-label') || '', text: b.getAttribute('aria-valuetext') || '', now: b.getAttribute('aria-valuenow') });
-    });
-    const timers = [...document.querySelectorAll('time[datetime]')].filter(notChat).slice(0, 30).map((t) => ({
-      text: t.textContent.trim(), datetime: t.getAttribute('datetime'),
-      context: (t.parentElement?.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 100),
-      countdown: t.hasAttribute('data-countdown'),
-    }));
-    const headings = [...document.querySelectorAll('main h1, main h2, main h3')].filter(notChat)
-      .map((h) => h.textContent.trim().slice(0, 60)).slice(0, 60);
-    const pairs = [];
-    document.querySelectorAll('main dl > div').forEach((d) => {
-      const k = d.querySelector('dt')?.textContent.trim(), v = d.querySelector('dd')?.textContent.trim();
-      if (k && pairs.length < 60) pairs.push([k, v]);
-    });
-    const vitals = [...document.querySelectorAll('.sidebar .rv')].map((rv) => ({
-      name: rv.querySelector('.rv-name')?.textContent.trim(),
-      value: rv.querySelector('.rv-value')?.textContent.replace(/\s+/g, ' ').trim(),
-      note: rv.querySelector('.rv-note')?.textContent.replace(/\s+/g, ' ').trim(),
-    }));
-    const mainText = readMainText(SCAN_TEXT_CAP);
-    const dataScripts = [...document.querySelectorAll('script[type="application/json"], script[id*="data" i], script[id*="state" i]')]
-      .map((sc) => ({ id: sc.id || '', type: sc.type || '', length: (sc.textContent || '').length }));
-    return { bars, timers, headings, pairs, vitals, mainText, dataScripts };
-  }
-
-  async function scanPage(manual, light) {
-    if (!location.href.startsWith(SITE_ORIGIN + '/')) return; // only scan https://meowstreets.com/... pages
-    const path = location.pathname;
-    const dom = scanDom();
-    let idb = [];
-    try { if (indexedDB.databases) idb = (await indexedDB.databases()).map((d) => d.name); } catch (e) { /* ignore */ }
-    const ls = scanStorage(localStorage), ss = scanStorage(sessionStorage);
-    const cookieNames = document.cookie ? document.cookie.split(';').map((c) => c.split('=')[0].trim()) : [];
-    const globals = light ? [] : scanGlobals(); // the page globals do not change, so the automatic capture skips them
-    const endpoints = scanEndpoints();
-    const result = {
-      path, scannedAt: new Date().toISOString(), auto: !manual,
-      summary: {
-        localStorageKeys: ls.length, sessionStorageKeys: ss.length, cookies: cookieNames.length, indexedDbDatabases: idb.length,
-        pageGlobals: globals.length, endpoints: endpoints.length, progressBars: dom.bars.length, timers: dom.timers.length,
-      },
-      localStorage: ls, sessionStorage: ss, cookieNames, indexedDbDatabases: idb, pageGlobals: globals, endpoints,
-      ...dom,
-    };
-    const db = loadDb();
-    if (!db.pageScans) db.pageScans = {};
-    db.pageScans[path] = result;
-    const paths = Object.keys(db.pageScans);
-    if (paths.length > MAX_SCANNED_PAGES) {
-      paths.sort((a, b) => db.pageScans[a].scannedAt.localeCompare(db.pageScans[b].scannedAt));
-      paths.slice(0, paths.length - MAX_SCANNED_PAGES).forEach((p) => delete db.pageScans[p]);
-    }
-    db.updated = result.scannedAt;
-    saveDb(db);
-    if (manual) {
-      const sm = result.summary;
-      toast(`Scanned ${path}: ${sm.localStorageKeys + sm.sessionStorageKeys} storage keys, ${sm.cookies} cookies, ${sm.indexedDbDatabases} databases, ` +
-        `${sm.pageGlobals} page globals, ${sm.endpoints} endpoints, ${sm.progressBars} bars, ${sm.timers} timers. Saved. Use Export data to get the file.`);
-    }
   }
 
   function toast(msg) {
@@ -2093,52 +1922,7 @@
 
   setInterval(updateLegend, 30000);
 
-  // ─── Capture on view ──────────────────────────────────────────────────────
-  // Whatever a page shows while you are looking at it is saved: once shortly after the page appears (so it has settled),
-  // and again only if its content changes a lot (you opened a tab, a list finished loading). One capture per page view,
-  // never on a timer. Only the latest capture of each page is kept. Pages that hold account, payment or other cats'
-  // details are never captured.
-  const CAPTURE_DELAY_MS = 5000;
-  const RECAPTURE_MIN_MS = 15000;
-  const NEVER_CAPTURE = [/^\/account/, /^\/paw-shop/, /^\/login/, /^\/register/, /^\/reset/, /^\/logout/, /^\/cat\//, /^\/players/, /\/\d+(\/|$)/];
   const currentPath = () => location.pathname.replace(/\/+$/, '') || '/';
-  const capturable = (path) => !NEVER_CAPTURE.some((re) => re.test(path));
-  let viewPath = null;
-  let viewTimer = null;
-  let lastCaptureAt = 0;
-  let lastCaptureLen = 0;
-
-  function captureNow(path) {
-    viewTimer = null;
-    if (!settings.capture) return;
-    if (currentPath() !== path) return; // you have moved on
-    const main = document.querySelector('.main-content') || document.querySelector('main');
-    if (!main) return;
-    lastCaptureAt = Date.now();
-    lastCaptureLen = main.textContent.length;
-    scanPage(false, true).catch(() => {});
-  }
-
-  function noteView() {
-    if (!settings.capture) return; // switched off on the Account page
-    const path = currentPath();
-    if (path !== viewPath) { // a new page view
-      viewPath = path;
-      lastCaptureAt = 0;
-      lastCaptureLen = 0;
-      if (viewTimer) clearTimeout(viewTimer);
-      viewTimer = capturable(path) ? setTimeout(() => captureNow(path), CAPTURE_DELAY_MS) : null;
-      return;
-    }
-    // Same page: capture again only if what it shows has changed a lot since the last capture.
-    if (viewTimer || !lastCaptureAt || !capturable(path)) return;
-    const main = document.querySelector('.main-content') || document.querySelector('main');
-    if (!main) return;
-    const len = main.textContent.length;
-    if (Math.abs(len - lastCaptureLen) > Math.max(300, lastCaptureLen * 0.15) && Date.now() - lastCaptureAt > RECAPTURE_MIN_MS) {
-      viewTimer = setTimeout(() => captureNow(path), 2000);
-    }
-  }
 
   // ─── Mews event log ───────────────────────────────────────────────────────
   // The Mews page lists what happened to you, newest first, each with an exact time. Every line is saved once
@@ -3062,15 +2846,9 @@
       '<h2>MeowStreets Extra Info</h2>' +
       '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer; it sends nothing anywhere.</p>' +
       '<h3>Recording</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-capture"> Save each page I view (kept on this computer; never account, payment or other players\' pages, never chat)</label>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
-      '<h3>Your data</h3>' +
-      '<p>Everything the script has logged (crime readings, stock prices, Mews events, page captures) can be saved to a file on your computer.</p>' +
-      '<div class="msx-acc-buttons"><button type="button" id="msx-acc-export">Export data</button></div>';
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>';
     host.appendChild(box);
 
-    box.querySelector('#msx-acc-export').addEventListener('click', exportDb);
-    box.querySelector('#msx-acc-capture').addEventListener('change', (e) => { settings.capture = e.target.checked; saveSettings(); });
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
     updateAccountPanel();
   }
@@ -3078,9 +2856,7 @@
   function updateAccountPanel() {
     const box = document.getElementById('msx-account');
     if (!box) return;
-    const cap = box.querySelector('#msx-acc-capture');
     const ev = box.querySelector('#msx-acc-events');
-    if (cap.checked !== settings.capture) cap.checked = settings.capture;
     if (ev.checked !== settings.events) ev.checked = settings.events;
   }
 
@@ -3093,9 +2869,7 @@
     if (observer) observer.disconnect(); // don't react to our own edits
     try {
       injectStyle();
-      ensureExportButton();
       ensureAccountPanel();
-      noteView();
       readModifiers();
       logStocksFromApi();
       readEvents();
@@ -3148,7 +2922,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-tools, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
         if (muts.every(own)) return;
         schedule();
       });
@@ -3192,11 +2966,6 @@
     GM_addValueChangeListener(NEXT_MOVE_KEY, (name, oldValue, newValue, remote) => {
       if (remote) nextMoveAnchor = Number(newValue) || 0;
     });
-  }
-
-  if (typeof GM_registerMenuCommand === 'function') {
-    GM_registerMenuCommand('MeowStreets: export data', exportDb);
-    GM_registerMenuCommand('MeowStreets: scan this page', () => { scanPage(true).catch(() => {}); });
   }
 
   schedule();
