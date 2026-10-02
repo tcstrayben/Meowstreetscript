@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.19.0
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain and crew job info, to your crew's own Discord bot.
+// @version      0.20.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job and stock price info, to your crew's own Discord bot (which also shares the crew's stock price history back).
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -683,6 +683,8 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
+      .msx-ws .msx-ws-deal { align-self:flex-start; margin-top:4px; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px; font-family:inherit; font-weight:600; width:auto; min-height:0; color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-ws .msx-ws-deal:hover { border-color:#9ecbff; }
       .rung .tool-line > span.msx-tool-link { cursor:pointer; }
       .rung .tool-line > span.msx-tool-link:hover { border-color:#9ecbff; text-decoration:underline; }
       .ws-row.msx-ws-focus { outline:2px solid var(--ms-lime, #b4df87); outline-offset:4px; border-radius:10px; transition:outline-color .4s; }
@@ -1145,6 +1147,7 @@
   // page and the "Copy for Discord" message already show. Never your account, cash, email or messages. Nothing is
   // ever sent to MeowStreets itself. The bot ignores every crew but its own.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
+  const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
@@ -1197,6 +1200,68 @@
     if (wait > 0) { if (!shareTimer) shareTimer = setTimeout(() => { shareTimer = null; shareCrew(); }, wait); return; }
     shareLastSig = sig; shareLastAt = Date.now();
     sendToCrewBot(body);
+  }
+
+  // ─── Shared stock prices (crew pool, 0.20.0) ──────────────────────────────
+  // Same switch as above. Your own recorded prices (one per company per 15-minute period) go to the crew pool, and
+  // every price the crew has that you don't comes back and is merged into your history, marked src:'crew'. So the
+  // lows, highs, averages and LOW/HIGH calls on Claw Street Ex are worked out from the whole crew's history.
+  // Your own reading always wins over a pooled one for the same period. Stock prices are the same for everyone.
+  const STOCK_POOL_URL = 'http://168.138.79.225:3001/v1/stocks';
+  const STOCK_SYNC_KEY = 'ms_stock_sync_v1'; // { since: last pooled period already merged }
+  const STOCK_SYNC_GAP_MS = 5 * 60000; // at most every 5 minutes (prices move every 15)
+  const STOCK_SEND_MAX = 2000; // a long backlog goes up in chunks
+  let stockSyncAt = 0, stockSyncBusy = false;
+
+  function syncStocks(force) {
+    if (!settings.shareCrew || stockSyncBusy || !apiState || !apiState.crew || !apiState.crew.name) return;
+    if (typeof GM_xmlhttpRequest !== 'function') return;
+    if (!force && Date.now() - stockSyncAt < STOCK_SYNC_GAP_MS) return;
+    const out = [];
+    Object.entries(loadDb().stocks).forEach(([id, rec]) => (rec.obs || []).forEach((o) => {
+      const p = periodOf(o);
+      if (p != null && o.src !== 'crew' && !o.x && out.length < STOCK_SEND_MAX) out.push([id, p, o.price]);
+    }));
+    let sync = {};
+    try { sync = JSON.parse(GM_getValue(STOCK_SYNC_KEY, '{}')) || {}; } catch (e) { sync = {}; }
+    stockSyncAt = Date.now();
+    stockSyncBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: STOCK_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name }, prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
+      onload: (r) => {
+        stockSyncBusy = false;
+        let j = null;
+        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        if (!j || !j.ok) return;
+        const db = loadDb();
+        // Mark what was sent, so it isn't sent again.
+        const sent = new Set(out.map((e) => e[0] + ':' + e[1]));
+        Object.entries(db.stocks).forEach(([id, rec]) => (rec.obs || []).forEach((o) => { if (o.src !== 'crew' && sent.has(id + ':' + periodOf(o))) o.x = 1; }));
+        // Merge the crew's prices: fill periods you don't have; never overwrite your own reading.
+        const now = new Date().toISOString();
+        Object.entries(j.prices || {}).forEach(([id, list]) => {
+          if (!Array.isArray(list)) return;
+          const rec = db.stocks[id] || (db.stocks[id] = { name: id, obs: [] });
+          const byP = new Map(rec.obs.map((o) => [periodOf(o), o]));
+          list.forEach(([p, price]) => {
+            if (!Number.isInteger(p) || !(price > 0)) return;
+            const have = byP.get(p);
+            if (!have) { const o = { t: now, p, price, delta: 0, src: 'crew' }; rec.obs.push(o); byP.set(p, o); } else if (have.src === 'crew' && have.price !== price) have.price = price;
+          });
+          rec.obs.sort((a, b) => (periodOf(a) ?? 0) - (periodOf(b) ?? 0));
+          while (rec.obs.length > MAX_STOCK_TICKS) rec.obs.shift();
+        });
+        db.updated = now;
+        saveDb(db);
+        GM_setValue(STOCK_SYNC_KEY, JSON.stringify({ since: j.upTo }));
+        // A big backlog either way? Carry on after the bot's one-a-minute limit.
+        if (j.more || out.length >= STOCK_SEND_MAX) setTimeout(() => syncStocks(true), 65000);
+        schedule();
+      },
+      onerror: () => { stockSyncBusy = false; },
+      ontimeout: () => { stockSyncBusy = false; },
+    });
   }
 
   // The "📣 Post to Discord" button: sends the current crew info plus which job to post.
@@ -2926,6 +2991,21 @@
     return h;
   }
 
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('.msx-ws-deal');
+    if (!b) return;
+    e.preventDefault(); e.stopPropagation();
+    if (!apiState || !apiState.crew || !apiState.crew.name) { toast('No crew info yet. Open the Crew page once, then try again.'); return; }
+    const body = { v: 1, sender: shareId(), crew: { name: apiState.crew.name }, item: b.dataset.item, price: Number(b.dataset.price) };
+    if (b.dataset.min) { body.min = Number(b.dataset.min); body.max = Number(b.dataset.max); }
+    GM_xmlhttpRequest({
+      method: 'POST', url: CREW_BOT_DEAL_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (err) { /* not json */ } toast(j && j.ok ? `Posted: ${b.dataset.item} for $${Number(b.dataset.price).toLocaleString()}.` : 'Not posted: ' + ((j && j.error) || 'unknown problem') + '.'); },
+      onerror: () => toast('Not posted: could not reach the crew bot.'),
+      ontimeout: () => toast('Not posted: the crew bot did not answer.'),
+    });
+  }, true);
+
   // Arrived from a crime's tool chip (#msx-item=<name>): scroll to that item and highlight it, once.
   function focusWhiskersItem() {
     const m = location.hash.match(/^#msx-item=(.+)$/);
@@ -2951,7 +3031,12 @@
       const it = items.get(norm(nameEl.textContent));
       let box = text.querySelector(':scope > .msx-ws');
       const pagePrice = num((row.querySelector('.ws-each b')?.textContent || '').replace(/[^\d.,]/g, ''));
-      const html = it ? whiskersHtml(it, pagePrice) : '';
+      // 📣 beside every item while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co.
+      // for $Y" to the crew bot's deals channel.
+      const deal = it && settings.shareCrew
+        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.price}"${it.min != null ? ` data-min="${it.min}" data-max="${it.max}"` : ''} title="Post this price to the crew Discord">📣 Post to Discord</button>`
+        : '';
+      const html = it ? whiskersHtml(it, pagePrice) + deal : '';
       if (!html) { if (box) box.remove(); return; }
       if (!box) { box = document.createElement('div'); box.className = 'msx-ws'; text.appendChild(box); }
       if (box.__msxHtml !== html) { box.innerHTML = html; box.__msxHtml = html; }
@@ -2974,11 +3059,11 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share crew info with our crew\'s Discord bot (crew chain and crew jobs only, for chain alerts and job posts; nothing else, never sent to MeowStreets)</label>';
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs and stock prices (for chain alerts, job posts and the crew\'s shared stock lows/highs; nothing else, never sent to MeowStreets)</label>';
     host.appendChild(box);
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
-    box.querySelector('#msx-acc-share').addEventListener('change', (e) => { settings.shareCrew = e.target.checked; saveSettings(); if (settings.shareCrew) shareCrew(); });
+    box.querySelector('#msx-acc-share').addEventListener('change', (e) => { settings.shareCrew = e.target.checked; saveSettings(); if (settings.shareCrew) { shareCrew(); syncStocks(true); } });
     updateAccountPanel();
   }
 
@@ -3003,6 +3088,7 @@
       ensureAccountPanel();
       readModifiers();
       logStocksFromApi();
+      syncStocks(); // crew stock pool: at most every 5 minutes, only while sharing is on
       readEvents();
       readEventsFromApi();
       readGym();
