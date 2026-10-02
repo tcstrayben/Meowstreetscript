@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.18.0
+// @version      0.18.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -679,6 +679,9 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
+      .rung .tool-line > span.msx-tool-link { cursor:pointer; }
+      .rung .tool-line > span.msx-tool-link:hover { border-color:#9ecbff; text-decoration:underline; }
+      .ws-row.msx-ws-focus { outline:2px solid var(--ms-lime, #b4df87); outline-offset:4px; border-radius:10px; transition:outline-color .4s; }
       .sidebar .brand:has(.msx-clock) { min-width:0; }
       .sidebar .brand:has(.msx-clock) .brand-logo { flex:0 1 auto; min-width:0; }
       .msx-clock { display:inline-flex; flex:none; color:var(--ms-lime, #b4df87); cursor:default; }
@@ -911,8 +914,26 @@
     box.prepend(note);
   }
 
+  // ─── Tool chips -> Whiskers & Co. (Crimes page) ───────────────────────────
+  // User request (0.18.1): clicking a crime's tool chip ("Fake manifest none", "Crowbar ×1") opens Whiskers & Co.
+  // and scrolls to that tool. Your own click, a plain page change. Chip from a dev-tools capture (Screenshot 339):
+  // article.rung > div.rung-main > div.tool-line > span (class "missing" when you own none).
+  document.addEventListener('click', (e) => {
+    const chip = e.target.closest && e.target.closest('.rung .tool-line > span');
+    if (!chip) return;
+    const name = chip.textContent.replace(/\s*(none|×\s*\d+|x\s*\d+)\s*$/i, '').trim();
+    location.assign('/whiskers' + (name ? '#msx-item=' + encodeURIComponent(name) : ''));
+  });
+  function decorateToolChips() {
+    document.querySelectorAll('.rung .tool-line > span').forEach((chip) => {
+      if (!chip.classList.contains('msx-tool-link')) chip.classList.add('msx-tool-link');
+      setTitle(chip, 'Open Whiskers & Co. to buy this tool');
+    });
+  }
+
   function draw(data) {
     clearDrawn();
+    decorateToolChips();
     // An "Unlock anyway" ends once its district has cooled below 80.
     const overrides = loadHeatOverrides();
     let overridesChanged = false;
@@ -2815,8 +2836,23 @@
     return h;
   }
 
+  // Arrived from a crime's tool chip (#msx-item=<name>): scroll to that item and highlight it, once.
+  function focusWhiskersItem() {
+    const m = location.hash.match(/^#msx-item=(.+)$/);
+    if (!m) return;
+    const want = norm(decodeURIComponent(m[1]));
+    const row = [...document.querySelectorAll('.ws-row')].find((r) => norm(r.querySelector('.ws-text > b')?.textContent) === want);
+    if (!row) return; // not rendered yet -- the next redraw tries again
+    history.replaceState(null, '', location.pathname + location.search);
+    row.scrollIntoView({ block: 'center' });
+    row.classList.add('msx-ws-focus');
+    setTimeout(() => row.classList.remove('msx-ws-focus'), 2500);
+  }
+
   function drawWhiskers() {
-    if (location.pathname.replace(/\/+$/, '') !== '/whiskers' || !apiState) return;
+    if (location.pathname.replace(/\/+$/, '') !== '/whiskers') return;
+    focusWhiskersItem();
+    if (!apiState) return;
     const items = new Map((apiState.shopItems || []).map((it) => [norm(it.name), it]));
     document.querySelectorAll('.ws-row').forEach((row) => {
       const text = row.querySelector('.ws-text');
