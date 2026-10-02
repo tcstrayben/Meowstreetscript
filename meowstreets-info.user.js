@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.18.1
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
+// @version      0.19.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain and crew job info, to your crew's own Discord bot.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -14,6 +14,8 @@
 // @grant        unsafeWindow
 // @grant        GM_addValueChangeListener
 // @grant        GM_setClipboard
+// @grant        GM_xmlhttpRequest
+// @connect      168.138.79.225
 // ==/UserScript==
 
 (function () {
@@ -90,7 +92,7 @@
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
-        crimeBonusParts: [], storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0,
+        crimeBonusParts: [], storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0, crewJobsSeen: false,
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
@@ -171,6 +173,7 @@
       // 0.17.4 (user request): the Discord-message tabs list EVERY active job in the crew, not only the ones you
       // are in, so a message can be made for any of them -- yours first. `mine` keeps the sidebar pill on your own.
       if (Array.isArray(raw.crewJobs)) {
+        out.crewJobsSeen = true; // crew sharing: only a real list may tell the bot that posted jobs are over
         const isMine = (x) => !!x.mine || (raw.activeJobId != null && x.id === raw.activeJobId);
         // Your own job (by `activeJobId`) is kept even if a capture leaves its status out -- the older fallback.
         const activeJobs = raw.crewJobs.filter((x) => x && (x.status === 'running' || x.status === 'planning' || (raw.activeJobId != null && x.id === raw.activeJobId)))
@@ -351,7 +354,7 @@
 
   function onApiStateResponse(json) {
     const ex = extractApiState(json);
-    if (ex) { apiState = ex; schedule(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+    if (ex) { apiState = ex; schedule(); shareCrew(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
 
   function installApiWatch() {
@@ -635,6 +638,7 @@
       #msx-mycrewjob button, #msx-myheist button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-mycrewjob button:hover, #msx-myheist button:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-mycrewjob .msx-postbtn { margin-left:8px; }
       .msx-gymlock { display:block; width:fit-content; margin-top:8px; padding:4px 10px; border-radius:8px; cursor:pointer;
         font-size:12px; font-family:inherit; color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25);
         border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
@@ -1124,7 +1128,7 @@
 
   // ─── Settings (kept on this computer, edited on the Account page) ─────────
   const SETTINGS_KEY = 'ms_settings_v1';
-  const DEFAULT_SETTINGS = { events: true };
+  const DEFAULT_SETTINGS = { events: true, shareCrew: false };
   let settings = { ...DEFAULT_SETTINGS };
   try {
     const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
@@ -1132,6 +1136,80 @@
   } catch (e) { /* use the defaults */ }
   function saveSettings() {
     try { GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
+  }
+
+  // ─── Crew sharing with the crew's Discord bot (opt-in, 0.19.0) ────────────
+  // OFF unless you tick "Share crew info with our crew's Discord bot" on the Account page. When on, each time the
+  // game's own /api/state passes by, a small summary goes to the crew bot's server: crew name, crew chain count
+  // and end time, and the crew's active jobs (seats, members' names/levels, payout) -- the same things the Crew
+  // page and the "Copy for Discord" message already show. Never your account, cash, email or messages. Nothing is
+  // ever sent to MeowStreets itself. The bot ignores every crew but its own.
+  const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
+  const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
+  const SHARE_ID_KEY = 'ms_share_id_v1';
+  let shareLastSig = '', shareLastAt = 0, shareTimer = null;
+
+  // A random id for this install only (lets the bot slow down one noisy sender); not tied to your game account.
+  function shareId() {
+    let v = GM_getValue(SHARE_ID_KEY, '');
+    if (!v) {
+      v = 'ms-' + Array.from({ length: 4 }, () => Math.random().toString(36).slice(2, 8)).join('');
+      GM_setValue(SHARE_ID_KEY, v);
+    }
+    return v;
+  }
+
+  function crewSharePayload() {
+    if (!apiState || !apiState.crew || !apiState.crew.name) return null;
+    const c = apiState.crew;
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt } };
+    if (apiState.crewJobsSeen) {
+      body.jobs = (apiState.myCrewJobs || []).map((j) => ({
+        id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
+        members: (j.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level })),
+        minMembers: j.minMembers, maxMembers: j.maxMembers, endsAt: j.endsAt,
+        cut: j.cut, take: j.take, respect: j.respect, nerve: j.nerve, stake: j.stake, chance: j.chance,
+      }));
+      body.roleTitles = apiState.crewJobRoles || {};
+    }
+    return body;
+  }
+
+  function sendToCrewBot(body, done) {
+    if (typeof GM_xmlhttpRequest !== 'function') { if (done) done({ ok: false, error: 'Tampermonkey blocked the request' }); return; }
+    GM_xmlhttpRequest({
+      method: 'POST', url: CREW_BOT_URL, data: JSON.stringify(body), timeout: 15000,
+      headers: { 'Content-Type': 'application/json' },
+      onload: (r) => { if (!done) return; let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } done(j || { ok: false, error: 'bad reply (' + r.status + ')' }); },
+      onerror: () => { if (done) done({ ok: false, error: 'could not reach the crew bot' }); },
+      ontimeout: () => { if (done) done({ ok: false, error: 'the crew bot did not answer' }); },
+    });
+  }
+
+  // Sends only when something changed, and at most once per SHARE_MIN_GAP_MS (a late change waits for the gap).
+  function shareCrew() {
+    if (!settings.shareCrew) return;
+    const body = crewSharePayload();
+    if (!body) return;
+    const sig = JSON.stringify(body);
+    if (sig === shareLastSig) return;
+    const wait = shareLastAt + SHARE_MIN_GAP_MS - Date.now();
+    if (wait > 0) { if (!shareTimer) shareTimer = setTimeout(() => { shareTimer = null; shareCrew(); }, wait); return; }
+    shareLastSig = sig; shareLastAt = Date.now();
+    sendToCrewBot(body);
+  }
+
+  // The "📣 Post to Discord" button: sends the current crew info plus which job to post.
+  function postJobToDiscord(jobId) {
+    const body = crewSharePayload();
+    if (!body) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
+    body.post = jobId;
+    shareLastSig = JSON.stringify({ ...body, post: undefined }); shareLastAt = Date.now();
+    sendToCrewBot(body, (r) => {
+      const p = r && r.post;
+      if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
+      else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
+    });
   }
 
   function stockStats(id, currentPrice) {
@@ -2627,6 +2705,18 @@
     const panel = document.getElementById('msx-mycrewjob');
     const hood = document.querySelector('.right-column .neighborhood');
     if (panel && hood && hood.nextElementSibling !== panel) hood.after(panel);
+    // "📣 Post to Discord" (0.19.0): only while crew sharing is on. The crew bot posts the selected job and then
+    // keeps editing that post as people join.
+    let post = panel && panel.querySelector('.msx-postbtn');
+    if (panel && settings.shareCrew && !post) {
+      post = document.createElement('button');
+      post.type = 'button';
+      post.className = 'msx-postbtn';
+      post.textContent = '📣 Post to Discord';
+      post.title = 'Post this job in the crew Discord. The post updates itself as people join.';
+      post.addEventListener('click', () => postJobToDiscord(panel.dataset.selectedId));
+      panel.querySelector('.msx-copybtn').after(post);
+    } else if (post && !settings.shareCrew) post.remove();
   }
 
   function ensureMyHeistPanel() {
@@ -2882,10 +2972,13 @@
       '<h2>MeowStreets Extra Info</h2>' +
       '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer; it sends nothing anywhere.</p>' +
       '<h3>Recording</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>';
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
+      '<h3>Crew Discord bot</h3>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share crew info with our crew\'s Discord bot (crew chain and crew jobs only, for chain alerts and job posts; nothing else, never sent to MeowStreets)</label>';
     host.appendChild(box);
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
+    box.querySelector('#msx-acc-share').addEventListener('change', (e) => { settings.shareCrew = e.target.checked; saveSettings(); if (settings.shareCrew) shareCrew(); });
     updateAccountPanel();
   }
 
@@ -2893,6 +2986,8 @@
     const box = document.getElementById('msx-account');
     if (!box) return;
     const ev = box.querySelector('#msx-acc-events');
+    const sh = box.querySelector('#msx-acc-share');
+    if (sh.checked !== settings.shareCrew) sh.checked = settings.shareCrew;
     if (ev.checked !== settings.events) ev.checked = settings.events;
   }
 
