@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.0
+// @version      0.17.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -83,6 +83,7 @@
   // api-data-reference.md for the full shape of what the response contains.
   const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   let apiState = null; // { at, crimes: {key: {...}}, meritLines: {name: {...}}, merits, crew, chain } | null
+  let tradingRefreshAt = 0; // when the soonest hourly store price on the Trading panel goes out of date
 
   function extractApiState(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -272,7 +273,15 @@
       // `reference_price` (its exact midpoint in both cases seen), until `priceUntil` -- not a static catalog
       // price for everything any more, just read fresh every time, same as before.
       out.storeItems = {};
-      (raw.items || []).forEach((it) => { if (it && it.id != null) out.storeItems[it.id] = { name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack }; });
+      // min/max/until only exist on items whose price moves hourly; consumable = same rule as the Whiskers page.
+      (raw.items || []).forEach((it) => {
+        if (!it || it.id == null) return;
+        const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
+        out.storeItems[it.id] = {
+          name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack,
+          min: range ? range[0] : null, max: range ? range[1] : null, until: it.priceUntil || 0, consumable: !!it.resource && !it.island,
+        };
+      });
       (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice != null ? g.sellPrice : g.sellBack }; });
       // For the Whiskers & Co. page itself: every store item's price, plus -- for the ones whose price moves
       // hourly (only Premium tuna and Catnip tea so far) -- the game's own stated `priceRange` [min, max], its
@@ -631,6 +640,7 @@
       #msx-trading .msx-inv-table th, #msx-trading .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
+      #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
       .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
@@ -638,7 +648,7 @@
       .sidebar .brand:has(.msx-clock) { min-width:0; }
       .sidebar .brand:has(.msx-clock) .brand-logo { flex:0 1 auto; min-width:0; }
       .msx-clock { display:inline-flex; flex:none; color:var(--ms-lime, #b4df87); cursor:default; }
-      .msx-clock-row { margin:2px 0 6px; font-size:11px; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; white-space:nowrap; cursor:default; }
+      .msx-clock-row { margin:2px 0 6px; text-align:center; font-size:11px; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; white-space:nowrap; cursor:default; }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -1456,7 +1466,7 @@
     if (!brand.querySelector('.msx-clock')) {
       const icon = document.createElement('span');
       icon.className = 'msx-clock';
-      icon.innerHTML = '<svg width="24" height="24" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
+      icon.innerHTML = '<svg width="48" height="48" viewBox="0 0 24 24" aria-hidden="true" focusable="false">' +
         '<path d="M5 9 L5.5 2.5 L10 6.2 Z M19 9 L18.5 2.5 L14 6.2 Z" fill="currentColor"/>' +
         '<circle cx="12" cy="13.5" r="8" fill="var(--ms-asphalt, #1c201c)" stroke="currentColor" stroke-width="1.6"/>' +
         '<path d="M1 13 L4.5 13.6 M1 16 L4.5 15.2 M23 13 L19.5 13.6 M23 16 L19.5 15.2" stroke="currentColor" stroke-width=".9" stroke-linecap="round"/>' +
@@ -1499,7 +1509,10 @@
     }
   }
 
-  setInterval(() => { updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
+  setInterval(() => {
+    // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
+    if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
+    updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
 
   // ─── Page scanner: what does this page store or expose? ───────────────────
   // Read-only. It looks at what the page already has (browser storage names, page globals, endpoints the page
@@ -2777,16 +2790,31 @@
     // a $105 buy taxed $3, which is only 2% rounded up, not down or to the nearest dollar).
     const TRADE_TAX_RATE = 0.02;
     const taxOn = (price) => Math.ceil(price * TRADE_TAX_RATE);
+    // An owned store discount (the game's own `marketRate`, e.g. 0.85 with Staff discount) applies to consumables,
+    // so "Vs store" compares against what the store would actually charge you, not its full price.
+    const rate = apiState && apiState.marketRate < 1 ? apiState.marketRate : 1;
+    const now = Date.now();
+    tradingRefreshAt = 0;
     const rows = [...cheapest.entries()].map(([id, l]) => {
       const s = store[id];
       const total = l.price + taxOn(l.price);
-      const buyPrice = s ? s.price : null;
+      const discounted = !!(s && s.consumable && rate < 1);
+      const buyPrice = s && Number.isFinite(s.price) ? (discounted ? Math.round(s.price * rate) : s.price) : null;
+      // Hourly prices: once `priceUntil` has passed, the store price shown is last hour's until the game reloads.
+      const stale = !!(s && s.until && now >= s.until);
+      if (s && s.until > now && (!tradingRefreshAt || s.until < tradingRefreshAt)) tradingRefreshAt = s.until;
+      let storeCell = '—';
+      if (buyPrice != null) {
+        storeCell = money0(buyPrice) + (discounted ? ` <small>(−${Math.round((1 - rate) * 100)}% of ${money0(s.price)})</small>` : '');
+        if (s.min != null) storeCell += `<br><small>range ${money0(s.min)} – ${money0(s.max)}</small>`;
+        if (stale) storeCell += '<br><small class="msx-stale">(old price, refresh)</small>';
+      }
       const sellPrice = s ? s.sellPrice : null;
       // Positive = free money (buy the listing, sell it straight back to Whiskers & Co. for more than it cost).
       const sellProfit = sellPrice != null ? sellPrice - total : null;
       // Negative = cheaper than the store; positive = the store is the better buy.
       const buyDiff = buyPrice != null ? total - buyPrice : null;
-      return { name: s ? s.name : id, buyPrice, sellPrice, listedPrice: l.price, total, seller: l.seller, count: counts.get(id), sellProfit, buyDiff };
+      return { name: s ? s.name : id, buyPrice, storeCell, sellPrice, listedPrice: l.price, total, seller: l.seller, count: counts.get(id), sellProfit, buyDiff };
     }).sort((a, b) => {
       // Best opportunity first, whichever kind it is: the biggest sell-back profit, or failing that the
       // biggest discount off the store's buy price. Items with neither sit at the bottom.
@@ -2799,7 +2827,8 @@
       'own buy price; "Sells back for" is what Whiskers & Co. pays you for it if you already own one or buy this ' +
       'listing -- when that\'s more than the listing\'s total cost, buying it and selling it straight back is ' +
       'instant profit, flagged below. A few items (Premium tuna and Catnip tea, so far) have their own buy ' +
-      'price swing hourly, so "Vs store" is only ever accurate as of this page load for those. Not every item ' +
+      'price change every hour, within the range shown under it; once the hour is up it says "old price" until ' +
+      'the page reloads. If you own a store discount, consumables are compared against your discounted price. Not every item ' +
       'has a store buy price (crime drops, for example) or a confirmed sell-back price -- those show a dash ' +
       'rather than a guess.</p>';
     h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers buy price</th>' +
@@ -2814,7 +2843,7 @@
         profit = r.sellProfit > 0 ? `<b>${signed0(r.sellProfit)} profit -- buy &amp; sell back</b>` : signed0(r.sellProfit);
       }
       h += `<tr><td>${escHtml(r.name)}</td><td>${money0(r.listedPrice)}${r.seller ? ` <small>(${escHtml(r.seller)})</small>` : ''}</td>` +
-        `<td>${money0(r.total)}</td><td>${r.buyPrice != null ? money0(r.buyPrice) : '—'}</td><td>${vs}</td>` +
+        `<td>${money0(r.total)}</td><td>${r.storeCell}</td><td>${vs}</td>` +
         `<td>${r.sellPrice != null ? money0(r.sellPrice) : '—'}</td><td>${profit}</td><td>${r.count}</td></tr>`;
     });
     h += '</tbody></table>';
