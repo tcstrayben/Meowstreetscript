@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.4
+// @version      0.17.5
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1187,8 +1187,10 @@
     if (document.querySelector('.msx-ticker')) return;
     const vitals = document.querySelector('.sidebar .rail-vitals');
     if (!vitals || !vitals.parentNode) return;
-    const el = document.createElement('div');
-    el.className = 'msx-ticker';
+    // A plain link (user request, 0.17.5): opens Claw Street Ex.
+    const el = document.createElement('a');
+    el.href = '/claw-street-ex';
+    el.className = 'msx-ticker msx-pill-link';
     el.title = 'Time until the next Claw Street Ex price move (synced from the stock page, then counted forward every 15 minutes)';
     el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-stocks"></use></svg><span class="msx-ticker-text"></span>';
     vitals.parentNode.insertBefore(el, vitals);
@@ -1253,8 +1255,10 @@
     if (document.querySelector('.msx-chain')) return;
     const anchor = document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
     if (!anchor || !anchor.parentNode) return;
-    const el = document.createElement('div');
-    el.className = 'msx-ticker msx-chain';
+    // A plain link (user request, 0.17.5): opens the Crew page, which also re-syncs the chain.
+    const el = document.createElement('a');
+    el.href = '/crew';
+    el.className = 'msx-ticker msx-chain msx-pill-link';
     el.title = 'Time until your crew chain dies (synced from the Crew page, then counted down; other crew members can extend it)';
     el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-faction"></use></svg><span class="msx-chain-text"></span>';
     // Place it after the stocks pill, before the vitals.
