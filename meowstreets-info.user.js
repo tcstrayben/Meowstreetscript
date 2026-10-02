@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.3
+// @version      0.17.4
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -169,17 +169,18 @@
       // recruiting a crew, no end time yet) is included too so the Discord-message feature below has something
       // to work with before the job actually launches; the sidebar pill still only shows once there's an end
       // time (its own check on `endsAt`, unchanged).
+      // 0.17.4 (user request): the Discord-message tabs list EVERY active job in the crew, not only the ones you
+      // are in, so a message can be made for any of them -- yours first. `mine` keeps the sidebar pill on your own.
       if (Array.isArray(raw.crewJobs)) {
-        let mineJobs = raw.crewJobs.filter((x) => x && x.mine && (x.status === 'running' || x.status === 'planning'));
-        if (!mineJobs.length && raw.activeJobId != null) {
-          const byId = raw.crewJobs.find((x) => x && x.id === raw.activeJobId);
-          if (byId) mineJobs = [byId];
-        }
-        out.myCrewJobs = mineJobs.map((mine) => {
+        const isMine = (x) => !!x.mine || (raw.activeJobId != null && x.id === raw.activeJobId);
+        // Your own job (by `activeJobId`) is kept even if a capture leaves its status out -- the older fallback.
+        const activeJobs = raw.crewJobs.filter((x) => x && (x.status === 'running' || x.status === 'planning' || (raw.activeJobId != null && x.id === raw.activeJobId)))
+          .sort((a, b) => Number(isMine(b)) - Number(isMine(a)));
+        out.myCrewJobs = activeJobs.map((mine) => {
           const name = mine.tierName || mine.name || null;
           const tierDef = (raw.crewJobTiers || []).find((t) => t && t.name === name) || (raw.crewJobTiers || []).find((t) => t && t.tier === mine.tier);
           return {
-            id: mine.id, name, tier: mine.tier, minLevel: tierDef ? tierDef.level : null, status: mine.status, endsAt: mine.ends_at || null,
+            id: mine.id, mine: isMine(mine), name, tier: mine.tier, minLevel: tierDef ? tierDef.level : null, status: mine.status, endsAt: mine.ends_at || null,
             roles: Array.isArray(mine.roles) ? mine.roles.slice() : [],
             members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready })),
             minMembers: mine.minMembers, maxMembers: mine.maxMembers,
@@ -189,7 +190,7 @@
         });
         // The soonest-ending running job drives the sidebar pill (unchanged behaviour from when there was only
         // ever one job to consider); a job still only planning has no end time to show there yet.
-        const withEnd = out.myCrewJobs.filter((j) => j.endsAt).sort((a, b) => a.endsAt - b.endsAt);
+        const withEnd = out.myCrewJobs.filter((j) => j.mine && j.endsAt).sort((a, b) => a.endsAt - b.endsAt);
         if (withEnd.length) out.activeCrewJob = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
       }
       // Role -> {title, stat}, the game's own data (crewJobRoles) -- which stat a seat actually uses, not a guess.
@@ -566,6 +567,12 @@
       .msx-info .msx-cash { color:var(--ms-gold, #e9c46a); font-weight:600; }
       .msx-info small { color:var(--ms-smoke, #8d9289); font-size:11px; }
       .msx-odds { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
+      .msx-odds summary { display:inline-block; cursor:pointer; list-style:none; user-select:none; }
+      .msx-odds summary::-webkit-details-marker { display:none; }
+      .msx-odds summary::before { content:'▸ '; }
+      .msx-odds[open] summary::before { content:'▾ '; }
+      .msx-odds summary:hover { color:var(--ms-bone, #e7ede1); }
+      .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
       .msx-drops { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
       .msx-drops b { color:var(--ms-bone, #e7ede1); font-weight:600; }
@@ -651,6 +658,8 @@
       .sidebar .brand:has(.msx-clock) .brand-logo { flex:0 1 auto; min-width:0; }
       .msx-clock { display:inline-flex; flex:none; color:var(--ms-lime, #b4df87); cursor:default; }
       .msx-clock-row { margin:2px 0 6px; text-align:center; font-size:11px; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; white-space:nowrap; cursor:default; }
+      a.msx-pill-link { text-decoration:none; color:var(--ms-bone, #e7ede1); cursor:pointer; }
+      a.msx-pill-link:hover { border-color:var(--ms-lime, #b4df87); }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
       .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
@@ -824,8 +833,21 @@
     const missing = b.unknown.length ? ` Not read yet: open ${[...new Set(b.unknown.map((i) => i.from))].join(', ')} once to fill in.` : '';
     const other = b.other && !b.unknown.length ? ' "other" is something this script does not know about yet, such as a job perk or a stock perk.' : '';
     const title = 'Where the success % comes from: base success + mastery level + Street sense merit ranks + education points + crew chain bonus + crew Inside-line perk - 1 per 4 heat, never above 95%.' + crewNote + inferredNote + missing + other;
-    return `<div class="msx-odds" title="${title.replace(/"/g, '&quot;')}">Odds: ${bits.join(' ')} ${end}</div>`;
+    return oddsDetails(c.key, title.replace(/"/g, '&quot;'), `${bits.join(' ')} ${end}`);
   }
+
+  // The breakdown sits folded away behind a small "Odds" toggle (user request, 0.17.4: the always-open line was
+  // too big). Cards are redrawn often, so which ones you opened is remembered for as long as the page is open.
+  const oddsOpen = new Set();
+  function oddsDetails(key, title, inner) {
+    return `<details class="msx-odds" data-key="${key}"${oddsOpen.has(key) ? ' open' : ''}>` +
+      `<summary>Odds</summary><div class="msx-odds-body" title="${title}">${inner}</div></details>`;
+  }
+  document.addEventListener('toggle', (e) => {
+    const d = e.target;
+    if (!d || !d.classList || !d.classList.contains('msx-odds')) return;
+    if (d.open) oddsOpen.add(d.dataset.key); else oddsOpen.delete(d.dataset.key);
+  }, true);
 
   function oddsHtmlFromApi(c) {
     const a = c.api;
@@ -843,7 +865,7 @@
       ? ` The crew +5% window ends in ${Math.max(1, Math.round((crew.buffUntil - Date.now()) / 60000))} min (${new Date(crew.buffUntil).toUTCString().slice(17, 22)} UTC).` : '';
     const critNote = a.criticalChance != null ? ` Clean-job chance: ${a.criticalChance}%.` : '';
     const title = ('Exact numbers from the game\'s own data: base success + mastery bonus + bonus (merits, education, crew and perks, already combined by the game) − 1 per 4 heat, capped at 95%.' + crewNote + critNote).replace(/"/g, '&quot;');
-    return `<div class="msx-odds" title="${title}">Odds (exact): ${bits.join(' ')} ${end}</div>`;
+    return oddsDetails(c.key, title, `${bits.join(' ')} ${end}`);
   }
 
   function dropsHtml(c) {
@@ -1389,8 +1411,10 @@
     if (!el) {
       const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
       if (!anchor || !anchor.parentNode) return;
-      el = document.createElement('div');
-      el.className = 'msx-ticker msx-companion';
+      // A plain link (user request, 0.17.4): clicking the pill opens the Companion page, like any link would.
+      el = document.createElement('a');
+      el.href = '/companion';
+      el.className = 'msx-ticker msx-companion msx-pill-link';
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
     setTitle(el, detail);
@@ -1446,8 +1470,10 @@
     if (!el) {
       const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
       if (!anchor || !anchor.parentNode) return;
-      el = document.createElement('div');
-      el.className = 'msx-ticker msx-consumable';
+      // A plain link (user request, 0.17.4): opens the Purrse, where tuna and catnip are used.
+      el = document.createElement('a');
+      el.href = '/purrse';
+      el.className = 'msx-ticker msx-consumable msx-pill-link';
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
     setTitle(el, 'Whether Premium tuna and Catnip tea are off cooldown, from the game’s own data');
@@ -2684,7 +2710,12 @@
     if (!jobs.some((j) => String(j.id) === selected)) selected = String(jobs[0].id);
     panel.dataset.selectedId = selected;
     const tabsHtml = jobs.length > 1
-      ? jobs.map((j) => `<button type="button" class="msx-jobtab${String(j.id) === selected ? ' active' : ''}" data-id="${escHtml(String(j.id))}">${escHtml(j.name || 'Job')}</button>`).join('')
+      ? jobs.map((j) => {
+        // Two jobs can share a name, so each tab also says whether it's yours and how full it is.
+        const seats = j.maxMembers ? ` · ${(j.members || []).length}/${j.maxMembers}` : '';
+        return `<button type="button" class="msx-jobtab${String(j.id) === selected ? ' active' : ''}" data-id="${escHtml(String(j.id))}">` +
+          `${escHtml(j.name || 'Job')}${j.mine ? ' (yours)' : ''}${seats}</button>`;
+      }).join('')
       : '';
     if (tabsEl.innerHTML !== tabsHtml) tabsEl.innerHTML = tabsHtml;
     renderSelected();
@@ -2692,9 +2723,9 @@
 
   function ensureMyCrewJobPanel() {
     const jobs = (apiState && apiState.myCrewJobs) || [];
-    ensureJobMessagesPanel('msx-mycrewjob', '/crew', 'msx-crewjobs', 'Your crew job' + (jobs.length > 1 ? 's' : ''),
-      'Ready to post in Discord: who has a seat, which seats are still open (and what stat they want), and the payout.' +
-      (jobs.length > 1 ? ' Click a job\'s name above to switch which one\'s message is shown.' : ''),
+    ensureJobMessagesPanel('msx-mycrewjob', '/crew', 'msx-crewjobs', jobs.length > 1 ? 'Crew jobs' : 'Crew job',
+      'A ready-to-paste Discord message: open seats, filled seats and the payout.' +
+      (jobs.length > 1 ? ' Click a job to make its message.' : ''),
       jobs, buildCrewJobMessage, apiState && apiState.crew && apiState.crew.name);
   }
 
