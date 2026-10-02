@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.2
+// @version      0.17.3
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -2559,10 +2559,7 @@
       const remain = job.endsAt ? job.endsAt - Date.now() : null;
       lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
     }
-    if (filled.length) {
-      lines.push('', '✅ Filled:');
-      filled.forEach((m) => lines.push(`• ${roleTitle(m.role)} — ${m.name || 'someone'}${m.level != null ? ` (Lv ${m.level})` : ''}`));
-    }
+    // Open seats first, filled ones under them (user request, 0.17.3): the open seats are what a reader acts on.
     if (job.status === 'planning' && openCount > 0) {
       const filledRoles = new Set(filled.map((m) => m.role));
       const openRoles = (job.roles || []).filter((r) => !filledRoles.has(r));
@@ -2575,6 +2572,10 @@
       } else {
         lines.push(`• ${openCount} seat${openCount === 1 ? '' : 's'} open`);
       }
+    }
+    if (filled.length) {
+      lines.push('', '✅ Filled:');
+      filled.forEach((m) => lines.push(`• ${roleTitle(m.role)} — ${m.name || 'someone'}${m.level != null ? ` (Lv ${m.level})` : ''}`));
     }
     const payoutBits = [];
     if (job.cut != null) payoutBits.push(`💰 ${money0(job.cut)} each`);
