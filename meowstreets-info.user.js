@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.6
+// @version      0.17.7
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -73,6 +73,7 @@
   const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const num = (s) => parseFloat(String(s).replace(/,/g, ''));
   const fmtMoney = (n) => '$' + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
+  const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const isCrimesPage = () => location.pathname.replace(/\/+$/, '') === '/crimes';
 
   // ─── Reading the game's own /api/state response (still read-only) ─────────
@@ -91,13 +92,13 @@
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
-        storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0,
+        crimeBonusParts: [], storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0,
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
       };
       (raw.crimes || []).forEach((c) => {
         if (!c || !c.name) return;
         out.crimes[norm(c.name)] = {
-          chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
+          id: c.id, chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
           heat: c.heat, hot: !!c.hot, bonus: c.bonus, criticalChance: c.criticalChance,
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
         };
@@ -262,6 +263,33 @@
         });
         out.education = { eduCrimePoints, coursesTaken, eduLandsAt };
       }
+      // Every piece of a crime's success "bonus", which the game only hands over already added up (user request,
+      // 0.17.7: "we need to see where each % is coming from"). `crimes` limits a piece to those crimes (the game's
+      // own crime ids, e.g. "fish"/"rooftop"); null = every crime. The Crew > Perks "Inside line" ranks aren't in
+      // this response, so that piece is added when drawing, from the Crew page read.
+      out.crimeBonusParts = [];
+      const addPart = (label, v, crimes) => { if (Number.isFinite(v) && v) out.crimeBonusParts.push({ label, v, crimes: crimes || null }); };
+      const streetSense = ((raw.merits && raw.merits.lines) || []).find((l) => l && l.name === 'Street sense');
+      if (streetSense) addPart('Street sense', streetSense.ranks);
+      (raw.courses || []).forEach((c) => {
+        if (!c || c.status !== 'completed') return;
+        // Only a course's success-chance adds: its other `add` mods (heat per crime, say) are left out by checking
+        // that it is either tied to named crimes or its perk text talks about success chance.
+        (c.mods || []).forEach((m) => {
+          if (m && Number.isFinite(m.add) && (Array.isArray(m.crimes) || /success chance/i.test(c.perk || ''))) addPart(c.name, m.add, Array.isArray(m.crimes) ? m.crimes : null);
+        });
+      });
+      ((raw.stocks && raw.stocks.companies) || []).forEach((c) => {
+        const m = c && c.perkOn && String(c.perk || '').match(/\+(\d+)\s*points?\s+to\s+every\s+crime/i);
+        if (m) addPart(c.name + ' shares', +m[1]);
+      });
+      (raw.perks || []).forEach((p) => {
+        if (!p || !p.owned) return;
+        const m = String(p.description || '').match(/\+(\d+)\s*(?:points?\s+)?on\s+(.+?)\.?$/i);
+        if (!m) return;
+        addPart(p.name, +m[1], /every crime/i.test(m[2]) ? null : [norm(m[2].replace(/['’]s success chance$/i, ''))]);
+      });
+      if (raw.crew && raw.crew.buffActive) addPart('crew chain', 5);
       // Whiskers & Co.'s own buy price and sell-back price for every item, keyed by the game's own item id (the
       // same id that a trading listing's `item` field uses -- confirmed by matching real listings in the user's
       // own data to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/
@@ -440,10 +468,12 @@
 
   // ─── Maths ────────────────────────────────────────────────────────────────
   // Expected XP/nerve = (XP / nerve) x success x (1 + 0.5 x clean chance); clean chance = 5% + 1% per mastery level.
-  // Above 80 heat a district pays half the XP and turns no clean job at all.
+  // At 80 heat and up a district pays half the XP and turns no clean job at all. The game's text says "above 80",
+  // but the user saw a district still hot at exactly 80 (2026-10-02), so 80 counts; the game's own `hot` flag wins
+  // whenever its data has been seen.
   const HOT_HEAT = 80;
   function score(c, chain, heat) {
-    const hot = heat != null && heat > HOT_HEAT;
+    const hot = (c.api && c.api.hot) || (heat != null && heat >= HOT_HEAT);
     const cleanChance = hot ? 0 : 0.05 + 0.01 * (c.masteryLevel || 0);
     const cleanMult = 1 + 0.5 * cleanChance;
     const xpn = xpnOf(c);
@@ -571,7 +601,14 @@
       .msx-odds summary::-webkit-details-marker { display:none; }
       .msx-odds summary::before { content:'▸ '; }
       .msx-odds[open] summary::before { content:'▾ '; }
-      .msx-odds summary:hover { color:var(--ms-bone, #e7ede1); }
+      .msx-odds summary { color:#9ecbff; font-weight:600; }
+      .msx-odds summary:hover { color:#cfe5ff; text-decoration:underline; }
+      .msx-heatlock { flex-basis:100%; display:flex; align-items:center; flex-wrap:wrap; gap:6px; color:var(--ms-smoke, #8d9289); font-size:11.5px; }
+      .msx-heatlock.locked { color:var(--ms-red, #eb6561); font-weight:600; }
+      .msx-heatlock button { padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px; font-family:inherit; font-weight:600; width:auto; min-height:0;
+        color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-heatlock button:hover { border-color:var(--ms-lime, #b4df87); }
+      button.msx-heat-locked { opacity:.4; cursor:not-allowed !important; }
       .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
       .msx-drops { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
@@ -857,7 +894,17 @@
     const fmt = (v) => (v < 0 ? '−' : '+') + Math.abs(v);
     const bits = [`${a.baseChance} base`];
     if (a.masteryBonus) bits.push(`${fmt(a.masteryBonus)} mastery`);
-    if (a.bonus) bits.push(`<span title="Merits, education, crew and perks, added together by the game itself">${fmt(a.bonus)} bonus</span>`);
+    if (a.bonus) {
+      // The game's one combined bonus, split into its pieces. Whatever the known pieces don't explain is shown as
+      // "other", so the line always adds up to the game's own number.
+      const forThis = (p) => !p.crimes || p.crimes.some((k) => k === a.id || c.key.startsWith(norm(k)));
+      const parts = ((apiState && apiState.crimeBonusParts) || []).filter(forThis).map((p) => ({ label: p.label, v: p.v }));
+      const inside = loadDb().mods?.crewPerkCrime;
+      if (apiState && apiState.crew && inside) parts.push({ label: 'Inside line', v: inside });
+      const other = a.bonus - parts.reduce((s, p) => s + p.v, 0);
+      parts.forEach((p) => bits.push(`${fmt(p.v)} ${escHtml(p.label)}`));
+      if (other) bits.push(`<span class="msx-unk" title="Part of the game's bonus that none of the known sources explain">${fmt(other)} other</span>`);
+    }
     if (heatPts) bits.push(`${fmt(-heatPts)} heat`);
     const sum = a.baseChance + (a.masteryBonus || 0) + (a.bonus || 0) - heatPts;
     const capped = a.chance === 95 && sum > 95;
@@ -877,8 +924,44 @@
       `Clean-job drops: <b>${d.common}</b> · rare (~1%): <b>${d.rare}</b></div>`;
   }
 
+  // ─── Heat lock (Crimes page) ──────────────────────────────────────────────
+  // User request (0.17.7): at 80 heat and up (half XP, no clean jobs) a crime's own Attempt button is disabled
+  // until the district cools to 79, with an "Unlock anyway" button per district. Same idea as the Cat Tree lock:
+  // the script never clicks or attempts anything, it only blocks your own click. Button from a dev-tools capture
+  // (Screenshot 338): article.rung > div.rung-main > button.accent. An override lasts until the district cools.
+  const HEAT_OVERRIDE_KEY = 'ms_heat_override_v1';
+  function loadHeatOverrides() { try { return JSON.parse(GM_getValue(HEAT_OVERRIDE_KEY, '{}')) || {}; } catch (e) { return {}; } }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('.msx-heat-toggle');
+    if (!b) return;
+    const o = loadHeatOverrides();
+    if (o[b.dataset.district]) delete o[b.dataset.district]; else o[b.dataset.district] = true;
+    GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(o));
+    schedule();
+  });
+  function applyHeatLock(c, hot, heat, box, overrides) {
+    const btn = c.card.querySelector('.rung-main > button.accent');
+    if (!btn) return;
+    const locked = hot && !overrides[c.district];
+    if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-heat-locked'); }
+    else if (btn.classList.contains('msx-heat-locked')) { btn.disabled = false; btn.classList.remove('msx-heat-locked'); }
+    if (!hot) return;
+    const mins = heat != null ? Math.max(0, heat - (HOT_HEAT - 1)) * 5 : 0; // cools 1 point per 5 minutes
+    const when = mins ? ` · unlocks in ~${mins >= 60 ? Math.floor(mins / 60) + 'h ' : ''}${mins % 60}m` : '';
+    const note = document.createElement('div');
+    note.className = 'msx-heatlock' + (locked ? ' locked' : '');
+    note.innerHTML = (locked ? `🔒 Heat ${heat != null ? heat : '80+'}: half XP, Attempt locked${when}` : '🔓 Hot, unlocked by you') +
+      ` <button type="button" class="msx-heat-toggle" data-district="${escHtml(c.district)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
+    box.prepend(note);
+  }
+
   function draw(data) {
     clearDrawn();
+    // An "Unlock anyway" ends once its district has cooled below 80.
+    const overrides = loadHeatOverrides();
+    let overridesChanged = false;
+    Object.keys(overrides).forEach((d) => { if (data.heat[d] != null && data.heat[d] < HOT_HEAT) { delete overrides[d]; overridesChanged = true; } });
+    if (overridesChanged) GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(overrides));
     crewVotes = [];
     const scored = data.crimes.map((c) => ({ c, s: score(c, data.chain, data.heat[c.district]) }));
 
@@ -927,10 +1010,10 @@
       const h0 = data.heat[c.district];
       if (h0 != null && c.success != null) {
         if (s.hot) {
-          parts.push('<span class="msx-tag hot" title="Above 80 heat this district pays half the XP and turns no clean job. The XP/n above already reflects that.">Heat over 80: ½ XP, no clean</span>');
+          parts.push('<span class="msx-tag hot" title="At 80 heat and up this district pays half the XP and turns no clean job. The XP/n above already reflects that.">Heat 80+: ½ XP, no clean</span>');
         } else {
-          const n = Math.floor((HOT_HEAT - h0) / 6) + 1; // attempts until heat is above 80
-          if (n <= 8) parts.push(`<small title="Attempts until this district's heat goes over 80 (half XP, no clean jobs)">Over 80 heat in ${n} attempt${n === 1 ? '' : 's'}</small>`);
+          const n = Math.ceil((HOT_HEAT - h0) / 6); // attempts until heat reaches 80 (+6 heat each)
+          if (n <= 8) parts.push(`<small title="Attempts until this district's heat reaches 80 (half XP, no clean jobs)">Heat 80 in ${n} attempt${n === 1 ? '' : 's'}</small>`);
         }
       }
       if (x === bestXp) parts.push('<span class="msx-tag xp">★ Best XP</span>');
@@ -938,6 +1021,7 @@
       const oddsBlock = c.api ? oddsHtmlFromApi(c) : oddsHtml(c, data.heat[c.district], loadDb().mods || {});
       box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
       host.appendChild(box);
+      applyHeatLock(c, s.hot, h0, box, overrides);
 
       const best = [];
       if (x === bestXp) best.push('xp');
@@ -2254,7 +2338,6 @@
   let investSig = '';
   let lastStocksForInvest = [];
 
-  const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const money0 = (n) => (n < 0 ? '-' : '') + '$' + Math.round(Math.abs(n)).toLocaleString();
   const signed0 = (n) => (n > 0 ? '+' : '') + money0(n);
   const pct1 = (n) => (n * 100).toFixed(1) + '%';
