@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.1
+// @version      0.17.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -641,6 +641,8 @@
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
+      #msx-trading .msx-trade-key { padding-left:18px; font-size:12px; line-height:1.5; }
+      #msx-trading .msx-trade-key b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
@@ -2821,16 +2823,13 @@
       const opportunity = (r) => Math.max(r.sellProfit != null ? r.sellProfit : -Infinity, r.buyDiff != null ? -r.buyDiff : -Infinity);
       return opportunity(b) - opportunity(a);
     });
-    let h = '<p class="msx-inv-note">The cheapest currently-open listing for each item. "With tax" is what buying ' +
-      'it would actually cost: the listed price plus the Trading page\'s own stated 2% buyer\'s tax (rounded up), ' +
-      'the same total it shows you when you click to buy. "Vs store" checks that total against Whiskers & Co.\'s ' +
-      'own buy price; "Sells back for" is what Whiskers & Co. pays you for it if you already own one or buy this ' +
-      'listing -- when that\'s more than the listing\'s total cost, buying it and selling it straight back is ' +
-      'instant profit, flagged below. A few items (Premium tuna and Catnip tea, so far) have their own buy ' +
-      'price change every hour, within the range shown under it; once the hour is up it says "old price" until ' +
-      'the page reloads. If you own a store discount, consumables are compared against your discounted price. Not every item ' +
-      'has a store buy price (crime drops, for example) or a confirmed sell-back price -- those show a dash ' +
-      'rather than a guess.</p>';
+    // Kept short on purpose (user request, 0.17.2): one line per column that needs explaining.
+    let h = '<ul class="msx-inv-note msx-trade-key">' +
+      '<li>Cheapest open listing per item, best deal first.</li>' +
+      '<li><b>With tax</b>: listed price + the 2% buyer\'s tax.</li>' +
+      '<li><b>Vs store</b>: that total vs Whiskers & Co.\'s price (your discounted price if you own a discount).</li>' +
+      '<li><b>Resell profit</b>: buy it here, sell it to Whiskers & Co. for more.</li>' +
+      '<li>Hourly-priced items show their range. A dash means no price is known.</li></ul>';
     h += '<table class="msx-inv-table"><thead><tr><th>Item</th><th>Listed</th><th>With tax</th><th>Whiskers buy price</th>' +
       '<th>Vs store</th><th>Sells back for</th><th>Resell profit</th><th>Open listings</th></tr></thead><tbody>';
     rows.forEach((r) => {
