@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.17.5
+// @version      0.17.6
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist, page capture and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -648,6 +648,8 @@
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
+      .right-column #msx-mycrewjob { margin:16px 0 0; }
+      .right-column #msx-mycrewjob textarea { min-height:220px; }
       #msx-trading .msx-trade-key { padding-left:18px; font-size:12px; line-height:1.5; }
       #msx-trading .msx-trade-key b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
@@ -2731,6 +2733,12 @@
       'A ready-to-paste Discord message: open seats, filled seats and the payout.' +
       (jobs.length > 1 ? ' Click a job to make its message.' : ''),
       jobs, buildCrewJobMessage, apiState && apiState.crew && apiState.crew.name);
+    // In the right-hand column, straight under the "Your neighborhood" card (user request, 0.17.6; layout from a
+    // dev-tools capture, Screenshot 337: aside.right-column > section.panel.neighborhood). Falls back to the
+    // main column if that card isn't there.
+    const panel = document.getElementById('msx-mycrewjob');
+    const hood = document.querySelector('.right-column .neighborhood');
+    if (panel && hood && hood.nextElementSibling !== panel) hood.after(panel);
   }
 
   function ensureMyHeistPanel() {
