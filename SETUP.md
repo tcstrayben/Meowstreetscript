@@ -10,9 +10,9 @@ This repository is already published at `tcstrayben/Meowstreetscript`. These not
 
 If the repository is ever renamed or moved, update those same four header lines (and this file).
 
-## Before it was first published
+## Things to know
 
-- **Asked MeowStreets first.** Their terms ban scripts that "play for you". This one is display-only, but a public link makes it much easier to find. Emailing support@meowstreets.com and asking whether display-only scripts are allowed, and whether there is an official API, is the safe order of things — still not answered as of this repo's last update.
+- **MeowStreets has not been contacted about this script.** Their terms ban scripts that "play for you". This one is display-only, but nobody has asked MeowStreets whether display-only scripts are allowed.
 - The repository must stay **public**: Tampermonkey reads the raw script file without logging in, and a private repository cannot do that.
 
 ## What used to be here
