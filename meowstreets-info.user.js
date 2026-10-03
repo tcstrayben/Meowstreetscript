@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.20.1
+// @version      0.21.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job and stock price info, to your crew's own Discord bot (which also shares the crew's stock price history back).
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -676,6 +676,10 @@
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
       .right-column #msx-mycrewjob { margin:16px 0 0; }
+      #msx-chainpost { margin:16px 0 0; }
+      #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
+        background:rgba(0,0,0,.28); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      #msx-chainpost button:hover { border-color:var(--ms-lime, #b4df87); }
       .right-column #msx-mycrewjob textarea { min-height:220px; }
       #msx-trading .msx-trade-key { padding-left:18px; font-size:12px; line-height:1.5; }
       #msx-trading .msx-trade-key b { color:var(--ms-bone, #e7ede1); font-weight:600; }
@@ -1148,6 +1152,8 @@
   // ever sent to MeowStreets itself. The bot ignores every crew but its own.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
   const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
+  const CREW_BOT_CHAIN_URL = 'http://168.138.79.225:3001/v1/chain'; // the ⛓️ button on the Crew page
+  const CHAIN_FRESH_MS = 2 * 60000; // chain info older than this is never posted (the bot checks again)
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
@@ -1277,6 +1283,43 @@
       if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
       else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
     });
+  }
+
+  // ⛓️ Post chain (0.21.0, replaced the bot's automatic 1-minute ping): the bot posts "Crew chain ×N ends in …" as a
+  // Discord countdown. Only from game info under 2 minutes old -- the script never asks the game for fresh data
+  // itself (read-only rule), so stale info means "refresh the page".
+  function postChainToDiscord() {
+    const c = apiState && apiState.crew;
+    if (!c || !c.name) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
+    const ageMs = Date.now() - apiState.at;
+    if (ageMs > CHAIN_FRESH_MS) { toast('Not posted: the chain info is over 2 minutes old. Refresh the page, then try again.'); return; }
+    if (!c.chainEndsAt || c.chainEndsAt <= Date.now()) { toast('Not posted: the chain has already ended.'); return; }
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
+    if (typeof GM_xmlhttpRequest !== 'function') { toast('Not posted: Tampermonkey blocked the request.'); return; }
+    GM_xmlhttpRequest({
+      method: 'POST', url: CREW_BOT_CHAIN_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (err) { /* not json */ } toast(j && j.ok ? 'Chain posted to Discord.' : 'Not posted: ' + ((j && j.error) || 'unknown problem') + '.'); },
+      onerror: () => toast('Not posted: could not reach the crew bot.'),
+      ontimeout: () => toast('Not posted: the crew bot did not answer.'),
+    });
+  }
+
+  // The button lives on the Crew page, right column, under "Your neighborhood" (above the crew job box), while
+  // crew sharing is on.
+  function ensureChainPostButton() {
+    let box = document.getElementById('msx-chainpost');
+    const want = settings.shareCrew && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
+    if (!want) { if (box) box.remove(); return; }
+    const hood = document.querySelector('.right-column .neighborhood');
+    const host = hood ? null : document.querySelector('.main-content') || document.querySelector('main');
+    if (!hood && !host) return;
+    if (!box) {
+      box = document.createElement('div');
+      box.id = 'msx-chainpost';
+      box.innerHTML = '<button type="button" title="Post the crew chain and its countdown in the crew Discord">⛓️ Post chain to Discord</button>';
+      box.querySelector('button').addEventListener('click', postChainToDiscord);
+    }
+    if (hood) { if (hood.nextElementSibling !== box) hood.after(box); } else if (host.firstElementChild !== box) host.prepend(box);
   }
 
   function stockStats(id, currentPrice) {
@@ -1760,7 +1803,7 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, .msx-gymlock, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, .msx-gymlock, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
     // A locked Train button is this script's own doing, not something the game itself did -- a page capture
     // should reflect the real page, so the lock is undone on the clone (never on the live page) before saving.
     clone.querySelectorAll('button.msx-train-locked').forEach((n) => { n.disabled = false; n.classList.remove('msx-train-locked'); });
@@ -2771,7 +2814,8 @@
     // main column if that card isn't there.
     const panel = document.getElementById('msx-mycrewjob');
     const hood = document.querySelector('.right-column .neighborhood');
-    if (panel && hood && hood.nextElementSibling !== panel) hood.after(panel);
+    const anchor = hood && hood.nextElementSibling && hood.nextElementSibling.id === 'msx-chainpost' ? hood.nextElementSibling : hood;
+    if (panel && anchor && anchor.nextElementSibling !== panel) anchor.after(panel);
     // "📣 Post to Discord" (0.19.0): only while crew sharing is on. The crew bot posts the selected job and then
     // keeps editing that post as people join.
     let post = panel && panel.querySelector('.msx-postbtn');
@@ -3033,9 +3077,9 @@
       const it = items.get(norm(nameEl.textContent));
       let box = text.querySelector(':scope > .msx-ws');
       const pagePrice = num((row.querySelector('.ws-each b')?.textContent || '').replace(/[^\d.,]/g, ''));
-      // 📣 beside every item while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co.
-      // for $Y" to the crew bot's deals channel.
-      const deal = it && settings.shareCrew
+      // 📣 while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co. for $Y" to the
+      // crew bot's deals channel. Only on items whose price moves within a range (0.21.0) -- fixed prices are no news.
+      const deal = it && settings.shareCrew && it.min != null && it.max > it.min
         ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.price}"${it.min != null ? ` data-min="${it.min}" data-max="${it.max}"` : ''} title="Post this price to the crew Discord">📣 Post to Discord</button>`
         : '';
       const html = it ? whiskersHtml(it, pagePrice) + deal : '';
@@ -3113,6 +3157,7 @@
       updateCompanionPill();
       updatePvpPill();
       updateConsumablesPill();
+      ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
       ensureHeistsPanel();
@@ -3141,7 +3186,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
         if (muts.every(own)) return;
         schedule();
       });
