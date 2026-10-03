@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.22.1
+// @version      0.23.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -703,6 +703,9 @@
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
       .right-column #msx-mycrewjob { margin:16px 0 0; }
       #msx-chainpost { margin:16px 0 0; }
+      #msx-chainmode { margin:0 0 12px; padding:8px 12px; border-radius:10px; font-size:13px; font-weight:600; color:var(--ms-lime, #b4df87);
+        background:rgba(180,223,135,.08); border:1px solid rgba(180,223,135,.35); }
+      .msx-heatlock button.msx-chain-toggle, .msx-heatlock button.msx-heat-toggle { margin-left:2px; }
       .msx-feat-how { margin-top:3px; font-size:12px; color:var(--ms-lime, #b4df87); }
       #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
         background:rgba(0,0,0,.28); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
@@ -940,7 +943,7 @@
     if (!btn) return;
     const locked = hot && !overrides[c.district];
     if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-heat-locked'); }
-    else if (btn.classList.contains('msx-heat-locked')) { btn.disabled = false; btn.classList.remove('msx-heat-locked'); }
+    else if (btn.classList.contains('msx-heat-locked')) { btn.classList.remove('msx-heat-locked'); if (!btn.classList.contains('msx-chain-locked')) btn.disabled = false; }
     if (!hot) return;
     const mins = heat != null ? Math.max(0, heat - (HOT_HEAT - 1)) * 5 : 0; // cools 1 point per 5 minutes
     const when = mins ? ` · unlocks in ~${mins >= 60 ? Math.floor(mins / 60) + 'h ' : ''}${mins % 60}m` : '';
@@ -976,6 +979,11 @@
     let overridesChanged = false;
     Object.keys(overrides).forEach((d) => { if (data.heat[d] != null && data.heat[d] < HOT_HEAT) { delete overrides[d]; overridesChanged = true; } });
     if (overridesChanged) GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(overrides));
+    // Chain mode: "Unlock anyway" picks only last while it stays on.
+    const chainMin = chainModeMin();
+    let chainOverrides = loadChainOverrides();
+    if (chainMin == null && Object.keys(chainOverrides).length) { chainOverrides = {}; clearChainOverrides(); }
+    ensureChainModeBanner(chainMin);
     crewVotes = [];
     const scored = data.crimes.map((c) => ({ c, s: score(c, data.chain, data.heat[c.district]) }));
 
@@ -1036,6 +1044,7 @@
       box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
       host.appendChild(box);
       applyHeatLock(c, s.hot, h0, box, overrides);
+      applyChainModeLock(c, box, chainMin, chainOverrides);
 
       const best = [];
       if (x === bestXp) best.push('xp');
@@ -1189,6 +1198,11 @@
   const SHARE_CREW_ID = 2;
   const inShareCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
   const sharingOn = () => !!settings.shareCrew && inShareCrew();
+  // Crew chain mode (0.23.0): leadership turns it on in Discord; the bot's reply to every crew update says
+  // { on, min }. Kept with when it was heard, and trusted for 30 minutes (then the locks lift by themselves).
+  const CHAIN_MODE_KEY = 'ms_chain_mode_v1';
+  const CHAIN_MODE_TTL_MS = 30 * 60000;
+  const CHAIN_OVERRIDE_KEY = 'ms_chain_override_v1'; // { [crimeKey]: true } "Unlock anyway", cleared when it turns off
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
 
   // A random id for this install only (lets the bot slow down one noisy sender); not tied to your game account.
@@ -1224,7 +1238,16 @@
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_URL, data: JSON.stringify(body), timeout: 15000,
       headers: { 'Content-Type': 'application/json' },
-      onload: (r) => { if (!done) return; let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } done(j || { ok: false, error: 'bad reply (' + r.status + ')' }); },
+      onload: (r) => {
+        let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
+        if (j && j.chainMode && typeof j.chainMode === 'object') {
+          const m = { on: !!j.chainMode.on, min: Number(j.chainMode.min) || 90, heard: Date.now() };
+          const old = GM_getValue(CHAIN_MODE_KEY, null);
+          GM_setValue(CHAIN_MODE_KEY, m);
+          if (!old || old.on !== m.on || old.min !== m.min) schedule();
+        }
+        if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
+      },
       onerror: () => { if (done) done({ ok: false, error: 'could not reach the crew bot' }); },
       ontimeout: () => { if (done) done({ ok: false, error: 'the crew bot did not answer' }); },
     });
@@ -1408,6 +1431,53 @@
       const text = 'How to get it: ' + found.criteria;
       if (line.textContent !== text) line.textContent = text;
     });
+  }
+
+  // ─── Crew chain mode lock (Crimes page, 0.23.0) ───────────────────────────
+  // While crew leadership has chain mode on (set in Discord, see above), every crime whose success % on its card
+  // is under the threshold gets its own Attempt button disabled, like the heat lock -- the script never attempts
+  // anything, it only blocks your own click. "Unlock anyway" per crime, until chain mode is turned off.
+  function chainModeMin() {
+    const m = GM_getValue(CHAIN_MODE_KEY, null);
+    if (!sharingOn() || !m || !m.on || Date.now() - m.heard > CHAIN_MODE_TTL_MS) return null;
+    return m.min;
+  }
+  function clearChainOverrides() { GM_setValue(CHAIN_OVERRIDE_KEY, {}); }
+  function loadChainOverrides() { const o = GM_getValue(CHAIN_OVERRIDE_KEY, null); return o && typeof o === 'object' ? o : {}; }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('.msx-chain-toggle');
+    if (!b) return;
+    const o = loadChainOverrides();
+    if (o[b.dataset.crime]) delete o[b.dataset.crime]; else o[b.dataset.crime] = true;
+    GM_setValue(CHAIN_OVERRIDE_KEY, o);
+    schedule();
+  });
+  function applyChainModeLock(c, box, min, overrides) {
+    const btn = c.card.querySelector('.rung-main > button.accent');
+    if (!btn) return;
+    const pct = c.success != null ? Math.round(c.success * 100) : null; // c.success is a fraction (0.95)
+    const under = min != null && pct != null && pct < min;
+    const locked = under && !overrides[c.key];
+    if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-chain-locked'); }
+    else if (btn.classList.contains('msx-chain-locked')) {
+      btn.classList.remove('msx-chain-locked');
+      if (!btn.classList.contains('msx-heat-locked')) btn.disabled = false;
+    }
+    if (!under) return;
+    const note = document.createElement('div');
+    note.className = 'msx-heatlock' + (locked ? ' locked' : '');
+    note.innerHTML = (locked ? `⛓️ Chain mode: ${pct}% is under ${min}%, Attempt locked` : `⛓️ Under ${min}%, unlocked by you`) +
+      ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(c.key)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
+    box.prepend(note);
+  }
+  // A one-line banner at the top of the Crimes page while chain mode is on.
+  function ensureChainModeBanner(min) {
+    let el = document.getElementById('msx-chainmode');
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (min == null || !host) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('div'); el.id = 'msx-chainmode'; host.prepend(el); }
+    const text = `⛓️ Crew chain mode is on: only crimes at ${min}%+ (set by crew leadership in Discord)`;
+    if (el.textContent !== text) el.textContent = text;
   }
 
   function stockStats(id, currentPrice) {
@@ -3316,7 +3386,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
         if (muts.every(own)) return;
         schedule();
       });

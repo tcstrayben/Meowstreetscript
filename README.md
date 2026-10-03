@@ -20,7 +20,7 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 
 ## Crew sharing (one crew only)
 
-Members of the crew the maintainer runs a Discord bot for get an extra switch on the Account page. It is off until you turn it on, and other players never see it. When on, the script sends to that crew's bot: the crew chain and its end time, the crew's active jobs (seats, members' names and levels, payout), the stock prices you've seen, and the feats you've earned. In return you get the crew's shared stock price history, how to get hidden feats a crewmate has found, and buttons to post the chain, a crew job or a Whiskers price to the crew's Discord. Nothing is ever sent to MeowStreets, and nothing about your account (cash, email, messages) is sent anywhere.
+Members of the crew the maintainer runs a Discord bot for get an extra switch on the Account page. It is off until you turn it on, and other players never see it. When on, the script sends to that crew's bot: the crew chain and its end time, the crew's active jobs (seats, members' names and levels, payout), the stock prices you've seen, and the feats you've earned. In return you get the crew's shared stock price history, how to get hidden feats a crewmate has found, the crew's chain mode (when leadership turns it on, crimes under the chosen success % are locked), and buttons to post the chain, a crew job or a Whiskers price to the crew's Discord. Nothing is ever sent to MeowStreets, and nothing about your account (cash, email, messages) is sent anywhere.
 
 ## Install
 
