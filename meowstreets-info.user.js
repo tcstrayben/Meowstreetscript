@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.22.0
+// @version      0.22.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3144,11 +3144,12 @@
   function whiskersDiscountHtml(it) {
     // The game's price already has the discount taken off (0.22.0 fix), so this only says so and gives the
     // normal price. No discount owned: show nothing (user request, 0.16.1).
+    // Two lines (user request, 0.22.1): the regular price, then where your discount comes from.
     if (!it.disc) return '';
     const pct = Math.round((1 - apiState.marketRate) * 1000) / 10;
     const named = (apiState.marketDiscounts || []).filter((s) => s.owned).map((s) => `${escHtml(s.name)} −${s.pct}%`);
     const label = named.length ? named.join(' · ') : `Discount −${pct}%`;
-    return `<div class="msx-ws-disc">${label} <small>(already in the price)</small> · normal <b>${money0(it.base)}</b></div>`;
+    return `<div>Regular price <b>${money0(it.base)}</b></div><div class="msx-ws-disc">Your discount: ${label}</div>`;
   }
 
   // Kept deliberately short (user request, 0.16.1): just the game's own range, plus a discount line only when
