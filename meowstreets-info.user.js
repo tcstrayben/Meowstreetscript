@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.21.0
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job and stock price info, to your crew's own Discord bot (which also shares the crew's stock price history back).
+// @version      0.22.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -93,7 +93,7 @@
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
         crimeBonusParts: [], storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0, crewJobsSeen: false,
-        heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null,
+        heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null, deposits: [],
       };
       (raw.crimes || []).forEach((c) => {
         if (!c || !c.name) return;
@@ -111,14 +111,20 @@
       }
       if (raw.crew && typeof raw.crew === 'object') {
         out.crew = {
-          name: raw.crew.name || null,
+          name: raw.crew.name || null, id: raw.crew.id != null ? Number(raw.crew.id) : null,
           buffActive: !!raw.crew.buffActive, buffUntil: raw.crew.buff_until || 0,
           chain: raw.crew.chain, chainAt: raw.crew.chain_at, chainEndsAt: raw.crew.chainEndsAt,
           treasury: raw.crew.treasury, respect: raw.crew.respect,
         };
       }
+      // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
+      // collected on the Feline Bank page ("broken" = taken out early, not counted).
+      if (Array.isArray(raw.deposits)) {
+        out.deposits = raw.deposits.filter((d) => d && d.status === 'open' && Number.isFinite(d.ends_at))
+          .map((d) => ({ amount: Number(d.amount) || 0, endsAt: d.ends_at }));
+      }
       if (raw.chain && typeof raw.chain === 'object') {
-        out.chain = { count: raw.chain.count, multiplier: raw.chain.multiplier, next: raw.chain.next, expiresAt: raw.chain.expiresAt };
+        out.chain ={ count: raw.chain.count, multiplier: raw.chain.multiplier, next: raw.chain.next, expiresAt: raw.chain.expiresAt };
       }
       // Only this one field of `player` is ever kept -- that object also carries the account email, so it is
       // never read as a whole.
@@ -303,27 +309,45 @@
       // `reference_price` (its exact midpoint in both cases seen), until `priceUntil` -- not a static catalog
       // price for everything any more, just read fresh every time, same as before.
       out.storeItems = {};
-      // min/max/until only exist on items whose price moves hourly; consumable = same rule as the Whiskers page.
+      // The game's `price` and `priceRange` ALREADY have your store discount taken off (0.22.0 fix, confirmed on the
+      // 2026-10-03 capture: with Staff discount, marketRate 0.85, Ball of yarn's price is 77 against a
+      // reference_price of 90, Bandages 170 vs 200; Catnip tea's range 340-850 is 400-1,000 x 0.85). So `price` is
+      // what you pay. `base`/`baseMin`/`baseMax` are the normal prices, for showing the normal range and for Discord
+      // posts. An item counts as discounted when its reference price x marketRate gives the game's price (tools and
+      // weapons are not discounted). Undo: the smallest whole price that rounds to the game's figure.
+      const rate = raw.modifiers && Number.isFinite(raw.modifiers.marketRate) && raw.modifiers.marketRate > 0 && raw.modifiers.marketRate < 1 ? raw.modifiers.marketRate : 1;
+      const undo = (v) => (Number.isFinite(v) ? Math.ceil((v - 0.5) / rate - 1e-9) : null);
+      const normal = (it) => {
+        const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
+        const ref = Number.isFinite(it.reference_price) ? it.reference_price : null;
+        const disc = rate < 1 && ref != null && (range ? Math.abs((range[0] + range[1]) / 2 - ref * rate) <= 1 : it.price !== ref && Math.round(ref * rate) === it.price);
+        return {
+          range, disc,
+          base: disc ? (range ? undo(it.price) : ref) : it.price,
+          baseMin: range ? (disc ? undo(range[0]) : range[0]) : null,
+          baseMax: range ? (disc ? undo(range[1]) : range[1]) : null,
+        };
+      };
+      // min/max/until only exist on items whose price moves hourly.
       (raw.items || []).forEach((it) => {
         if (!it || it.id == null) return;
-        const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
+        const n = normal(it);
         out.storeItems[it.id] = {
           name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack,
-          min: range ? range[0] : null, max: range ? range[1] : null, until: it.priceUntil || 0, consumable: !!it.resource && !it.island,
+          min: n.range ? n.range[0] : null, max: n.range ? n.range[1] : null, until: it.priceUntil || 0,
+          disc: n.disc, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
         };
       });
       (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice != null ? g.sellPrice : g.sellBack }; });
-      // For the Whiskers & Co. page itself: every store item's price, plus -- for the ones whose price moves
-      // hourly (only Premium tuna and Catnip tea so far) -- the game's own stated `priceRange` [min, max], its
-      // `reference_price` (the range's exact midpoint every time seen) and `priceUntil` (on the hour).
-      // "Consumable" = has a `resource` it restores and isn't an island-only item; that's a best reading of
-      // what the Staff discount text's "market consumables" covers, not confirmed by the game.
+      // For the Whiskers & Co. page itself: every store item's price (what you pay), plus -- for the ones whose
+      // price moves hourly (Premium tuna and Catnip tea) -- the game's `priceRange`, `reference_price` and
+      // `priceUntil` (on the hour), and the normal (undiscounted) price and range from above.
       out.shopItems = (raw.items || []).filter((it) => it && it.name && Number.isFinite(it.price)).map((it) => {
-        const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
+        const n = normal(it);
         return {
           name: it.name, price: it.price, ref: Number.isFinite(it.reference_price) ? it.reference_price : null,
-          min: range ? range[0] : null, max: range ? range[1] : null, until: it.priceUntil || 0,
-          consumable: !!it.resource && !it.island,
+          min: n.range ? n.range[0] : null, max: n.range ? n.range[1] : null, until: it.priceUntil || 0,
+          disc: n.disc, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
         };
       });
       // Everything that can make store consumables cheaper. `modifiers.marketRate` is the game's own combined
@@ -358,13 +382,15 @@
   }
 
   function installApiWatch() {
-    const isStateUrl = (url) => { try { return new URL(url, location.href).pathname === '/api/state'; } catch (e) { return false; } };
+    const pathOf = (url) => { try { return new URL(url, location.href).pathname; } catch (e) { return ''; } };
+    // /api/state everywhere; /api/merits is what the Merits page itself loads (for the hidden feats, 0.22.0).
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/merits': onMeritsResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
         const p = realFetch.apply(this, args);
         p.then((res) => {
-          try { if (res && res.url && isStateUrl(res.url)) res.clone().json().then(onApiStateResponse).catch(() => {}); } catch (e) { /* ignore */ }
+          try { const h = res && res.url && HANDLERS[pathOf(res.url)]; if (h) res.clone().json().then(h).catch(() => {}); } catch (e) { /* ignore */ }
         }).catch(() => {});
         return p;
       };
@@ -376,7 +402,7 @@
       const sendOrig = RealXHR.prototype.send;
       RealXHR.prototype.send = function (...args) {
         this.addEventListener('loadend', () => {
-          try { if (this.__msxUrl && isStateUrl(this.__msxUrl) && this.responseText) onApiStateResponse(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
+          try { const h = this.__msxUrl && HANDLERS[pathOf(this.__msxUrl)]; if (h && this.responseText) h(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
         });
         return sendOrig.apply(this, args);
       };
@@ -677,6 +703,7 @@
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
       .right-column #msx-mycrewjob { margin:16px 0 0; }
       #msx-chainpost { margin:16px 0 0; }
+      .msx-feat-how { margin-top:3px; font-size:12px; color:var(--ms-lime, #b4df87); }
       #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
         background:rgba(0,0,0,.28); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-chainpost button:hover { border-color:var(--ms-lime, #b4df87); }
@@ -1153,9 +1180,15 @@
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
   const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
   const CREW_BOT_CHAIN_URL = 'http://168.138.79.225:3001/v1/chain'; // the ⛓️ button on the Crew page
+  const CREW_BOT_FEATS_URL = 'http://168.138.79.225:3001/v1/feats'; // hidden feats found by the crew (Merits page)
   const CHAIN_FRESH_MS = 2 * 60000; // chain info older than this is never posted (the bot checks again)
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
+  // Sharing is only for one crew (user request, 0.22.0): the game's own crew id must be 2 (Pirate Cats). Anyone
+  // else never sees the sharing switch or the Discord buttons, and nothing is sent. The bot checks the id too.
+  const SHARE_CREW_ID = 2;
+  const inShareCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
+  const sharingOn = () => !!settings.shareCrew && inShareCrew();
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
 
   // A random id for this install only (lets the bot slow down one noisy sender); not tied to your game account.
@@ -1173,7 +1206,7 @@
     const c = apiState.crew;
     // seenAt = when the game delivered this data. It changes on every game update, so the bot also hears "someone is
     // live" while nothing else changed -- the chain alert only fires on info the game confirmed in the last 2 minutes.
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
     if (apiState.crewJobsSeen) {
       body.jobs = (apiState.myCrewJobs || []).map((j) => ({
         id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
@@ -1199,7 +1232,7 @@
 
   // Sends only when something changed, and at most once per SHARE_MIN_GAP_MS (a late change waits for the gap).
   function shareCrew() {
-    if (!settings.shareCrew) return;
+    if (!sharingOn()) return;
     const body = crewSharePayload();
     if (!body) return;
     const sig = JSON.stringify(body);
@@ -1222,7 +1255,7 @@
   let stockSyncAt = 0, stockSyncBusy = false;
 
   function syncStocks(force) {
-    if (!settings.shareCrew || stockSyncBusy || !apiState || !apiState.crew || !apiState.crew.name) return;
+    if (!sharingOn() || stockSyncBusy || !apiState.crew.name) return;
     if (typeof GM_xmlhttpRequest !== 'function') return;
     if (!force && Date.now() - stockSyncAt < STOCK_SYNC_GAP_MS) return;
     const out = [];
@@ -1236,7 +1269,7 @@
     stockSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: STOCK_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name }, prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
       onload: (r) => {
         stockSyncBusy = false;
         let j = null;
@@ -1274,6 +1307,7 @@
 
   // The "📣 Post to Discord" button: sends the current crew info plus which job to post.
   function postJobToDiscord(jobId) {
+    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
     const body = crewSharePayload();
     if (!body) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
     body.post = jobId;
@@ -1290,11 +1324,11 @@
   // itself (read-only rule), so stale info means "refresh the page".
   function postChainToDiscord() {
     const c = apiState && apiState.crew;
-    if (!c || !c.name) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
+    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
     const ageMs = Date.now() - apiState.at;
     if (ageMs > CHAIN_FRESH_MS) { toast('Not posted: the chain info is over 2 minutes old. Refresh the page, then try again.'); return; }
     if (!c.chainEndsAt || c.chainEndsAt <= Date.now()) { toast('Not posted: the chain has already ended.'); return; }
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
     if (typeof GM_xmlhttpRequest !== 'function') { toast('Not posted: Tampermonkey blocked the request.'); return; }
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_CHAIN_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
@@ -1308,7 +1342,7 @@
   // crew sharing is on.
   function ensureChainPostButton() {
     let box = document.getElementById('msx-chainpost');
-    const want = settings.shareCrew && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
+    const want = sharingOn() && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
     if (!want) { if (box) box.remove(); return; }
     const hood = document.querySelector('.right-column .neighborhood');
     const host = hood ? null : document.querySelector('.main-content') || document.querySelector('main');
@@ -1320,6 +1354,60 @@
       box.querySelector('button').addEventListener('click', postChainToDiscord);
     }
     if (hood) { if (hood.nextElementSibling !== box) hood.after(box); } else if (host.firstElementChild !== box) host.prepend(box);
+  }
+
+  // ─── Hidden feats (Merits page, 0.22.0) ───────────────────────────────────
+  // The game sends a hidden feat as just { id, hidden: true } until you earn it. Crew members (crew 2, sharing on)
+  // send the feats they HAVE earned (id, name, how to get it) to the crew bot and get back every one the crew has
+  // found, so a hidden feat on your Merits page can show how to get it. Nothing about who found it.
+  let meritFeats = null; // [{ id, name, criteria, hidden, held }] from the last /api/merits seen
+  const FEAT_POOL_KEY = 'ms_feat_pool_v1'; // { [featId]: { name, criteria } } from the crew bot
+  const FEAT_SYNC_GAP_MS = 10 * 60000;
+  let featSyncAt = 0, featSyncSig = '';
+
+  function onMeritsResponse(json) {
+    if (!json || !Array.isArray(json.feats)) return;
+    meritFeats = json.feats.filter((f) => f && f.id != null).map((f) => ({
+      id: String(f.id), name: typeof f.name === 'string' ? f.name : null, criteria: typeof f.criteria === 'string' ? f.criteria : null,
+      hidden: !!f.hidden, held: !!f.held,
+    }));
+    syncFeats();
+    schedule();
+  }
+
+  function syncFeats() {
+    if (!meritFeats || !sharingOn() || typeof GM_xmlhttpRequest !== 'function') return;
+    // Only feats you hold, with their text. Non-hidden ones are sent too: once earned, the game may no longer
+    // mark a hidden feat as hidden, so there is no telling them apart. All of it is on everyone's Merits page anyway.
+    const mine = meritFeats.filter((f) => f.held && f.name && f.criteria).map((f) => ({ id: f.id, name: f.name, criteria: f.criteria }));
+    const sig = mine.map((f) => f.id).join(',');
+    if (sig === featSyncSig && Date.now() - featSyncAt < FEAT_SYNC_GAP_MS) return;
+    featSyncSig = sig; featSyncAt = Date.now();
+    GM_xmlhttpRequest({
+      method: 'POST', url: CREW_BOT_FEATS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, feats: mine }),
+      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
+    });
+  }
+
+  // Each hidden feat stays exactly as the game shows it ("???" / "Hidden until you earn it."); a line under it
+  // says how to get it, once the crew has found it. The page lists feats in the same order as the game's data, so
+  // the Nth "Hidden until you earn it." is the Nth hidden feat (skipped if the counts don't match).
+  function drawHiddenFeats() {
+    const old = document.querySelectorAll('.msx-feat-how');
+    const pool = location.pathname.replace(/\/+$/, '') === '/merits' && meritFeats && sharingOn() ? GM_getValue(FEAT_POOL_KEY, null) : null;
+    if (!pool) { old.forEach((n) => n.remove()); return; }
+    const hidden = meritFeats.filter((f) => f.hidden && !f.held);
+    const spots = [...document.querySelectorAll('.main-content *, main *')].filter((el) => !el.children.length && el.textContent.trim() === 'Hidden until you earn it.');
+    if (spots.length !== hidden.length) { old.forEach((n) => n.remove()); return; }
+    spots.forEach((el, i) => {
+      const found = pool[hidden[i].id];
+      let line = el.nextElementSibling && el.nextElementSibling.classList.contains('msx-feat-how') ? el.nextElementSibling : null;
+      if (!found || !found.criteria) { if (line) line.remove(); return; }
+      if (!line) { line = document.createElement('div'); line.className = 'msx-feat-how'; el.after(line); }
+      const text = 'How to get it: ' + found.criteria;
+      if (line.textContent !== text) line.textContent = text;
+    });
   }
 
   function stockStats(id, currentPrice) {
@@ -1584,6 +1672,50 @@
     if (seg.innerHTML !== html) seg.innerHTML = html;
   }
 
+  // ─── Crew +5% crime bonus (sidebar, every page, 0.22.0) ───────────────────
+  // While the crew's +5% window is on, a "+5%: h:mm:ss" line inside the crew chain box (same dashed divider as the
+  // crew job line), counting down to the game's own `buff_until`. Hidden once it ends.
+  function updateCrewBuffPill() {
+    const crew = apiState && apiState.crew;
+    const chainEl = document.querySelector('.msx-chain');
+    let seg = chainEl ? chainEl.querySelector('.msx-crewbuff-inline') : null;
+    const remain = crew && crew.buffActive ? crew.buffUntil - Date.now() : 0;
+    if (!chainEl || !(remain > 0)) { if (seg) seg.remove(); return; }
+    if (!seg) {
+      seg = document.createElement('span');
+      seg.className = 'msx-crewjob-inline msx-crewbuff-inline';
+      const job = chainEl.querySelector('.msx-crewjob-inline');
+      if (job) job.before(seg); else chainEl.appendChild(seg);
+    }
+    setTitle(seg, `Crew +5% crime chance ends at ${fmtTime(crew.buffUntil)}`);
+    seg.classList.toggle('soon', remain <= 15 * 60 * 1000);
+    const text = `+5%: ${fmtClock(remain)}`;
+    if (seg.textContent !== text) seg.textContent = text;
+  }
+
+  // ─── Bank deposits ready to collect (sidebar, every page, 0.22.0) ─────────
+  // Only shown while at least one deposit is past its end time; a plain link to the Feline Bank, like the
+  // companion and tuna/catnip pills.
+  const BANK_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M6 18 24 7l18 11Z" fill="#E9C46A"/><rect x="8" y="18" width="32" height="3" fill="#8A8F86"/><rect x="11" y="22" width="4" height="14" fill="#E7EDE1"/><rect x="19" y="22" width="4" height="14" fill="#E7EDE1"/><rect x="27" y="22" width="4" height="14" fill="#E7EDE1"/><rect x="35" y="22" width="4" height="14" fill="#E7EDE1"/><rect x="6" y="36" width="36" height="4" rx="1" fill="#8A8F86"/><circle cx="24" cy="14" r="2" fill="#182316"/></svg>';
+  function updateBankPill() {
+    const now = Date.now();
+    const ready = ((apiState && apiState.deposits) || []).filter((d) => d.endsAt <= now);
+    let el = document.querySelector('.msx-bank');
+    if (!ready.length) { if (el) el.remove(); return; }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('a');
+      el.href = '/feline-bank';
+      el.className = 'msx-ticker msx-bank msx-pill-link soon';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    const total = ready.reduce((s, d) => s + d.amount, 0);
+    setTitle(el, `${ready.length} bank deposit${ready.length > 1 ? 's' : ''} (${fmtMoney(total)} put in) ready to collect at the Feline Bank`);
+    const html = `${BANK_ICON}${ready.length} ready`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+  }
+
   // A plain heist-mask icon for the heist pill below -- drawn in the same flat style as the item/cat icons (not
   // the game's own art) so it needs no request either.
   const HEIST_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M4 20c4-6 12-9 20-9s16 3 20 9c-3 7-10 12-20 12S7 27 4 20Z" fill="#182316"/><ellipse cx="15" cy="19" rx="5" ry="4" fill="#E7EDE1"/><ellipse cx="33" cy="19" rx="5" ry="4" fill="#E7EDE1"/><circle cx="15" cy="19" r="2" fill="#182316"/><circle cx="33" cy="19" r="2" fill="#182316"/><path d="M2 18 8 20M46 18 40 20" stroke="#182316" stroke-width="2.4" stroke-linecap="round"/></svg>';
@@ -1795,7 +1927,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); }, 1000);
+    updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateCrewBuffPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -2819,7 +2951,7 @@
     // "📣 Post to Discord" (0.19.0): only while crew sharing is on. The crew bot posts the selected job and then
     // keeps editing that post as people join.
     let post = panel && panel.querySelector('.msx-postbtn');
-    if (panel && settings.shareCrew && !post) {
+    if (panel && sharingOn() && !post) {
       post = document.createElement('button');
       post.type = 'button';
       post.className = 'msx-postbtn';
@@ -2827,7 +2959,7 @@
       post.title = 'Post this job in the crew Discord. The post updates itself as people join.';
       post.addEventListener('click', () => postJobToDiscord(panel.dataset.selectedId));
       panel.querySelector('.msx-copybtn').after(post);
-    } else if (post && !settings.shareCrew) post.remove();
+    } else if (post && !sharingOn()) post.remove();
   }
 
   function ensureMyHeistPanel() {
@@ -2925,23 +3057,21 @@
     // a $105 buy taxed $3, which is only 2% rounded up, not down or to the nearest dollar).
     const TRADE_TAX_RATE = 0.02;
     const taxOn = (price) => Math.ceil(price * TRADE_TAX_RATE);
-    // An owned store discount (the game's own `marketRate`, e.g. 0.85 with Staff discount) applies to consumables,
-    // so "Vs store" compares against what the store would actually charge you, not its full price.
-    const rate = apiState && apiState.marketRate < 1 ? apiState.marketRate : 1;
+    // The store price is what the game charges you, already after any store discount (0.22.0 fix: it used to take the
+    // discount off a second time). A discounted item notes its normal price; the range shown is the normal range.
     const now = Date.now();
     tradingRefreshAt = 0;
     const rows = [...cheapest.entries()].map(([id, l]) => {
       const s = store[id];
       const total = l.price + taxOn(l.price);
-      const discounted = !!(s && s.consumable && rate < 1);
-      const buyPrice = s && Number.isFinite(s.price) ? (discounted ? Math.round(s.price * rate) : s.price) : null;
+      const buyPrice = s && Number.isFinite(s.price) ? s.price : null;
       // Hourly prices: once `priceUntil` has passed, the store price shown is last hour's until the game reloads.
       const stale = !!(s && s.until && now >= s.until);
       if (s && s.until > now && (!tradingRefreshAt || s.until < tradingRefreshAt)) tradingRefreshAt = s.until;
       let storeCell = '—';
       if (buyPrice != null) {
-        storeCell = money0(buyPrice) + (discounted ? ` <small>(−${Math.round((1 - rate) * 100)}% of ${money0(s.price)})</small>` : '');
-        if (s.min != null) storeCell += `<br><small>range ${money0(s.min)} – ${money0(s.max)}</small>`;
+        storeCell = money0(buyPrice) + (s.disc ? ` <small>(your discount; normal ${money0(s.base)})</small>` : '');
+        if (s.baseMin != null) storeCell += `<br><small>range ${money0(s.baseMin)} – ${money0(s.baseMax)}</small>`;
         if (stale) storeCell += '<br><small class="msx-stale">(old price, refresh)</small>';
       }
       const sellPrice = s ? s.sellPrice : null;
@@ -3011,29 +3141,23 @@
   // The discount line, laid out like the crime odds breakdown: each source and its share, then the total.
   // The total is always the game's own `marketRate`, never the sources added up by hand (whether two
   // discounts add or multiply isn't known yet).
-  function whiskersDiscountHtml(it, pagePrice) {
-    const rate = apiState.marketRate;
-    const sources = apiState.marketDiscounts || [];
-    if (rate < 1) {
-      const pct = Math.round((1 - rate) * 1000) / 10;
-      const pay = Math.round(it.price * rate);
-      const named = sources.filter((s) => s.owned).map((s) => `${escHtml(s.name)} −${s.pct}%`);
-      const label = named.length ? named.join(' · ') : `Discount −${pct}%`;
-      // Not yet known whether the game's listed price already has the discount taken off. When the page already
-      // shows the discounted figure, say so instead of taking it off a second time.
-      if (pagePrice === pay && pay !== it.price) return `<div class="msx-ws-disc">${label} <small>(already in the price)</small></div>`;
-      return `<div class="msx-ws-disc">${label} → you pay <b>${money0(pay)}</b></div>`;
-    }
-    // No discount owned: show nothing (user request, 0.16.1 -- listing the ones you could get was too much).
-    return '';
+  function whiskersDiscountHtml(it) {
+    // The game's price already has the discount taken off (0.22.0 fix), so this only says so and gives the
+    // normal price. No discount owned: show nothing (user request, 0.16.1).
+    if (!it.disc) return '';
+    const pct = Math.round((1 - apiState.marketRate) * 1000) / 10;
+    const named = (apiState.marketDiscounts || []).filter((s) => s.owned).map((s) => `${escHtml(s.name)} −${s.pct}%`);
+    const label = named.length ? named.join(' · ') : `Discount −${pct}%`;
+    return `<div class="msx-ws-disc">${label} <small>(already in the price)</small> · normal <b>${money0(it.base)}</b></div>`;
   }
 
   // Kept deliberately short (user request, 0.16.1): just the game's own range, plus a discount line only when
   // one is owned. The hourly price history is still recorded (db.shopPrices, in the export), just not shown.
-  function whiskersHtml(it, pagePrice) {
+  function whiskersHtml(it) {
     let h = '';
-    if (it.min != null && it.max > it.min) h += `<div>Range <b>${money0(it.min)} – ${money0(it.max)}</b></div>`;
-    if (it.consumable) h += whiskersDiscountHtml(it, pagePrice);
+    // The normal range, without your discount (user request, 0.22.0).
+    if (it.baseMin != null && it.baseMax > it.baseMin) h += `<div>Range <b>${money0(it.baseMin)} – ${money0(it.baseMax)}</b></div>`;
+    h += whiskersDiscountHtml(it);
     return h;
   }
 
@@ -3041,8 +3165,8 @@
     const b = e.target.closest && e.target.closest('.msx-ws-deal');
     if (!b) return;
     e.preventDefault(); e.stopPropagation();
-    if (!apiState || !apiState.crew || !apiState.crew.name) { toast('No crew info yet. Open the Crew page once, then try again.'); return; }
-    const body = { v: 1, sender: shareId(), crew: { name: apiState.crew.name }, item: b.dataset.item, price: Number(b.dataset.price) };
+    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
+    const body = { v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, item: b.dataset.item, price: Number(b.dataset.price) };
     if (b.dataset.min) { body.min = Number(b.dataset.min); body.max = Number(b.dataset.max); }
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_DEAL_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
@@ -3076,13 +3200,13 @@
       if (!nameEl) return;
       const it = items.get(norm(nameEl.textContent));
       let box = text.querySelector(':scope > .msx-ws');
-      const pagePrice = num((row.querySelector('.ws-each b')?.textContent || '').replace(/[^\d.,]/g, ''));
       // 📣 while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co. for $Y" to the
       // crew bot's deals channel. Only on items whose price moves within a range (0.21.0) -- fixed prices are no news.
-      const deal = it && settings.shareCrew && it.min != null && it.max > it.min
-        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.price}"${it.min != null ? ` data-min="${it.min}" data-max="${it.max}"` : ''} title="Post this price to the crew Discord">📣 Post to Discord</button>`
+      // The Discord post gets the normal price and range, never your personal discount (user request, 0.22.0).
+      const deal = it && sharingOn() && it.baseMin != null && it.baseMax > it.baseMin
+        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.base}" data-min="${it.baseMin}" data-max="${it.baseMax}" title="Post this price to the crew Discord">📣 Post to Discord</button>`
         : '';
-      const html = it ? whiskersHtml(it, pagePrice) + deal : '';
+      const html = it ? whiskersHtml(it) + deal : '';
       if (!html) { if (box) box.remove(); return; }
       if (!box) { box = document.createElement('div'); box.className = 'msx-ws'; text.appendChild(box); }
       if (box.__msxHtml !== html) { box.innerHTML = html; box.__msxHtml = html; }
@@ -3104,8 +3228,8 @@
       '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer; it sends nothing anywhere.</p>' +
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
-      '<h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs and stock prices (for chain alerts, job posts and the crew\'s shared stock lows/highs; nothing else, never sent to MeowStreets)</label>';
+      '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices and the feats you have earned (for chain and job posts, the crew\'s shared stock lows/highs and how to get hidden feats; nothing else, never sent to MeowStreets)</label></div>';
     host.appendChild(box);
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
@@ -3118,6 +3242,8 @@
     if (!box) return;
     const ev = box.querySelector('#msx-acc-events');
     const sh = box.querySelector('#msx-acc-share');
+    const shBox = box.querySelector('#msx-acc-sharebox');
+    if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // only shown to the crew the bot serves
     if (sh.checked !== settings.shareCrew) sh.checked = settings.shareCrew;
     if (ev.checked !== settings.events) ev.checked = settings.events;
   }
@@ -3153,10 +3279,13 @@
       syncChain();
       ensureChainPill();
       updateCrewJobPill();
+      updateCrewBuffPill();
       updateHeistPill();
       updateCompanionPill();
       updatePvpPill();
       updateConsumablesPill();
+      updateBankPill();
+      drawHiddenFeats();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -3186,7 +3315,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
         if (muts.every(own)) return;
         schedule();
       });

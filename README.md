@@ -8,15 +8,19 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 
 - **Crimes page:** exact success % for every crime, broken down (base, mastery, merits, education, crew bonus, perks, heat); exact XP and cash per nerve; item drop odds; heat warnings; the best crimes highlighted.
 - **Claw Street Ex (stocks):** logs every price you've seen and flags whether the current price looks low or high against its own history; a countdown to the next price tick and perk timing.
-- **Sidebar timers** (every page): crew chain countdown (plus your crew job's countdown if one's running), a heist countdown while you're in one, companion care reminders (feed/groom/errand), PvP status (mug protection and any bounty on you), Premium tuna/Catnip tea cooldowns, and a stock tick countdown.
+- **Sidebar timers** (every page): crew chain countdown (plus the crew's +5% bonus timer and your crew job's countdown if one's running), a heist countdown while you're in one, companion care reminders (feed/groom/errand), PvP status (mug protection and any bounty on you), Premium tuna/Catnip tea cooldowns, a stock tick countdown, a cat clock with the daily reset, and a bank pill when a deposit is ready to collect.
 - **Heists & Crew pages:** exact XP/energy, XP/nerve, $/energy, $/nerve for every heist and every crew job tier.
 - **"Copy for Discord" (Crew and Heists pages):** while you're actually in a crew job and/or a heist, a ready-to-paste message per one — who has a seat, which are open (and what stat each wants, for crew jobs), the minimum level, and the payout — with a button that copies it to your clipboard. In more than one at once, a tab per job/heist lets you switch which message is shown.
 - **Investment Tracker (Claw Street Ex):** tracks money put into and pulled out of crew stock investments, and what's actually been made.
 - **Cat Tree:** a lock toggle next to each stat's Train button, so a stat you don't want trained can't be clicked by accident — unlocking it is just as instant.
 - **Trading page:** the cheapest currently-open listing for every item, next to Whiskers & Co.'s own buy price (tax included) and what it pays to sell the item back — flagging both an underpriced listing not worth skipping and a listing cheap enough to buy and immediately resell for a profit.
-- **Account page:** a settings panel with two switches for what gets recorded, and an Export data button.
-- **Records what you view:** each page you open is saved on your computer once it has settled (never account, payment or other players' pages, and never chat), plus a log of your Mews events (crime results, trades, heists, training and so on) so the game's real rates can be worked out. It never runs on a timer and never requests a page for you.
-- **Export:** a button that saves everything the script has logged to a `.json` file on your computer.
+- **Whiskers & Co.:** the price range for items whose price changes hourly, and your discounted price.
+- **Account page:** the script's settings.
+- **Records on your computer:** stock prices you've seen and a log of your Mews events (crime results, trades, heists, training and so on), so the game's real rates can be worked out. It never runs on a timer and never requests a page for you.
+
+## Crew sharing (one crew only)
+
+Members of the crew the maintainer runs a Discord bot for get an extra switch on the Account page. It is off until you turn it on, and other players never see it. When on, the script sends to that crew's bot: the crew chain and its end time, the crew's active jobs (seats, members' names and levels, payout), the stock prices you've seen, and the feats you've earned. In return you get the crew's shared stock price history, how to get hidden feats a crewmate has found, and buttons to post the chain, a crew job or a Whiskers price to the crew's Discord. Nothing is ever sent to MeowStreets, and nothing about your account (cash, email, messages) is sent anywhere.
 
 ## Install
 
