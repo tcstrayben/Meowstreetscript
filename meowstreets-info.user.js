@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.20.0
+// @version      0.20.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job and stock price info, to your crew's own Discord bot (which also shares the crew's stock price history back).
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1165,7 +1165,9 @@
   function crewSharePayload() {
     if (!apiState || !apiState.crew || !apiState.crew.name) return null;
     const c = apiState.crew;
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt } };
+    // seenAt = when the game delivered this data. It changes on every game update, so the bot also hears "someone is
+    // live" while nothing else changed -- the chain alert only fires on info the game confirmed in the last 2 minutes.
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
     if (apiState.crewJobsSeen) {
       body.jobs = (apiState.myCrewJobs || []).map((j) => ({
         id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
