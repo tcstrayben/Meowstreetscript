@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.24.0
+// @version      0.24.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -707,6 +707,7 @@
         background:rgba(180,223,135,.08); border:1px solid rgba(180,223,135,.35); }
       .msx-heatlock button.msx-chain-toggle, .msx-heatlock button.msx-heat-toggle { margin-left:2px; }
       .msx-feat-how { margin-top:3px; font-size:12px; color:var(--ms-lime, #b4df87); }
+      .msx-feat-how b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
         background:rgba(0,0,0,.28); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-chainpost button:hover { border-color:var(--ms-lime, #b4df87); }
@@ -1413,23 +1414,34 @@
     });
   }
 
-  // Each hidden feat stays exactly as the game shows it ("???" / "Hidden until you earn it."); a line under it
-  // says how to get it, once the crew has found it. The page lists feats in the same order as the game's data, so
-  // the Nth "Hidden until you earn it." is the Nth hidden feat (skipped if the counts don't match).
+  // Each hidden feat stays exactly as the game shows it ("???" / "Hidden until you earn it.") -- the page keeps
+  // showing that even after you earn one (2026-10-04: "Payday" held, page still "???"), but the game's data then has
+  // its name and criteria. One line is added under each: "✅ You earned this: name: criteria" for your own (from
+  // your own data, works without sharing), "🔓 Crew found: criteria" for one a crewmate has earned (sharing on; the
+  // name stays hidden, user request). The page lists feats in the data's order, so the Nth "Hidden until you earn
+  // it." is the Nth hidden feat, earned or not (0.24.1 fix: 0.22.0 skipped earned ones, so the counts never matched
+  // once anyone held one and nothing was shown). Skipped if the counts still differ.
   function drawHiddenFeats() {
     const old = document.querySelectorAll('.msx-feat-how');
-    const pool = location.pathname.replace(/\/+$/, '') === '/merits' && meritFeats && sharingOn() ? GM_getValue(FEAT_POOL_KEY, null) : null;
-    if (!pool) { old.forEach((n) => n.remove()); return; }
-    const hidden = meritFeats.filter((f) => f.hidden && !f.held);
+    if (location.pathname.replace(/\/+$/, '') !== '/merits' || !meritFeats) { old.forEach((n) => n.remove()); return; }
+    const pool = (sharingOn() && GM_getValue(FEAT_POOL_KEY, null)) || {};
+    const hidden = meritFeats.filter((f) => f.hidden);
     const spots = [...document.querySelectorAll('.main-content *, main *')].filter((el) => !el.children.length && el.textContent.trim() === 'Hidden until you earn it.');
     if (spots.length !== hidden.length) { old.forEach((n) => n.remove()); return; }
     spots.forEach((el, i) => {
-      const found = pool[hidden[i].id];
+      const f = hidden[i];
+      const mine = f.held && f.name && f.criteria;
+      const found = !mine && pool[f.id] && pool[f.id].criteria ? pool[f.id] : null;
       let line = el.nextElementSibling && el.nextElementSibling.classList.contains('msx-feat-how') ? el.nextElementSibling : null;
-      if (!found || !found.criteria) { if (line) line.remove(); return; }
-      if (!line) { line = document.createElement('div'); line.className = 'msx-feat-how'; el.after(line); }
-      const text = 'How to get it: ' + found.criteria;
-      if (line.textContent !== text) line.textContent = text;
+      if (!mine && !found) { if (line) line.remove(); return; }
+      if (!line) { line = document.createElement('div'); el.after(line); }
+      const cls = 'msx-feat-how' + (mine ? ' mine' : '');
+      if (line.className !== cls) line.className = cls;
+      const html = mine
+        ? `✅ You earned this: <b>${escHtml(f.name)}</b>: ${escHtml(f.criteria)}`
+        : `🔓 Crew found: ${escHtml(found.criteria)}`;
+      if (line.innerHTML !== html) line.innerHTML = html;
+      setTitle(line, mine ? 'From your own game data (the page keeps hidden feats as ??? even once earned).' : 'Shared by a crewmate who has earned this feat (crew sharing). Not shown by the game.');
     });
   }
 
