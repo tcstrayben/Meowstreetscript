@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.23.0
+// @version      0.24.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -980,10 +980,10 @@
     Object.keys(overrides).forEach((d) => { if (data.heat[d] != null && data.heat[d] < HOT_HEAT) { delete overrides[d]; overridesChanged = true; } });
     if (overridesChanged) GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(overrides));
     // Chain mode: "Unlock anyway" picks only last while it stays on.
-    const chainMin = chainModeMin();
+    const chainMode = chainModeState();
     let chainOverrides = loadChainOverrides();
-    if (chainMin == null && Object.keys(chainOverrides).length) { chainOverrides = {}; clearChainOverrides(); }
-    ensureChainModeBanner(chainMin);
+    if (!chainMode && Object.keys(chainOverrides).length) { chainOverrides = {}; clearChainOverrides(); }
+    ensureChainModeBanner(chainMode);
     crewVotes = [];
     const scored = data.crimes.map((c) => ({ c, s: score(c, data.chain, data.heat[c.district]) }));
 
@@ -1044,7 +1044,7 @@
       box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
       host.appendChild(box);
       applyHeatLock(c, s.hot, h0, box, overrides);
-      applyChainModeLock(c, box, chainMin, chainOverrides);
+      applyChainModeLock(c, box, chainMode, chainOverrides);
 
       const best = [];
       if (x === bestXp) best.push('xp');
@@ -1241,10 +1241,10 @@
       onload: (r) => {
         let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
         if (j && j.chainMode && typeof j.chainMode === 'object') {
-          const m = { on: !!j.chainMode.on, min: Number(j.chainMode.min) || 90, heard: Date.now() };
+          const m = { on: !!j.chainMode.on, min: Number(j.chainMode.min) || 90, type: j.chainMode.type === 'grow' ? 'grow' : 'pct', heard: Date.now() };
           const old = GM_getValue(CHAIN_MODE_KEY, null);
           GM_setValue(CHAIN_MODE_KEY, m);
-          if (!old || old.on !== m.on || old.min !== m.min) schedule();
+          if (!old || old.on !== m.on || old.min !== m.min || old.type !== m.type) schedule();
         }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
@@ -1437,11 +1437,21 @@
   // While crew leadership has chain mode on (set in Discord, see above), every crime whose success % on its card
   // is under the threshold gets its own Attempt button disabled, like the heat lock -- the script never attempts
   // anything, it only blocks your own click. "Unlock anyway" per crime, until chain mode is turned off.
-  function chainModeMin() {
+  // { type: 'pct', min } or { type: 'grow', chain } while chain mode applies to you, else null. Grow the chain
+  // (0.24.0) uses the crew chain from the game's own data right now.
+  function chainModeState() {
     const m = GM_getValue(CHAIN_MODE_KEY, null);
     if (!sharingOn() || !m || !m.on || Date.now() - m.heard > CHAIN_MODE_TTL_MS) return null;
-    return m.min;
+    if (m.type === 'grow') {
+      const chain = apiState && apiState.crew && Number.isFinite(apiState.crew.chain) ? apiState.crew.chain : null;
+      return chain == null ? null : { type: 'grow', chain };
+    }
+    return { type: 'pct', min: m.min };
   }
+  // Where the crew chain settles if everyone pulled this crime at this success %: a success adds its nerve, a fail
+  // takes 10% off and adds nothing (players). = 10 x nerve x successes per fail. Table: chain-plateau.csv.
+  const chainSettlesAt = (nerve, pct) => (pct >= 100 ? Infinity : (10 * nerve * pct) / (100 - pct));
+  const GROW_FROM = 100; // under the first milestone every crime grows the chain, so nothing is locked
   function clearChainOverrides() { GM_setValue(CHAIN_OVERRIDE_KEY, {}); }
   function loadChainOverrides() { const o = GM_getValue(CHAIN_OVERRIDE_KEY, null); return o && typeof o === 'object' ? o : {}; }
   document.addEventListener('click', (e) => {
@@ -1452,11 +1462,20 @@
     GM_setValue(CHAIN_OVERRIDE_KEY, o);
     schedule();
   });
-  function applyChainModeLock(c, box, min, overrides) {
+  function applyChainModeLock(c, box, mode, overrides) {
     const btn = c.card.querySelector('.rung-main > button.accent');
     if (!btn) return;
     const pct = c.success != null ? Math.round(c.success * 100) : null; // c.success is a fraction (0.95)
-    const under = min != null && pct != null && pct < min;
+    const nerve = c.nerve || (CRIMES[c.key] && CRIMES[c.key].nerve) || null;
+    let under = false, why = '';
+    if (mode && pct != null && mode.type === 'pct') {
+      under = pct < mode.min;
+      why = `${pct}% is under ${mode.min}%`;
+    } else if (mode && pct != null && nerve && mode.type === 'grow' && mode.chain >= GROW_FROM) {
+      const settles = Math.floor(chainSettlesAt(nerve, pct) + 0.5);
+      under = settles < mode.chain;
+      why = `at ${pct}% it settles at ${settles.toLocaleString()}, chain is ${mode.chain.toLocaleString()} (would shrink it)`;
+    }
     const locked = under && !overrides[c.key];
     if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-chain-locked'); }
     else if (btn.classList.contains('msx-chain-locked')) {
@@ -1466,17 +1485,20 @@
     if (!under) return;
     const note = document.createElement('div');
     note.className = 'msx-heatlock' + (locked ? ' locked' : '');
-    note.innerHTML = (locked ? `⛓️ Chain mode: ${pct}% is under ${min}%, Attempt locked` : `⛓️ Under ${min}%, unlocked by you`) +
+    note.innerHTML = (locked ? `⛓️ Chain mode: ${why}. Attempt locked` : `⛓️ Chain mode: ${why}. Unlocked by you`) +
       ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(c.key)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
     box.prepend(note);
   }
   // A one-line banner at the top of the Crimes page while chain mode is on.
-  function ensureChainModeBanner(min) {
+  function ensureChainModeBanner(mode) {
     let el = document.getElementById('msx-chainmode');
     const host = document.querySelector('.main-content') || document.querySelector('main');
-    if (min == null || !host) { if (el) el.remove(); return; }
+    if (!mode || !host) { if (el) el.remove(); return; }
     if (!el) { el = document.createElement('div'); el.id = 'msx-chainmode'; host.prepend(el); }
-    const text = `⛓️ Crew chain mode is on: only crimes at ${min}%+ (set by crew leadership in Discord)`;
+    const rule = mode.type === 'grow'
+      ? `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : ''})`
+      : `only crimes at ${mode.min}%+`;
+    const text = `⛓️ Crew chain mode is on: ${rule} (set by crew leadership in Discord)`;
     if (el.textContent !== text) el.textContent = text;
   }
 
