@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.25.0
+// @version      0.25.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1545,6 +1545,24 @@
   // takes 10% off and adds nothing (players). = 10 x nerve x successes per fail. Table: chain-plateau.csv.
   const chainSettlesAt = (nerve, pct) => (pct >= 100 ? Infinity : (10 * nerve * pct) / (100 - pct));
   const GROW_FROM = 100; // under the first milestone every crime grows the chain, so nothing is locked
+  const MAX_PCT = 95; // the game caps success at 95%
+  // Lowest success % at which a crime of this nerve keeps a chain this long growing (same rounding as the lock), or
+  // null if not even 95% does.
+  function growPctFor(nerve, chain) {
+    for (let p = 1; p <= MAX_PCT; p++) if (Math.floor(chainSettlesAt(nerve, p) + 0.5) >= chain) return p;
+    return null;
+  }
+  // The cheapest crime (by nerve, from the game's crime list) that can still grow the chain, and the % it needs
+  // (user request, 0.25.1: "Minimum X nerve crime @ Y%"). null once no crime can.
+  function minGrowCrime(chain) {
+    const nerves = [...new Set(Object.values(CRIMES).map((t) => t.nerve))].sort((a, b) => a - b);
+    for (const n of nerves) { const p = growPctFor(n, chain); if (p != null) return { nerve: n, pct: p }; }
+    return null;
+  }
+  const minGrowText = (chain) => {
+    const m = minGrowCrime(chain);
+    return m ? `Minimum ${m.nerve} nerve crime @ ${m.pct}%` : 'no crime grows the chain at any %';
+  };
   function clearChainOverrides() { GM_setValue(CHAIN_OVERRIDE_KEY, {}); }
   function loadChainOverrides() { const o = GM_getValue(CHAIN_OVERRIDE_KEY, null); return o && typeof o === 'object' ? o : {}; }
   document.addEventListener('click', (e) => {
@@ -1560,14 +1578,18 @@
     if (!btn) return;
     const pct = c.success != null ? Math.round(c.success * 100) : null; // c.success is a fraction (0.95)
     const nerve = c.nerve || (CRIMES[c.key] && CRIMES[c.key].nerve) || null;
-    let under = false, why = '';
+    let under = false, why = '', detail = '';
     if (mode && pct != null && mode.type === 'pct') {
       under = pct < mode.min;
       why = `${pct}% is under ${mode.min}%`;
     } else if (mode && pct != null && nerve && mode.type === 'grow' && mode.chain >= GROW_FROM) {
       const settles = Math.floor(chainSettlesAt(nerve, pct) + 0.5);
       under = settles < mode.chain;
-      why = `at ${pct}% it settles at ${settles.toLocaleString()}, chain is ${mode.chain.toLocaleString()} (would shrink it)`;
+      // The cheapest crime that still grows it; plus this crime's own % when it could get there at a higher %.
+      const m = minGrowCrime(mode.chain);
+      const need = growPctFor(nerve, mode.chain);
+      why = minGrowText(mode.chain) + (need != null && (!m || m.nerve !== nerve) ? ` (this one needs ${need}%)` : '');
+      detail = `At ${pct}% this crime settles the chain at ${settles.toLocaleString()}; the chain is ${mode.chain.toLocaleString()}, so it would shrink it.`;
     }
     const locked = under && !overrides[c.key];
     if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-chain-locked'); }
@@ -1578,6 +1600,7 @@
     if (!under) return;
     const note = document.createElement('div');
     note.className = 'msx-heatlock' + (locked ? ' locked' : '');
+    if (detail) note.title = detail;
     note.innerHTML = (locked ? `⛓️ Chain mode: ${why}. Attempt locked` : `⛓️ Chain mode: ${why}. Unlocked by you`) +
       ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(c.key)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
     box.prepend(note);
@@ -1589,7 +1612,7 @@
     if (!mode || !host) { if (el) el.remove(); return; }
     if (!el) { el = document.createElement('div'); el.id = 'msx-chainmode'; host.prepend(el); }
     const rule = mode.type === 'grow'
-      ? `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : ''})`
+      ? `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : `: ${minGrowText(mode.chain)}`})`
       : `only crimes at ${mode.min}%+`;
     const text = `⛓️ Crew chain mode is on: ${rule} (set by crew leadership in Discord)`;
     if (el.textContent !== text) el.textContent = text;
