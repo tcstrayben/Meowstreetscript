@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.24.1
+// @version      0.25.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -384,7 +384,8 @@
   function installApiWatch() {
     const pathOf = (url) => { try { return new URL(url, location.href).pathname; } catch (e) { return ''; } };
     // /api/state everywhere; /api/merits is what the Merits page itself loads (for the hidden feats, 0.22.0).
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/merits': onMeritsResponse };
+    // /api/players is the Players page's own list of every cat (0.25.0, the "No crew" list).
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -648,6 +649,13 @@
       #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
       #msx-invest summary { cursor:pointer; font-size:16px; font-weight:700; }
+      #msx-nocrew { margin:0 0 12px; padding:8px 14px; border-radius:12px; background:rgba(0,0,0,.28);
+        border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
+      #msx-nocrew summary { cursor:pointer; font-weight:700; }
+      #msx-nocrew small, #msx-nocrew .msx-nc-note { color:var(--ms-smoke, #8d9289); font-weight:400; }
+      #msx-nocrew .msx-nc-note { margin:6px 0; font-size:12px; }
+      #msx-nocrew ul { margin:6px 0 2px; padding-left:18px; max-height:260px; overflow-y:auto; line-height:1.6; }
+      #msx-nocrew .msx-nc-on { color:var(--ms-lime, #b4df87); }
       #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-myheist h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
       #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
       #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note, #msx-myheist .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
@@ -1443,6 +1451,79 @@
       if (line.innerHTML !== html) line.innerHTML = html;
       setTitle(line, mine ? 'From your own game data (the page keeps hidden feats as ??? even once earned).' : 'Shared by a crewmate who has earned this feat (crew sharing). Not shown by the game.');
     });
+  }
+
+  // ─── "No crew" list (Players page, 0.25.0) ────────────────────────────────
+  // The Players list only renders the ~15 rows on screen (each pinned to its slot), so rows can't just be hidden.
+  // Instead a fold-out list above it shows every cat with no crew: from the page's own /api/players reply when the
+  // script saw it (the full list), else from the rows you have scrolled past. Kept in memory for this page view
+  // only, never saved or sent (other players' data). No links or whisper buttons: opening a whisper means
+  // clicking the game's own chat for you.
+  const noCrew = { api: null, rows: new Map() }; // api: Map id/name -> cat, or null; rows: from the rendered rows
+  let noCrewOpen = false;
+  const isPlayersPage = () => location.pathname.replace(/\/+$/, '') === '/players';
+
+  // The game marks "no crew" as `crew: null` in /api/town and /api/cat (2026-10-04); /api/players is assumed to
+  // match. Without a crew field at all the reply is ignored and the rendered rows are used instead.
+  function onPlayersResponse(json) {
+    const arr = Array.isArray(json) ? json
+      : json && typeof json === 'object' ? [json.players, json.cats, json.residents, json.list, ...Object.values(json)].find(Array.isArray) : null;
+    const cats = (arr || []).filter((c) => c && typeof c.name === 'string' && ('crew' in c || 'crew_id' in c));
+    if (!cats.length) return;
+    if (!noCrew.api) noCrew.api = new Map();
+    cats.forEach((c) => {
+      const crew = 'crew' in c ? c.crew : c.crew_id;
+      const none = crew == null || crew === '' || (typeof crew === 'object' && !crew.name && crew.id == null);
+      noCrew.api.set(String(c.id != null ? c.id : c.name), {
+        name: c.name, level: Number.isFinite(c.level) ? c.level : null, rank: Number.isFinite(c.rank) ? c.rank : null,
+        online: c.online === true, none,
+      });
+    });
+    schedule();
+  }
+
+  // Rendered row (Screenshots 348–351): button.reg-hit aria-label "Mags, ID 72, rank 1, level 15, Odd Tuna Cult"
+  // plus a hidden span.reg-crew holding the crew name.
+  function readPlayerRows() {
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/^(.+?), ID (\d+), rank (\d+), level (\d+)(?:, (.*))?$/);
+      if (!m) return;
+      const crewEl = b.closest('.reg-item').querySelector('.reg-crew');
+      const crew = ((crewEl && crewEl.textContent) || m[5] || '').trim();
+      noCrew.rows.set(m[2], { name: m[1], level: +m[4], rank: +m[3], online: false, none: !crew });
+    });
+  }
+
+  function ensureNoCrewPanel() {
+    const old = document.getElementById('msx-nocrew');
+    if (!isPlayersPage()) { old?.remove(); noCrew.api = null; noCrew.rows.clear(); return; }
+    const list = document.querySelector('.panel.reg');
+    if (!list) return;
+    readPlayerRows();
+    let panel = old;
+    if (!panel) {
+      panel = document.createElement('details');
+      panel.id = 'msx-nocrew';
+      panel.open = noCrewOpen;
+      panel.innerHTML = '<summary></summary><div class="msx-nc-body"></div>';
+      panel.addEventListener('toggle', () => { noCrewOpen = panel.open; });
+    }
+    if (panel.nextElementSibling !== list) list.before(panel);
+    const fromApi = !!noCrew.api;
+    const all = [...(fromApi ? noCrew.api : noCrew.rows).values()];
+    const cats = all.filter((c) => c.none).sort((a, b) => (b.level || 0) - (a.level || 0) || (a.rank || 1e9) - (b.rank || 1e9));
+    const totalM = (document.querySelector('.panel.reg ~ .sr-only, main .sr-only[aria-live]')?.textContent || '').match(/(\d+)\s+cats/);
+    const total = totalM ? +totalM[1] : null;
+    const sum = `No crew: ${cats.length} cat${cats.length === 1 ? '' : 's'}` + (fromApi ? '' : ` <small>(of ${all.length}${total ? ' / ' + total : ''} checked)</small>`);
+    const sumEl = panel.querySelector('summary');
+    if (sumEl.innerHTML !== sum) sumEl.innerHTML = sum;
+    let h = fromApi ? '' : '<p class="msx-nc-note">Scroll the list below to check more cats, or open Players from the sidebar to read the full list at once.</p>';
+    h += cats.length
+      ? '<ul>' + cats.map((c) => `<li>${c.online ? '<span class="msx-nc-on" title="Online">●</span> ' : ''}<b>${escHtml(c.name)}</b>` +
+        `${c.level != null ? ` [${c.level}]` : ''}${c.rank != null ? ` <small>#${c.rank}</small>` : ''}</li>`).join('') + '</ul>'
+      : '<p class="msx-nc-note">None found yet.</p>';
+    const body = panel.querySelector('.msx-nc-body');
+    if (body.innerHTML !== h) body.innerHTML = h;
   }
 
   // ─── Crew chain mode lock (Crimes page, 0.23.0) ───────────────────────────
@@ -3391,6 +3472,7 @@
       updateConsumablesPill();
       updateBankPill();
       drawHiddenFeats();
+      ensureNoCrewPanel();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -3420,7 +3502,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-nocrew, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
         if (muts.every(own)) return;
         schedule();
       });
