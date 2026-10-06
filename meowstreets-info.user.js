@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.26.1
+// @version      0.26.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -640,6 +640,9 @@
       .msx-stock small { color:var(--ms-smoke, #8d9289); font-size:11px; }
       a.xr-screen.msx-low { outline:2px solid var(--ms-lime, #b4df87); outline-offset:-2px; }
       a.xr-screen.msx-high { outline:2px solid var(--ms-red, #eb6561); outline-offset:-2px; }
+      a.xr-screen .msx-price-low { color:var(--ms-lime, #b4df87) !important; }
+      a.xr-screen .msx-price-high { color:var(--ms-red, #eb6561) !important; }
+      a.xr-screen .msx-price-mid { color:#fff !important; }
       .msx-stock.msx-stock-card { flex-basis:100%; width:100%; margin:0; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); }
       .msx-stock .msx-range b { color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-trend { font-size:13px; }
@@ -1751,6 +1754,16 @@
       const v = st && (st.verdict === 'low' || st.verdict === 'high') ? st.verdict : '';
       a.classList.toggle('msx-low', v === 'low');
       a.classList.toggle('msx-high', v === 'high');
+      // The border was barely noticeable (user, 0.26.2), so the price number itself is coloured too: green LOW, red
+      // HIGH, white otherwise (once there is enough history to judge). The card's inside has not been seen, so it is
+      // whichever element holds only the price text ("$121"); only a class is added, the game's text is untouched.
+      const verdictKnown = st && st.verdict !== 'learn';
+      a.querySelectorAll('*').forEach((el) => {
+        const isPrice = !el.children.length && /^\$[\d,]+$/.test(el.textContent.trim());
+        el.classList.toggle('msx-price-low', isPrice && v === 'low');
+        el.classList.toggle('msx-price-high', isPrice && v === 'high');
+        el.classList.toggle('msx-price-mid', isPrice && !!verdictKnown && !v);
+      });
       setTitle(a, v ? `MeowStreets Extra Info: looks ${v.toUpperCase()} (${Math.round(st.pos * 100)}% of range, lowest seen $${st.min}, highest $${st.max})` : '');
     });
   }
