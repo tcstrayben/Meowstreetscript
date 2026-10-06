@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.26.0
+// @version      0.26.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -638,6 +638,8 @@
         box-shadow: inset 0 0 0 2px var(--ms-lime, #b4df87), inset 0 0 0 4px var(--ms-gold, #e9c46a); }
       .msx-stock { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; margin-top:4px; font-weight:400; }
       .msx-stock small { color:var(--ms-smoke, #8d9289); font-size:11px; }
+      a.xr-screen.msx-low { outline:2px solid var(--ms-lime, #b4df87); outline-offset:-2px; }
+      a.xr-screen.msx-high { outline:2px solid var(--ms-red, #eb6561); outline-offset:-2px; }
       .msx-stock.msx-stock-card { flex-basis:100%; width:100%; margin:0; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); }
       .msx-stock .msx-range b { color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-trend { font-size:13px; }
@@ -1737,6 +1739,20 @@
     else { const body = s.card.querySelector('.xr-bigbody'); if (!body) { box.remove(); return; } if (body.nextElementSibling !== box) body.after(box); }
     const html = stockBoxHtml(s, st);
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
+  // The six company cards on the stock page (`a.xr-screen`, data-co = short id, aria-label "Whisker Holdings, $121,
+  // up 1.7% in 1 day, ..."; Screenshot 355): green border when the price Looks LOW, red when it Looks HIGH (user
+  // request, 0.26.1). Same verdict as the box.
+  function markStockScreens() {
+    document.querySelectorAll('a.xr-screen[data-co]').forEach((a) => {
+      const m = (a.getAttribute('aria-label') || '').match(/\$([\d,]+)/);
+      const st = m && isStockPage() ? stockStats(a.dataset.co, num(m[1])) : null;
+      const v = st && (st.verdict === 'low' || st.verdict === 'high') ? st.verdict : '';
+      a.classList.toggle('msx-low', v === 'low');
+      a.classList.toggle('msx-high', v === 'high');
+      setTitle(a, v ? `MeowStreets Extra Info: looks ${v.toUpperCase()} (${Math.round(st.pos * 100)}% of range, lowest seen $${st.min}, highest $${st.max})` : '');
+    });
   }
 
   function stockBoxHtml(s, st) {
@@ -3548,6 +3564,7 @@
         ensureInvestPanel(stocks);
       } else {
         drawStockCard(); // the redesigned one-company page (0.26.0)
+        markStockScreens(); // LOW / HIGH borders on the six company cards (0.26.1)
       }
     } catch (e) {
       console.error('[MeowStreets Extra Info]', e);
