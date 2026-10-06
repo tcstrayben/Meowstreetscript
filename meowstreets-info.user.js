@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.25.1
+// @version      0.26.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -246,7 +246,7 @@
           perkSettle: raw.stocks.perkSettle,
           companies: (raw.stocks.companies || []).map((c) => ({
             name: c.name, price: c.price, nextTick: c.next_tick || c.nextTick || null,
-            perkOn: !!c.perkOn, perkStartsAt: c.perkStartsAt || null,
+            perkOn: !!c.perkOn, perkStartsAt: c.perkStartsAt || null, perkShares: Number.isFinite(c.perkShares) ? c.perkShares : null,
           })),
           history: (raw.stocks.history || []).map((h) => ({ id: h.company, price: h.price, at: h.at })),
         };
@@ -638,6 +638,7 @@
         box-shadow: inset 0 0 0 2px var(--ms-lime, #b4df87), inset 0 0 0 4px var(--ms-gold, #e9c46a); }
       .msx-stock { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; margin-top:4px; font-weight:400; }
       .msx-stock small { color:var(--ms-smoke, #8d9289); font-size:11px; }
+      .msx-stock.msx-stock-card { flex-basis:100%; width:100%; margin:0; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); }
       .msx-stock .msx-range b { color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-trend { font-size:13px; }
       .msx-stock .msx-moves, .msx-stock .msx-range, .msx-stock .msx-perk-status { flex-basis:100%; }
@@ -1700,20 +1701,56 @@
       if (!host || !st) return;
       const box = document.createElement('div');
       box.className = 'msx-stock';
-      const arrow = st.trend > 0 ? '↗' : st.trend < 0 ? '↘' : '→';
-      const label = st.verdict === 'learn'
-        ? `Learning ${st.n}/${MIN_TICKS_FOR_VERDICT}`
-        : `${VERDICT_LABEL[st.verdict]} · ${Math.round(st.pos * 100)}% of range · ${ordinal(Math.round(st.pct * 100))} pct`;
-      const perkCost = s.perkShares ? ` · perk ≈ ${fmtMoney(s.perkShares * s.price)}` : '';
-      box.innerHTML =
-        `<span class="msx-tag stk ${st.verdict}" title="% of range: how far up between the lowest and highest price recorded (0% = lowest seen, 100% = highest seen). pct: the share of recorded price periods that were lower. HIGH or LOW shows when either is within 20% of an end.">${label}</span>` +
-        `<span class="msx-trend" title="Average of the last 3 price moves vs the 3 before">${st.n >= 6 ? arrow : ''}</span>` +
-        `<small class="msx-moves" title="How many of the last 10 and last 25 price moves went up (↑), down (↓) or stayed the same (=). Only counts moves the script saw one after another, so a gap in the record is skipped.">${movesHtml(st.mw)}</small>` +
-        `<small class="msx-range" title="Lowest / highest price this script has recorded, over ${st.n} price moves (avg $${st.avg.toFixed(1)})">` +
-        `Lowest seen <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${perkCost}</small>` +
-        perkTimingHtml(s.name);
+      box.innerHTML = stockBoxHtml(s, st);
       host.appendChild(box);
     });
+  }
+
+  // The redesigned stock page (Screenshot 355, 2026-10-06): one company at a time in `section.xr-big`, at
+  // /claw-street-ex/<short id>. The old table is gone, so the company comes from the address and the price from the
+  // card ("$90"), with the game's own data as a fallback. Prices keep being recorded from /api/state on every page.
+  // The box sits under "A sale takes the oldest block first." (`p.sx-fine` in `.xr-blocks`, the spot the user picked).
+  function readStockCard() {
+    const card = document.querySelector('section.xr-big');
+    const id = location.pathname.split('/').filter(Boolean)[1];
+    if (!card || !id) return null;
+    const headText = norm(card.querySelector('.xr-bighead')?.textContent);
+    const co = (apiState?.stocks?.companies || []).find((c) => c.name && headText.includes(norm(c.name)));
+    const m = (card.querySelector('.xr-bigbody')?.textContent || '').match(/\$([\d,]+)/);
+    const hist = (apiState?.stocks?.history || []).filter((h) => h.id === id).sort((a, b) => b.at - a.at)[0];
+    const price = m ? num(m[1]) : co ? co.price : hist ? hist.price : NaN;
+    if (!Number.isFinite(price)) return null;
+    return { id, name: co ? co.name : id, price, perkShares: co ? co.perkShares : null, card };
+  }
+
+  function drawStockCard() {
+    const s = isStockPage() ? readStockCard() : null;
+    const old = document.querySelector('.msx-stock');
+    const st = s && stockStats(s.id, s.price);
+    if (!st) { old?.remove(); return; }
+    const blocks = s.card.querySelector('.xr-blocks');
+    const fine = blocks && blocks.querySelector('.sx-fine');
+    let box = old && s.card.contains(old) ? old : null;
+    if (!box) { old?.remove(); box = document.createElement('div'); box.className = 'msx-stock msx-stock-card'; }
+    if (fine) { if (fine.nextElementSibling !== box) fine.after(box); }
+    else if (blocks) { if (box.parentElement !== blocks) blocks.appendChild(box); }
+    else { const body = s.card.querySelector('.xr-bigbody'); if (!body) { box.remove(); return; } if (body.nextElementSibling !== box) body.after(box); }
+    const html = stockBoxHtml(s, st);
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
+  function stockBoxHtml(s, st) {
+    const arrow = st.trend > 0 ? '↗' : st.trend < 0 ? '↘' : '→';
+    const label = st.verdict === 'learn'
+      ? `Learning ${st.n}/${MIN_TICKS_FOR_VERDICT}`
+      : `${VERDICT_LABEL[st.verdict]} · ${Math.round(st.pos * 100)}% of range · ${ordinal(Math.round(st.pct * 100))} pct`;
+    const perkCost = s.perkShares ? ` · perk ≈ ${fmtMoney(s.perkShares * s.price)}` : '';
+    return `<span class="msx-tag stk ${st.verdict}" title="% of range: how far up between the lowest and highest price recorded (0% = lowest seen, 100% = highest seen). pct: the share of recorded price periods that were lower. HIGH or LOW shows when either is within 20% of an end.">${label}</span>` +
+      `<span class="msx-trend" title="Average of the last 3 price moves vs the 3 before">${st.n >= 6 ? arrow : ''}</span>` +
+      `<small class="msx-moves" title="How many of the last 10 and last 25 price moves went up (↑), down (↓) or stayed the same (=). Only counts moves the script saw one after another, so a gap in the record is skipped.">${movesHtml(st.mw)}</small>` +
+      `<small class="msx-range" title="Lowest / highest price this script has recorded, over ${st.n} price moves (avg $${st.avg.toFixed(1)})">` +
+      `Lowest seen <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${perkCost}</small>` +
+      perkTimingHtml(s.name);
   }
 
   // ─── Stock tick countdown (sidebar, every page) ───────────────────────────
@@ -3509,6 +3546,8 @@
         logStocks(stocks);
         drawStocks(stocks);
         ensureInvestPanel(stocks);
+      } else {
+        drawStockCard(); // the redesigned one-company page (0.26.0)
       }
     } catch (e) {
       console.error('[MeowStreets Extra Info]', e);
@@ -3525,7 +3564,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-nocrew, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-nocrew, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
         if (muts.every(own)) return;
         schedule();
       });
