@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.27.0
+// @version      0.27.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -661,6 +661,8 @@
       .msx-players small, .msx-players .msx-nc-note { color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-players .msx-nc-note { margin:6px 0; font-size:12px; }
       .msx-players ul { margin:6px 0 2px; padding-left:18px; max-height:260px; overflow-y:auto; line-height:1.6; }
+      .msx-players a.msx-cat-link { color:inherit; text-decoration:none; }
+      .msx-players a.msx-cat-link:hover b { text-decoration:underline; color:#9ecbff; }
       .msx-players .msx-nc-new { color:var(--ms-lime, #b4df87); }
       #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-myheist h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
       #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
@@ -1505,6 +1507,9 @@
     });
   }
 
+  // Profile link (user request, 0.27.1): a plain link the player clicks, opening the game's own profile page in a new
+  // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
+  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
   const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
 
@@ -1549,7 +1554,7 @@
     const noCrew = all.filter((c) => c.none).sort((a, b) => (b.level || 0) - (a.level || 0) || (a.rank || 1e9) - (b.rank || 1e9));
     setHtml(nc.querySelector('summary'), `No crew: ${noCrew.length} cat${noCrew.length === 1 ? '' : 's'}${partial ? ' <small>(so far)</small>' : ''}`);
     setHtml(nc.querySelector('.msx-nc-body'), note + (noCrew.length
-      ? '<ul>' + noCrew.map((c) => `<li><b>${escHtml(c.name)}</b>${c.level != null ? ` [${c.level}]` : ''} <small>${c.rank != null ? `#${c.rank} · ` : ''}ID ${c.id}` +
+      ? '<ul>' + noCrew.map((c) => `<li>${catLink(c)}${c.level != null ? ` [${c.level}]` : ''} <small>${c.rank != null ? `#${c.rank} · ` : ''}ID ${c.id}` +
         `${c.joined ? ' · joined ' + agoText(now - c.joined) : ''}</small>${newTag(c)}</li>`).join('') + '</ul>'
       : '<p class="msx-nc-note">None found yet.</p>'));
 
@@ -1563,7 +1568,7 @@
     const sinceVisit = all.filter(isNew).length;
     setHtml(nw.querySelector('summary'), `New cats: ${fresh.length} in the last 24h` + (players.seenBefore != null ? ` · ${sinceVisit} since your last visit` : '') + (partial ? ' <small>(so far)</small>' : ''));
     setHtml(nw.querySelector('.msx-nc-body'), note + (fresh.length
-      ? '<ul>' + fresh.map((c) => `<li><b>${escHtml(c.name)}</b>${c.level != null ? ` [${c.level}]` : ''} <small>· ID ${c.id} · joined ${agoText(now - c.joined)} · ` +
+      ? '<ul>' + fresh.map((c) => `<li>${catLink(c)}${c.level != null ? ` [${c.level}]` : ''} <small>· ID ${c.id} · joined ${agoText(now - c.joined)} · ` +
         `${c.none ? 'no crew' : escHtml(c.crew || 'in a crew')}</small>${newTag(c)}</li>`).join('') + '</ul>'
       : '<p class="msx-nc-note">Nobody new in the last 24 hours.</p>'));
   }
