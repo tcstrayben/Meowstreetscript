@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.28.0
+// @version      0.29.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -814,6 +814,10 @@
       .msx-ticker.soon .ms-icon { color:var(--ms-gold, #e9c46a); }
       .msx-ticker.stale { border-color:var(--ms-red, #eb6561); color:var(--ms-red, #eb6561); }
       .msx-ticker.stale .ms-icon { color:var(--ms-red, #eb6561); }
+      .msx-rail { display:flex; flex-direction:column; background:rgba(0,0,0,.28); }
+      .msx-rail > .msx-ticker { margin:0; border:0; border-radius:0; background:transparent; padding:6px 10px; }
+      .msx-rail > .msx-ticker + .msx-ticker { border-top:1px solid var(--msx-rail-line, var(--ms-line, rgba(231,237,225,.15))); }
+      .msx-rail > .msx-ticker.soon { color:var(--ms-gold, #e9c46a); }
       .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-chain > .msx-crewjob-inline:first-of-type { margin-left:0; padding-left:0; border-left:0; }
       .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
@@ -2168,6 +2172,49 @@
     if (el.innerHTML !== html) el.innerHTML = html;
   }
 
+  // ─── One timer box under the vitals (sidebar, every page, 0.29.0) ────────
+  // User request: the stock tick, tuna/catnip, companion and the other timers sit in one box right under the game's
+  // money/energy/nerve/life/happy box (and above Overview), joined to it like part of the same box, with a line
+  // between each timer. The pills keep being built where they always were; this moves them into the box each run.
+  // The box copies the vitals box's own background, border and corners at run time (its exact style is the game's).
+  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank)',
+    '.msx-consumable', '.msx-companion', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
+  function arrangeRail() {
+    const vitals = document.querySelector('.sidebar .rail-vitals');
+    if (!vitals || !vitals.parentNode) return;
+    let rail = document.querySelector('.msx-rail');
+    if (!rail) { rail = document.createElement('div'); rail.className = 'msx-rail'; }
+    if (vitals.nextElementSibling !== rail) vitals.after(rail);
+    RAIL_ORDER.forEach((sel, i) => {
+      const el = [...document.querySelectorAll('.sidebar ' + sel)].find((x) => !x.closest('.msx-rail') || x.parentElement === rail);
+      if (!el) return;
+      const kids = [...rail.children];
+      // keep the listed order: put it after the last box that comes before it in RAIL_ORDER
+      const before = kids.filter((k) => RAIL_ORDER.slice(0, i).some((s2) => k.matches(s2)));
+      const want = before.length ? before[before.length - 1].nextElementSibling : rail.firstElementChild;
+      if (el !== want) rail.insertBefore(el, want);
+    });
+    // Join it to the vitals box: same look, no gap, square corners where they meet.
+    if (!vitals.dataset.msxRail) {
+      const cs = getComputedStyle(vitals);
+      vitals.dataset.msxRail = '1';
+      rail.style.marginBottom = cs.marginBottom;
+      const bw = parseFloat(cs.borderBottomWidth) || 0;
+      const border = bw ? `${cs.borderBottomWidth} ${cs.borderBottomStyle} ${cs.borderBottomColor}` : '1px solid var(--ms-line, rgba(231,237,225,.15))';
+      if (cs.backgroundColor && cs.backgroundColor !== 'rgba(0, 0, 0, 0)' && cs.backgroundColor !== 'transparent') rail.style.background = cs.backgroundColor;
+      rail.style.border = border;
+      rail.style.borderTop = border; // the line between the vitals and the first timer
+      const corner = (v) => v || (cs.borderRadius || '').split(' ')[0] || '0';
+      rail.style.borderBottomRightRadius = corner(cs.borderBottomRightRadius);
+      rail.style.borderBottomLeftRadius = corner(cs.borderBottomLeftRadius);
+      rail.style.setProperty('--msx-rail-line', bw ? cs.borderBottomColor : 'var(--ms-line, rgba(231,237,225,.15))');
+      if (bw) rail.style.borderTop = '0'; // the vitals box's own bottom border already draws that line
+      vitals.style.marginBottom = '0';
+      vitals.style.borderBottomLeftRadius = '0';
+      vitals.style.borderBottomRightRadius = '0';
+    }
+  }
+
   // ─── Cat clock (next to the sidebar logo, every page) ─────────────────────
   // The game runs on UTC: the Whiskers daily limit, the 12-a-day tuna/catnip uses and contracts all reset at
   // 00:00 UTC (the Whiskers page says "Resets 00:00 UTC"; the game's own `contractResetAt` lands exactly there).
@@ -2226,7 +2273,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); }, 1000);
+    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -3468,6 +3515,7 @@
     if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
     const body = { v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, item: b.dataset.item, price: Number(b.dataset.price) };
     if (b.dataset.min) { body.min = Number(b.dataset.min); body.max = Number(b.dataset.max); }
+    if (Number(b.dataset.until) > Date.now()) body.until = Number(b.dataset.until); // when this price ends (0.29.0: Discord countdown)
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_DEAL_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
       onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (err) { /* not json */ } toast(j && j.ok ? `Posted: ${b.dataset.item} for $${Number(b.dataset.price).toLocaleString()}.` : 'Not posted: ' + ((j && j.error) || 'unknown problem') + '.'); },
@@ -3504,7 +3552,7 @@
       // crew bot's deals channel. Only on items whose price moves within a range (0.21.0) -- fixed prices are no news.
       // The Discord post gets the normal price and range, never your personal discount (user request, 0.22.0).
       const deal = it && sharingOn() && it.baseMin != null && it.baseMax > it.baseMin
-        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.base}" data-min="${it.baseMin}" data-max="${it.baseMax}" title="Post this price to the crew Discord">📣 Post to Discord</button>`
+        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.base}" data-min="${it.baseMin}" data-max="${it.baseMax}" data-until="${it.until || ''}" title="Post this price to the crew Discord">📣 Post to Discord</button>`
         : '';
       const html = it ? whiskersHtml(it) + deal : '';
       if (!html) { if (box) box.remove(); return; }
@@ -3586,6 +3634,7 @@
       updatePvpPill();
       updateConsumablesPill();
       updateBankPill();
+      arrangeRail(); // all the timers into one box under the vitals (0.29.0)
       drawHiddenFeats();
       ensureNoCrewPanel();
       ensureChainPostButton();
@@ -3620,7 +3669,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
