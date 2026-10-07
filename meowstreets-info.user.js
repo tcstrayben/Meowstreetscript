@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.27.1
+// @version      0.28.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -381,11 +381,18 @@
     if (ex) { apiState = ex; schedule(); shareCrew(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
 
+  // Only a full state is taken (an error reply, e.g. { error }, would otherwise blank everything).
+  function onActionResponse(json) {
+    if (json && typeof json === 'object' && json.player && Array.isArray(json.crimes)) onApiStateResponse(json);
+  }
+
   function installApiWatch() {
     const pathOf = (url) => { try { return new URL(url, location.href).pathname; } catch (e) { return ''; } };
     // /api/state everywhere; /api/merits is what the Merits page itself loads (for the hidden feats, 0.22.0).
     // /api/players is the Players page's own list of every cat (0.25.0, the "No crew" list).
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
+    // /api/action (0.28.0): the reply to every crime, train, deposit... carries the whole state too, so the numbers
+    // (crew chain, nerve, heat, odds) update the moment you act instead of on the next page load.
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -808,6 +815,7 @@
       .msx-ticker.stale { border-color:var(--ms-red, #eb6561); color:var(--ms-red, #eb6561); }
       .msx-ticker.stale .ms-icon { color:var(--ms-red, #eb6561); }
       .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-chain > .msx-crewjob-inline:first-of-type { margin-left:0; padding-left:0; border-left:0; }
       .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
@@ -1577,16 +1585,13 @@
   // While crew leadership has chain mode on (set in Discord, see above), every crime whose success % on its card
   // is under the threshold gets its own Attempt button disabled, like the heat lock -- the script never attempts
   // anything, it only blocks your own click. "Unlock anyway" per crime, until chain mode is turned off.
-  // { type: 'pct', min } or { type: 'grow', chain } while chain mode applies to you, else null. Grow the chain
-  // (0.24.0) uses the crew chain from the game's own data right now.
+  // { type: 'grow', chain } while chain mode applies to you, else null. Grow the chain is the only kind since the bot
+  // dropped Success % (2026-10-05); it uses the crew chain from the game's own data right now.
   function chainModeState() {
     const m = GM_getValue(CHAIN_MODE_KEY, null);
     if (!sharingOn() || !m || !m.on || Date.now() - m.heard > CHAIN_MODE_TTL_MS) return null;
-    if (m.type === 'grow') {
-      const chain = apiState && apiState.crew && Number.isFinite(apiState.crew.chain) ? apiState.crew.chain : null;
-      return chain == null ? null : { type: 'grow', chain };
-    }
-    return { type: 'pct', min: m.min };
+    const chain = apiState && apiState.crew && Number.isFinite(apiState.crew.chain) ? apiState.crew.chain : null;
+    return chain == null ? null : { type: 'grow', chain };
   }
   // Where the crew chain settles if everyone pulled this crime at this success %: a success adds its nerve, a fail
   // takes 10% off and adds nothing (players). = 10 x nerve x successes per fail. Table: chain-plateau.csv.
@@ -1626,10 +1631,7 @@
     const pct = c.success != null ? Math.round(c.success * 100) : null; // c.success is a fraction (0.95)
     const nerve = c.nerve || (CRIMES[c.key] && CRIMES[c.key].nerve) || null;
     let under = false, why = '', detail = '';
-    if (mode && pct != null && mode.type === 'pct') {
-      under = pct < mode.min;
-      why = `${pct}% is under ${mode.min}%`;
-    } else if (mode && pct != null && nerve && mode.type === 'grow' && mode.chain >= GROW_FROM) {
+    if (mode && pct != null && nerve && mode.chain >= GROW_FROM) {
       const settles = Math.floor(chainSettlesAt(nerve, pct) + 0.5);
       under = settles < mode.chain;
       // The cheapest crime that still grows it; plus this crime's own % when it could get there at a higher %.
@@ -1658,9 +1660,7 @@
     const host = document.querySelector('.main-content') || document.querySelector('main');
     if (!mode || !host) { if (el) el.remove(); return; }
     if (!el) { el = document.createElement('div'); el.id = 'msx-chainmode'; host.prepend(el); }
-    const rule = mode.type === 'grow'
-      ? `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : `: ${minGrowText(mode.chain)}`})`
-      : `only crimes at ${mode.min}%+`;
+    const rule = `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : `: ${minGrowText(mode.chain)}`})`;
     const text = `⛓️ Crew chain mode is on: ${rule} (set by crew leadership in Discord)`;
     if (el.textContent !== text) el.textContent = text;
   }
@@ -1913,39 +1913,23 @@
     const el = document.createElement('a');
     el.href = '/crew';
     el.className = 'msx-ticker msx-chain msx-pill-link';
-    el.title = 'Time until your crew chain dies (synced from the Crew page, then counted down; other crew members can extend it)';
-    el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-faction"></use></svg><span class="msx-chain-text"></span>';
+    el.title = 'Your crew job and the crew +5% bonus (opens the Crew page)';
+    // 0.28.0: no crew chain countdown any more (the game shows its own, user request); this box only holds the crew
+    // job and +5% timers and is hidden while neither is running.
+    el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-faction"></use></svg>';
+    el.style.display = 'none';
     // Place it after the stocks pill, before the vitals.
     if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     updateChainPill();
   }
 
+  // Shows the box only while it holds a crew job or +5% timer (0.28.0).
   function updateChainPill() {
-    const txt = document.querySelector('.msx-chain-text');
-    if (!txt) return;
-    let out = 'Crew chain: open Crew to sync';
-    let soon = false;
-    let stale = true; // red until we have fresh data
-    if (chainState) {
-      const ageMs = Date.now() - (chainState.syncedAt || 0);
-      stale = ageMs > CHAIN_STALE_MS;
-      setTitle(txt.parentNode, `Time until your crew chain dies. Last synced from the Crew page ${Math.floor(ageMs / 60000)} min ago` +
-        (stale ? ' (stale: open the Crew page to refresh; other crew members may have extended it)' : '.'));
-      const remain = chainState.expires - Date.now();
-      if (remain <= 0) {
-        out = 'Crew chain: check Crew page';
-      } else {
-        const s = Math.ceil(remain / 1000);
-        const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = s % 60;
-        const clock = h > 0 ? `${h}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}` : `${m}:${String(sec).padStart(2, '0')}`;
-        out = `Crew chain${chainState.count != null ? ' ×' + chainState.count : ''} ${clock}`;
-        soon = remain <= 15 * 60 * 1000;
-      }
-      if (remain <= 0) stale = true;
-    }
-    if (txt.textContent !== out) txt.textContent = out;
-    txt.parentNode.classList.toggle('soon', soon && !stale);
-    txt.parentNode.classList.toggle('stale', stale);
+    const el = document.querySelector('.msx-chain');
+    if (!el) return;
+    const show = !!el.querySelector('.msx-crewjob-inline');
+    const want = show ? '' : 'none';
+    if (el.style.display !== want) el.style.display = want;
   }
 
   // Countdown text, "h:mm:ss" or "m:ss", shared by the pills below.
@@ -2242,7 +2226,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); updateTicker(); updateChainPill(); updateCrewJobPill(); updateCrewBuffPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); }, 1000);
+    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -3596,6 +3580,7 @@
       ensureChainPill();
       updateCrewJobPill();
       updateCrewBuffPill();
+      updateChainPill();
       updateHeistPill();
       updateCompanionPill();
       updatePvpPill();
