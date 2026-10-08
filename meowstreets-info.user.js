@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.29.0
+// @version      0.30.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -251,8 +251,9 @@
           history: (raw.stocks.history || []).map((h) => ({ id: h.company, price: h.price, at: h.at })),
         };
       }
+      out.dailyCap = raw.rules && Number.isFinite(raw.rules.dailyConsumableCap) ? raw.rules.dailyConsumableCap : null;
       (raw.events || []).forEach((e) => {
-        if (e && e.body && e.kind) out.events.push({ body: e.body, kind: e.kind, at: e.created_at });
+        if (e && e.body && e.kind) out.events.push({ id: e.id, body: e.body, kind: e.kind, at: e.created_at });
       });
       if (Array.isArray(raw.courses)) {
         let eduCrimePoints = 0; let coursesTaken = 0; let eduLandsAt = null;
@@ -378,7 +379,38 @@
 
   function onApiStateResponse(json) {
     const ex = extractApiState(json);
-    if (ex) { apiState = ex; schedule(); shareCrew(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+    if (ex) { apiState = ex; noteUses(ex.events); schedule(); shareCrew(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+  }
+
+  // ─── Tuna / catnip uses today (0.30.0, user request) ──────────────────────
+  // The game caps each at `rules.dailyConsumableCap` (12) a day, resetting 00:00 UTC, but sends no running count --
+  // only `usedUp` once you hit it. Each use is a Mews event ("Used Premium tuna. Restored 25 energy.", kind "use"),
+  // and the last 20 events come with every state and action reply (the Mews page has 50), so the script counts
+  // today's by event id (each counted once, across tabs). Uses made elsewhere (another device) are only counted if
+  // they're still in a list the script sees.
+  const USES_KEY = 'ms_daily_uses_v1'; // { day: 'YYYY-MM-DD' (UTC), tuna: [event ids], catnip: [event ids] }
+  const USE_FAMILY = [[/^Used Premium tuna\b/i, 'tuna'], [/^Used Catnip tea\b/i, 'catnip']];
+  const utcDay = (t) => new Date(t).toISOString().slice(0, 10);
+  function loadUses() {
+    const u = GM_getValue(USES_KEY, null);
+    const today = utcDay(Date.now());
+    return u && u.day === today ? u : { day: today, tuna: [], catnip: [] };
+  }
+  function noteUses(events) {
+    const u = loadUses();
+    const dayStart = Date.parse(u.day + 'T00:00:00Z');
+    let changed = false;
+    (events || []).forEach((e) => {
+      if (!e || e.kind !== 'use' || e.id == null || !(e.at >= dayStart)) return;
+      const fam = (USE_FAMILY.find(([re]) => re.test(String(e.body))) || [])[1];
+      if (!fam || u[fam].includes(String(e.id))) return;
+      u[fam].push(String(e.id)); changed = true;
+    });
+    if (changed) GM_setValue(USES_KEY, u);
+  }
+  function onMewsResponse(json) {
+    const rows = json && Array.isArray(json.rows) ? json.rows : null;
+    if (rows) { noteUses(rows.map((r) => ({ id: r.id, body: r.body, kind: r.kind, at: r.at }))); schedule(); }
   }
 
   // Only a full state is taken (an error reply, e.g. { error }, would otherwise blank everything).
@@ -392,7 +424,7 @@
     // /api/players is the Players page's own list of every cat (0.25.0, the "No crew" list).
     // /api/action (0.28.0): the reply to every crime, train, deposit... carries the whole state too, so the numbers
     // (crew chain, nerve, heat, odds) update the moment you act instead of on the next page load.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -818,6 +850,8 @@
       .msx-rail > .msx-ticker { margin:0; border:0; border-radius:0; background:transparent; padding:6px 10px; }
       .msx-rail > .msx-ticker + .msx-ticker { border-top:1px solid var(--msx-rail-line, var(--ms-line, rgba(231,237,225,.15))); }
       .msx-rail > .msx-ticker.soon { color:var(--ms-gold, #e9c46a); }
+      .msx-uses { opacity:.75; font-size:10.5px; }
+      .msx-uses.full { opacity:1; color:var(--ms-gold, #e9c46a); }
       .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-chain > .msx-crewjob-inline:first-of-type { margin-left:0; padding-left:0; border-left:0; }
       .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
@@ -2146,6 +2180,8 @@
     if (!apiState) { document.querySelector('.msx-consumable')?.remove(); return; }
     const now = Date.now();
     let anyCapped = false;
+    const uses = loadUses();
+    const cap = apiState.dailyCap || 12;
     const bits = CONSUMABLE_FAMILIES.map((f) => {
       const expires = apiState.cooldowns[f.family];
       const capped = apiState.usedUp.includes(f.family);
@@ -2154,7 +2190,8 @@
       if (capped) { anyCapped = true; text = 'capped'; }
       else if (expires && expires > now) text = fmtClock(expires - now);
       else text = full ? `${f.resource} full` : 'ready';
-      return `<span class="msx-item" title="${f.label}">${ITEM_ICONS[f.family] || ''}${text}</span>`;
+      const used = capped ? cap : Math.min(cap, uses[f.family].length); // 0.30.0: uses today out of the daily cap
+      return `<span class="msx-item" title="${f.label}: ${used} of ${cap} used today (resets 00:00 UTC)">${ITEM_ICONS[f.family] || ''}${text} <small class="msx-uses${used >= cap ? ' full' : ''}">${used}/${cap}</small></span>`;
     });
     let el = document.querySelector('.msx-consumable');
     if (!el) {
