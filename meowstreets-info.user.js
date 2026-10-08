@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.30.0
+// @version      0.31.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1463,15 +1463,16 @@
 
   function syncFeats() {
     if (!meritFeats || !sharingOn() || typeof GM_xmlhttpRequest !== 'function') return;
-    // Only feats you hold, with their text. Non-hidden ones are sent too: once earned, the game may no longer
-    // mark a hidden feat as hidden, so there is no telling them apart. All of it is on everyone's Merits page anyway.
-    const mine = meritFeats.filter((f) => f.held && f.name && f.criteria).map((f) => ({ id: f.id, name: f.name, criteria: f.criteria }));
+    // Only HIDDEN feats you hold, with their text (0.31.0, user: the point is sharing how to get hidden ones; visible
+    // feats are on everyone's page anyway). Confirmed 2026-10-04: an earned hidden feat stays `hidden: true`.
+    // `hiddenTotal` = how many hidden feats the game has, for "1 of 8" in the bot's status.
+    const mine = meritFeats.filter((f) => f.held && f.hidden && f.name && f.criteria).map((f) => ({ id: f.id, name: f.name, criteria: f.criteria, hidden: true }));
     const sig = mine.map((f) => f.id).join(',');
     if (sig === featSyncSig && Date.now() - featSyncAt < FEAT_SYNC_GAP_MS) return;
     featSyncSig = sig; featSyncAt = Date.now();
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_FEATS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, feats: mine }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, feats: mine, hiddenTotal: meritFeats.filter((f) => f.hidden).length }),
       onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
     });
   }
