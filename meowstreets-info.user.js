@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.31.0
+// @version      0.32.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -224,9 +224,15 @@
         out.myHeists = mineHeists.map((h) => ({
           id: h.id, name: h.targetName || h.name || null, tier: h.tier, minLevel: heistMinLevelByTier[h.tier] != null ? heistMinLevelByTier[h.tier] : null,
           status: h.status, endsAt: h.ends_at || null, chance: h.chance, stake: h.stake, profit: h.profit, failReturn: h.failReturn,
-          minMembers: h.minMembers, maxMembers: h.maxMembers, energy: h.energy, nerve: h.nerve,
+          // Heists carry no seat count of their own; it's the game-wide heistRules.maxMembers (3). expires_at = when
+          // recruiting closes (API log 2026-10-08).
+          minMembers: h.minMembers, maxMembers: h.maxMembers || (raw.heistRules && raw.heistRules.maxMembers) || null, energy: h.energy, nerve: h.nerve,
+          expiresAt: h.expires_at || null,
           members: (h.members || []).map((m) => ({ role: m.role, name: m.name })),
         }));
+        // Heists of yours that finished or were scrapped in the last 6 hours: tells the crew bot to take their posts down.
+        out.heistsDone = raw.heists.filter((h) => h && (h.status === 'completed' || h.status === 'cancelled') && h.closed_at > Date.now() - 6 * 3600000)
+          .slice(0, 20).map((h) => h.id);
         const withEnd = out.myHeists.filter((h) => h.endsAt).sort((a, b) => a.endsAt - b.endsAt);
         if (withEnd.length) out.activeHeist = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
       }
@@ -247,6 +253,7 @@
           companies: (raw.stocks.companies || []).map((c) => ({
             name: c.name, price: c.price, nextTick: c.next_tick || c.nextTick || null,
             perkOn: !!c.perkOn, perkStartsAt: c.perkStartsAt || null, perkShares: Number.isFinite(c.perkShares) ? c.perkShares : null,
+            shares: Number.isFinite(c.shares) ? c.shares : null, // your own; the game stops buying at perkShares
           })),
           history: (raw.stocks.history || []).map((h) => ({ id: h.company, price: h.price, at: h.at })),
         };
@@ -424,7 +431,8 @@
     // /api/players is the Players page's own list of every cat (0.25.0, the "No crew" list).
     // /api/action (0.28.0): the reply to every crime, train, deposit... carries the whole state too, so the numbers
     // (crew chain, nerve, heat, odds) update the moment you act instead of on the next page load.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse };
+    // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -685,6 +693,10 @@
       .msx-stock.msx-stock-card { flex-basis:100%; width:100%; margin:0; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); justify-content:center; }
       .msx-stock .msx-range b { color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-trend { font-size:13px; }
+      .msx-stock small.msx-mtrend { flex-basis:100%; text-align:center; color:var(--ms-bone, #e7ede1); }
+      .msx-stock small.msx-mtrend.rising b { color:var(--ms-lime, #b4df87); }
+      .msx-stock small.msx-mtrend.stalled b { color:var(--ms-gold, #e9c46a); }
+      .msx-stock small.msx-mtrend.falling b { color:var(--ms-red, #eb6561); }
       .msx-stock .msx-moves, .msx-stock .msx-range, .msx-stock .msx-perk-status { flex-basis:100%; }
       .msx-stock .msx-perk-status b { color:var(--ms-lime, #b4df87); }
       .msx-stock .msx-moves b { font-weight:700; color:var(--ms-bone, #e7ede1); }
@@ -793,7 +805,7 @@
       #msx-invest .msx-inv-legend i { display:inline-block; width:10px; height:10px; border-radius:2px; margin-right:5px; }
       .msx-tag.stk.low { background:var(--ms-lime, #b4df87); color:var(--ms-ink, #182316); }
       .msx-tag.stk.high { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
-      .msx-tag.stk.mid, .msx-tag.stk.flat { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
+      .msx-tag.stk.mid, .msx-tag.stk.flat, .msx-tag.stk.risehigh { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
       .msx-tag.stk.learn { background:transparent; color:var(--ms-smoke, #8d9289); border:1px dashed var(--ms-smoke, #8d9289); }
       .msx-tag.hot { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
       .msx-heat { margin-left:8px; font-size:11px; color:var(--ms-smoke, #8d9289); white-space:nowrap; }
@@ -1293,6 +1305,17 @@
       }));
       body.roleTitles = apiState.crewJobRoles || {};
     }
+    // Heists you are in (0.32.0), the same things the heist "Copy for Discord" message shows; only when the game sent
+    // its heist list. Member names and roles, never ids.
+    if (Array.isArray(apiState.heistsDone)) {
+      body.heists = (apiState.myHeists || []).map((h) => ({
+        id: h.id, name: h.name, tier: h.tier, minLevel: h.minLevel, status: h.status,
+        members: (h.members || []).map((m) => ({ role: m.role, name: m.name })),
+        minMembers: h.minMembers, maxMembers: h.maxMembers, endsAt: h.endsAt, expiresAt: h.expiresAt,
+        stake: h.stake, profit: h.profit, failReturn: h.failReturn, chance: h.chance, energy: h.energy, nerve: h.nerve,
+      }));
+      body.heistsDone = apiState.heistsDone;
+    }
     return body;
   }
 
@@ -1400,6 +1423,20 @@
     shareLastSig = JSON.stringify({ ...body, post: undefined }); shareLastAt = Date.now();
     sendToCrewBot(body, (r) => {
       const p = r && r.post;
+      if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
+      else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
+    });
+  }
+
+  // The heist "📣 Post to Discord" button (0.32.0, user request): same as for crew jobs, into the bot's heist channel.
+  function postHeistToDiscord(heistId) {
+    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
+    const body = crewSharePayload();
+    if (!body || !body.heists) { toast('No heist info yet. Open the Heists page once it has loaded.'); return; }
+    body.postHeist = heistId;
+    shareLastSig = JSON.stringify({ ...body, postHeist: undefined }); shareLastAt = Date.now();
+    sendToCrewBot(body, (r) => {
+      const p = r && r.heistPost;
       if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
       else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
     });
@@ -1743,7 +1780,7 @@
   }
 
   const ordinal = (n) => { const r = n % 100; const sfx = r >= 11 && r <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'); return n + sfx; };
-  const VERDICT_LABEL = { low: 'Looks LOW', high: 'Looks HIGH', mid: 'Mid-range', flat: 'Flat so far', learn: 'Learning' };
+  const VERDICT_LABEL = { low: 'Looks LOW', high: 'Looks HIGH', risehigh: 'New high (market rising)', mid: 'Mid-range', flat: 'Flat so far', learn: 'Learning' };
 
   const MOVE_WINDOWS = [10, 25, 50];
   function windowsOf(moves) {
@@ -1762,6 +1799,81 @@
       const seen = c.seen < w ? ` <i>(${c.seen} seen)</i>` : '';
       return `Last ${w}: <b class="up">${c.up}↑</b> <b class="down">${c.down}↓</b> <b>${c.flat}=</b>${seen}`;
     }).join(' · ');
+  }
+
+  // ─── Market trend (0.32.0, user request) ──────────────────────────────────
+  // Until 6 Oct every stock bounced inside its own range (the biggest 3-day move of all six together was 7%); from the
+  // evening of 6 Oct all six climbed ~7%/day (API log "Stocks", 2026-10-09). A climb like that makes every price "Looks
+  // HIGH", so the box measures the whole market over 3 days and says which kind of market it is. Measured fresh from
+  // prices every time, never a fixed rate. Prices come from the stock page's own chart (kept in memory only), or the
+  // script's own record when no chart has loaded.
+  const TREND_DAYS = 3;
+  const TREND_MOVE = 8; // % over 3 days for all six on average: above anything seen before the climb (7%)
+  const TREND_STALL = 1.5; // % in the last day below which a climb counts as stalled
+  const stockCharts = {}; // range -> { points: { id: [[ms, price], ...] } }
+  function onStockChartResponse(json) {
+    if (!json || !/^(1d|7d|30d)$/.test(json.range) || !json.points || typeof json.points !== 'object') return;
+    stockCharts[json.range] = { points: json.points };
+    schedule();
+  }
+  // Prices for one company as [[ms, price]], oldest first: the longest loaded chart if it reaches back 3 days and is
+  // up to date (newest point within 2 hours), otherwise the script's own record.
+  function priceSeries(id) {
+    const now = Date.now();
+    for (const r of ['7d', '30d']) {
+      const pts = stockCharts[r] && stockCharts[r].points[id];
+      if (Array.isArray(pts) && pts.length > 1 && now - pts[pts.length - 1][0] < 2 * 3600000 && now - pts[0][0] >= TREND_DAYS * 86400000) return pts;
+    }
+    const bySlot = new Map();
+    ((loadDb().stocks[id] && loadDb().stocks[id].obs) || []).forEach((o) => { const k = periodOf(o); if (k != null) bySlot.set(k, o.price); });
+    return [...bySlot.entries()].sort((a, b) => a[0] - b[0]).map(([k, p]) => [k * PERIOD_MS, p]);
+  }
+  // % change from the last price at or before (newest - span) to the newest; null if the record doesn't reach back.
+  function changeOver(pts, span) {
+    if (pts.length < 2) return null;
+    const last = pts[pts.length - 1];
+    let then = null;
+    for (const p of pts) { if (p[0] <= last[0] - span) then = p; else break; }
+    return then && then[1] > 0 && last[0] - then[0] < span + 6 * 3600000 ? (last[1] / then[1] - 1) * 100 : null;
+  }
+  function stockTrend(id) {
+    const pts = priceSeries(id);
+    return { d3: changeOver(pts, TREND_DAYS * 86400000), d1: changeOver(pts, 86400000) };
+  }
+  // The whole market: every company the game lists (short ids from the chart, else from recorded history).
+  function marketTrend() {
+    const ids = Object.keys((stockCharts['7d'] || stockCharts['30d'] || {}).points || loadDb().stocks || {});
+    const all = ids.map(stockTrend).filter((t) => t.d3 != null && t.d1 != null);
+    if (all.length < 3) return null;
+    const avg = (k) => all.reduce((s, t) => s + t[k], 0) / all.length;
+    const d3 = avg('d3'), d1 = avg('d1');
+    const up = all.filter((t) => t.d3 > 0).length;
+    const state = d3 >= TREND_MOVE ? (d1 >= TREND_STALL ? 'rising' : 'stalled') : d3 <= -TREND_MOVE ? 'falling' : 'flat';
+    return { state, d3, d1, up, n: all.length, perDay: d3 / TREND_DAYS };
+  }
+  // "Looks HIGH" in a rising market is just a new high, not a warning (shown grey instead of red).
+  const verdictOf = (st) => (st.verdict === 'high' && marketTrend()?.state === 'rising' ? 'risehigh' : st.verdict);
+  const signed = (x) => (x >= 0 ? '+' : '−') + Math.abs(x).toFixed(Math.abs(x) < 10 ? 1 : 0) + '%';
+  function trendHtml(id) {
+    const m = marketTrend();
+    if (!m || m.state === 'flat') return '';
+    const t = stockTrend(id);
+    const mine = t.d3 != null ? ` · this stock ${signed(t.d3)} in 3 days${t.d1 != null ? `, ${signed(t.d1)} in the last day` : ''}` : '';
+    const text = {
+      rising: `📈 <b>Market rising</b> ~${signed(m.perDay)}/day (${m.up} of ${m.n} up over 3 days)${mine}. Waiting for a dip has cost money so far.`,
+      stalled: `⚠️ <b>Climb stalled</b>: ${signed(m.d3)} over 3 days but only ${signed(m.d1)} in the last day${mine}.`,
+      falling: `📉 <b>Market falling</b> ~${signed(m.perDay)}/day${mine}.`,
+    }[m.state];
+    return `<small class="msx-mtrend ${m.state}" title="All ${m.n} stocks together over the last 3 days and the last day. Before 6 Oct the market never moved more than 7% in 3 days, so ${TREND_MOVE}% or more counts as a trend. Measured from the prices, never assumed.">${text}</small>`;
+  }
+  // No trade fees, and the game won't sell you more than the perk amount, so the useful number is what's left to fill.
+  function perkRoomText(s) {
+    if (!s.perkShares) return '';
+    const co = apiState && apiState.stocks && apiState.stocks.companies.find((x) => norm(x.name) === norm(s.name));
+    const held = co && Number.isFinite(co.shares) ? co.shares : null;
+    if (held == null || held === 0) return ` · perk ≈ ${fmtMoney(s.perkShares * s.price)}`;
+    if (held >= s.perkShares) return ' · perk full, no more to buy';
+    return ` · ${held.toLocaleString('en-US')}/${s.perkShares.toLocaleString('en-US')} held, rest ≈ ${fmtMoney((s.perkShares - held) * s.price)}`;
   }
 
   // Perk on/off timing: only known from the game's own data (there is nothing like it on the page itself).
@@ -1831,7 +1943,7 @@
     document.querySelectorAll('a.xr-screen[data-co]').forEach((a) => {
       const m = (a.getAttribute('aria-label') || '').match(/\$([\d,]+)/);
       const st = m && isStockPage() ? stockStats(a.dataset.co, num(m[1])) : null;
-      const v = st && (st.verdict === 'low' || st.verdict === 'high') ? st.verdict : '';
+      const v = st && (verdictOf(st) === 'low' || verdictOf(st) === 'high') ? st.verdict : '';
       a.classList.toggle('msx-low', v === 'low');
       a.classList.toggle('msx-high', v === 'high');
       // The border was barely noticeable (user, 0.26.2), so the price number itself is coloured too: green LOW, red
@@ -1850,11 +1962,12 @@
 
   function stockBoxHtml(s, st) {
     const arrow = st.trend > 0 ? '↗' : st.trend < 0 ? '↘' : '→';
+    const v = verdictOf(st);
     const label = st.verdict === 'learn'
       ? `Learning ${st.n}/${MIN_TICKS_FOR_VERDICT}`
-      : `${VERDICT_LABEL[st.verdict]} · ${Math.round(st.pos * 100)}% of range · ${ordinal(Math.round(st.pct * 100))} pct`;
-    const perkCost = s.perkShares ? ` · perk ≈ ${fmtMoney(s.perkShares * s.price)}` : '';
-    return `<span class="msx-tag stk ${st.verdict}" title="% of range: how far up between the lowest and highest price recorded (0% = lowest seen, 100% = highest seen). pct: the share of recorded price periods that were lower. HIGH or LOW shows when either is within 20% of an end.">${label}</span>` +
+      : `${VERDICT_LABEL[v]} · ${Math.round(st.pos * 100)}% of range · ${ordinal(Math.round(st.pct * 100))} pct`;
+    const perkCost = perkRoomText(s);
+    return trendHtml(s.id) + `<span class="msx-tag stk ${v}" title="% of range: how far up between the lowest and highest price recorded (0% = lowest seen, 100% = highest seen). pct: the share of recorded price periods that were lower. HIGH or LOW shows when either is within 20% of an end.">${label}</span>` +
       `<span class="msx-trend" title="Average of the last 3 price moves vs the 3 before">${st.n >= 6 ? arrow : ''}</span>` +
       `<small class="msx-moves" title="How many of the last 10 and last 25 price moves went up (↑), down (↓) or stayed the same (=). Only counts moves the script saw one after another, so a gap in the record is skipped.">${movesHtml(st.mw)}</small>` +
       `<small class="msx-range" title="Lowest / highest price this script has recorded, over ${st.n} price moves (avg $${st.avg.toFixed(1)})">` +
@@ -3334,14 +3447,19 @@
     if (panel && anchor && anchor.nextElementSibling !== panel) anchor.after(panel);
     // "📣 Post to Discord" (0.19.0): only while crew sharing is on. The crew bot posts the selected job and then
     // keeps editing that post as people join.
+    ensurePostButton(panel, 'Post this job in the crew Discord. The post updates itself as people join.', postJobToDiscord);
+  }
+
+  // The 📣 button beside "Copy for Discord" (crew jobs 0.19.0, heists 0.32.0), only while crew sharing is on.
+  function ensurePostButton(panel, title, send) {
     let post = panel && panel.querySelector('.msx-postbtn');
     if (panel && sharingOn() && !post) {
       post = document.createElement('button');
       post.type = 'button';
       post.className = 'msx-postbtn';
       post.textContent = '📣 Post to Discord';
-      post.title = 'Post this job in the crew Discord. The post updates itself as people join.';
-      post.addEventListener('click', () => postJobToDiscord(panel.dataset.selectedId));
+      post.title = title;
+      post.addEventListener('click', () => send(panel.dataset.selectedId));
       panel.querySelector('.msx-copybtn').after(post);
     } else if (post && !sharingOn()) post.remove();
   }
@@ -3352,6 +3470,7 @@
       'Ready to post in Discord: who\'s in the clowder, how many seats are open, and the payout.' +
       (jobs.length > 1 ? ' Click a heist\'s name above to switch which one\'s message is shown.' : ''),
       jobs, buildHeistMessage, apiState && apiState.crew && apiState.crew.name);
+    ensurePostButton(document.getElementById('msx-myheist'), 'Post this heist in the crew Discord. The post updates itself as people join and goes away when the heist is over.', postHeistToDiscord);
   }
 
   function ensureHeistsPanel() {
