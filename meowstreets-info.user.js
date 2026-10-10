@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.33.0
+// @version      0.33.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -115,6 +115,7 @@
             id: c.id, name: c.name, kind: c.kind, district: c.district, cost: c.cost, state: c.state, chance: chanceById[c.id],
             // Jobs that pay once at the end: the safe's wheels, the clock's steps (the pay shown is for the whole job).
             steps: c.kind === 'crack' ? ((c.targets || [])[0]?.wheels?.of || 1) : c.kind === 'steps' ? (c.targets || []).length || 1 : 1,
+            tools: (c.tools || []).filter((t) => t && t.name).map((t) => ({ name: t.name, held: Number(t.held) || 0 })),
             places: (c.targets || []).filter((t) => t && !t.empty).map((t) => ({ id: t.id, name: t.name, open: !t.shut, acts: (t.acts || []).map(act) })),
           })),
         };
@@ -698,6 +699,12 @@
       #msx-crimetable td.msx-best { color:var(--ms-lime, #b4df87); font-weight:700; }
       #msx-crimetable small { display:block; margin-top:6px; color:var(--ms-smoke, #8d9289); }
       .cs-dock .msx-pernerve { margin:4px 0 0; font-size:11.5px; color:var(--ms-smoke, #8d9289); }
+      .cs-dock .msx-chance { margin:4px 0 0; font-size:12px; }
+      .cs-dock .msx-chance b { color:var(--ms-lime, #b4df87); }
+      .cs-dock .msx-chance small { color:var(--ms-smoke, #8d9289); font-size:11px; }
+      .cs-dock .msx-tools { margin:4px 0 0; font-size:11.5px; color:var(--ms-smoke, #8d9289); }
+      .cs-dock .msx-tools a { color:var(--ms-bone, #e7ede1); text-decoration:underline dotted; }
+      .cs-dock .msx-tools a.msx-tool-none { color:var(--ms-red, #eb6561); font-weight:600; }
       .cs-dock .msx-croplock { display:flex; flex-direction:column; gap:4px; margin-top:6px; }
       .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
@@ -1794,13 +1801,13 @@
     const topCash = top('cash'), topXp = top('xp');
     const body = rows.map((r) => {
       const v = r.best && r.best.v;
-      return `<tr><td>${escHtml(r.c.name)}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
+      return `<tr><td>${escHtml(r.c.name)}</td><td>${Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
         `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
         `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td></tr>`;
     }).join('');
-    const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th>Best place now</th>' +
+    const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th title="Success % for the job from the game data, with your bonuses and heat. The Safe / Good / Fair on each place can move it.">Success</th><th>Best place now</th>' +
       '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th></tr></thead>' +
-      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Odds are only Safe / Good / Fair now, so this is pay and XP, not chance.</small>`;
+      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the job's own %; a place's Safe / Good / Fair can move it.</small>`;
     if (!box) { box = document.createElement('section'); box.id = 'msx-crimetable'; }
     if (ladder.nextElementSibling !== box) ladder.after(box);
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
@@ -1828,7 +1835,40 @@
       if (quote.nextElementSibling !== line) quote.after(line);
       if (line.textContent !== text) line.textContent = text;
     } else if (line) line.remove();
+    drawCrimeChance(crime, dock, quote);
+    drawCrimeTools(crime, dock);
     if (crime) applyCrimeLocks(crime, dock);
+  }
+
+  // The tools a job uses, from the game data (the rebuilt page doesn't list them), each a plain link to that item on
+  // Whiskers & Co. (user request 2026-10-10, like the old tool chips in 0.18.1); red when you have none.
+  function drawCrimeTools(crime, dock) {
+    let box = dock.querySelector('.msx-tools');
+    const tools = (crime && crime.tools) || [];
+    if (!tools.length) { if (box) box.remove(); return; }
+    const html = '🧰 ' + tools.map((t) => `<a href="/whiskers#msx-item=${encodeURIComponent(t.name)}" class="${t.held ? '' : 'msx-tool-none'}" title="Open Whiskers &amp; Co. at ${escHtml(t.name)}">` +
+      `${escHtml(t.name)} ${t.held ? '×' + t.held : '(none: buy)'}</a>`).join(' · ');
+    if (!box) { box = document.createElement('div'); box.className = 'msx-tools'; }
+    const after = dock.querySelector('.msx-chance') || dock.querySelector('.msx-pernerve') || dock.querySelector('dl.cs-quote');
+    if (!after) return;
+    if (after.nextElementSibling !== box) after.after(box);
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
+  // The job's success % (user request 2026-10-10: the page only says Safe / Good / Fair now). It is the game's own
+  // number from `crimes[]`, with your bonuses and heat in it, plus the old ▸ Odds breakdown. The word on each place
+  // moves around it with the situation (a lamp on the crates, watchers awake on the bike racks, a cat-sized hole), and
+  // the game sends no number for that part, so the line says so.
+  function drawCrimeChance(crime, dock, quote) {
+    const api = crime && apiState.crimes[norm(crime.name)];
+    let box = dock.querySelector('.msx-chance');
+    if (!quote || !api || !Number.isFinite(api.chance)) { if (box) box.remove(); return; }
+    const html = `<b>Success ${api.chance}%</b> <small>for this job with your bonuses and heat; the place's word above can move it up or down</small>` +
+      oddsHtmlFromApi({ api, key: norm(crime.name) });
+    if (!box) { box = document.createElement('div'); box.className = 'msx-chance'; }
+    const after = dock.querySelector('.msx-pernerve') || quote;
+    if (after.nextElementSibling !== box) after.after(box);
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
 
   // The same two locks as before the rebuild, on the new buttons: only buttons that cost nerve (not "Walk out",
@@ -3971,7 +4011,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-chance, .msx-tools, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
