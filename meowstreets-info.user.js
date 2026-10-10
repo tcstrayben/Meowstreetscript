@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.32.0
+// @version      0.33.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -103,6 +103,23 @@
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
         };
       });
+      // The rebuilt crimes (game build 2026-10-10, API log "newupdate"): `street` has each crime's places and their
+      // buttons with nerve, heat, XP and pay, plus district heat. The success % per crime is still only in `crimes`.
+      if (raw.street && Array.isArray(raw.street.crimes)) {
+        const chanceById = {};
+        (raw.crimes || []).forEach((c) => { if (c && c.id) chanceById[c.id] = c.chance; });
+        const act = (a) => ({ key: a.key, verb: a.verb, cost: a.cost, heat: a.heat, xp: a.xp, payMin: a.payMin, payMax: a.payMax, odds: a.odds && a.odds.word, main: !!a.main });
+        out.street = {
+          districts: {},
+          crimes: raw.street.crimes.filter((c) => c && c.id).map((c) => ({
+            id: c.id, name: c.name, kind: c.kind, district: c.district, cost: c.cost, state: c.state, chance: chanceById[c.id],
+            // Jobs that pay once at the end: the safe's wheels, the clock's steps (the pay shown is for the whole job).
+            steps: c.kind === 'crack' ? ((c.targets || [])[0]?.wheels?.of || 1) : c.kind === 'steps' ? (c.targets || []).length || 1 : 1,
+            places: (c.targets || []).filter((t) => t && !t.empty).map((t) => ({ id: t.id, name: t.name, open: !t.shut, acts: (t.acts || []).map(act) })),
+          })),
+        };
+        (raw.street.districts || []).forEach((d) => { if (d && d.id) out.street.districts[d.id] = { name: d.name, heat: d.heat, hot: !!d.hot }; });
+      }
       if (raw.merits && typeof raw.merits === 'object') {
         out.merits = { available: raw.merits.available, earned: raw.merits.earned, spent: raw.merits.spent };
         (raw.merits.lines || []).forEach((l) => {
@@ -672,6 +689,16 @@
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-heatlock button:hover { border-color:var(--ms-lime, #b4df87); }
       button.msx-heat-locked { opacity:.4; cursor:not-allowed !important; }
+      button.cs-go.msx-chain-locked { opacity:.4; cursor:not-allowed !important; }
+      #msx-crimetable { margin-top:14px; padding:10px 12px; border-radius:10px; background:rgba(0,0,0,.28); font-size:12.5px; }
+      #msx-crimetable h3 { margin:0 0 6px; font-size:14px; }
+      #msx-crimetable table { border-collapse:collapse; width:100%; }
+      #msx-crimetable th, #msx-crimetable td { padding:3px 10px 3px 0; text-align:left; white-space:nowrap; }
+      #msx-crimetable th { color:var(--ms-smoke, #8d9289); font-weight:600; }
+      #msx-crimetable td.msx-best { color:var(--ms-lime, #b4df87); font-weight:700; }
+      #msx-crimetable small { display:block; margin-top:6px; color:var(--ms-smoke, #8d9289); }
+      .cs-dock .msx-pernerve { margin:4px 0 0; font-size:11.5px; color:var(--ms-smoke, #8d9289); }
+      .cs-dock .msx-croplock { display:flex; flex-direction:column; gap:4px; margin-top:6px; }
       .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
       .msx-drops { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
@@ -1683,7 +1710,9 @@
   // The cheapest crime (by nerve, from the game's crime list) that can still grow the chain, and the % it needs
   // (user request, 0.25.1: "Minimum X nerve crime @ Y%"). null once no crime can.
   function minGrowCrime(chain) {
-    const nerves = [...new Set(Object.values(CRIMES).map((t) => t.nerve))].sort((a, b) => a - b);
+    // The game's own nerve costs since the 2026-10-10 rebuild (the clock job costs 16); the old built-in table before.
+    const costs = apiState && apiState.street ? apiState.street.crimes.map((c) => c.cost).filter((n) => n > 0) : Object.values(CRIMES).map((t) => t.nerve);
+    const nerves = [...new Set(costs)].sort((a, b) => a - b);
     for (const n of nerves) { const p = growPctFor(n, chain); if (p != null) return { nerve: n, pct: p }; }
     return null;
   }
@@ -1730,6 +1759,117 @@
       ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(c.key)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
     box.prepend(note);
   }
+  // ─── The rebuilt Crimes pages (0.33.0) ────────────────────────────────────
+  // Game build 2026-10-10: /crimes is a street map with "The ladder" of 12 jobs, and each job has its own page,
+  // /crimes/<id>, with places to pick (button.cs-hotspot) and a dock for the picked one: Odds / Payout / Heat / XP
+  // (dl.cs-quote) and the buttons (button.cs-go, aria-label "Dive, The butcher's yard, 3 nerve, safe odds").
+  // Layout from the API log's page snapshots ("newapiscan", 2026-10-10). The odds are only a word now (Safe / Good /
+  // Fair), so the numbers here are pay and XP per nerve; the crime's % is still in the game's data for chain mode.
+  const crimePageId = () => { const m = location.pathname.match(/^\/crimes\/([a-z]+)\/?$/); return m ? m[1] : null; };
+  const streetCrime = (id) => (apiState && apiState.street && apiState.street.crimes.find((c) => c.id === id)) || null;
+  // A place's best paying button: pay per nerve uses the middle of the range; a job that pays once at the end (safe,
+  // clock) is spread over all its steps.
+  function placeValue(crime, place) {
+    let best = null;
+    place.acts.forEach((a) => {
+      if (!(a.cost > 0) || !Number.isFinite(a.payMin) || !Number.isFinite(a.payMax)) return;
+      const cash = (a.payMin + a.payMax) / 2 / (a.cost * crime.steps);
+      if (!best || cash > best.cash) best = { act: a, cash, xp: Number.isFinite(a.xp) ? a.xp / a.cost : null };
+    });
+    return best;
+  }
+
+  // Overview: one line per job you can do, its best open place, pay and XP per nerve; ★ on the best of each.
+  function drawCrimeTable() {
+    const ladder = isCrimesPage() && document.querySelector('section.cs-ladder');
+    const street = apiState && apiState.street;
+    let box = document.getElementById('msx-crimetable');
+    if (!ladder || !street) { if (box) box.remove(); return; }
+    const rows = street.crimes.filter((c) => c.state !== 'locked').map((c) => {
+      let best = null;
+      c.places.filter((p) => p.open).forEach((p) => { const v = placeValue(c, p); if (v && (!best || v.cash > best.v.cash)) best = { p, v }; });
+      return { c, best };
+    });
+    const top = (k) => rows.reduce((m, r) => (r.best && r.best.v[k] != null && (!m || r.best.v[k] > m.best.v[k]) ? r : m), null);
+    const topCash = top('cash'), topXp = top('xp');
+    const body = rows.map((r) => {
+      const v = r.best && r.best.v;
+      return `<tr><td>${escHtml(r.c.name)}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
+        `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
+        `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td></tr>`;
+    }).join('');
+    const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th>Best place now</th>' +
+      '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th></tr></thead>' +
+      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Odds are only Safe / Good / Fair now, so this is pay and XP, not chance.</small>`;
+    if (!box) { box = document.createElement('section'); box.id = 'msx-crimetable'; }
+    if (ladder.nextElementSibling !== box) ladder.after(box);
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
+  // One job's page: pay and XP per nerve under the dock's numbers, then the heat and chain mode locks.
+  function drawCrimeDock() {
+    const id = crimePageId();
+    const dock = id && document.querySelector('.cs-dock');
+    if (!dock) return;
+    const crime = streetCrime(id);
+    const quote = dock.querySelector('dl.cs-quote');
+    let line = dock.querySelector('.msx-pernerve');
+    const payM = quote && (quote.querySelector('.cs-pay')?.textContent || '').match(/\$([\d,]+)\s*[–-]\s*\$([\d,]+)/);
+    const xpDd = quote && [...quote.querySelectorAll('div')].find((d) => /^XP$/i.test(d.querySelector('dt')?.textContent.trim() || ''));
+    const xp = xpDd ? num(xpDd.querySelector('dd')?.textContent) : NaN;
+    const costM = (dock.querySelector('button.cs-go.is-main .cs-go-cost')?.textContent || '').match(/(\d+)\s*nerve/);
+    const cost = costM ? Number(costM[1]) : NaN;
+    if (quote && payM && cost > 0) {
+      const steps = crime ? crime.steps : 1;
+      const lo = num(payM[1]) / (cost * steps), hi = num(payM[2]) / (cost * steps);
+      const text = `≈ ${fmtMoney(lo)}–${fmtMoney(hi)} per nerve` + (Number.isFinite(xp) ? ` · ${(xp / cost).toFixed(1)} XP per nerve` : '') +
+        (steps > 1 ? ` (pays once for all ${steps} steps: ${cost * steps} nerve)` : '');
+      if (!line) { line = document.createElement('p'); line.className = 'msx-pernerve'; }
+      if (quote.nextElementSibling !== line) quote.after(line);
+      if (line.textContent !== text) line.textContent = text;
+    } else if (line) line.remove();
+    if (crime) applyCrimeLocks(crime, dock);
+  }
+
+  // The same two locks as before the rebuild, on the new buttons: only buttons that cost nerve (not "Walk out",
+  // "Next house"). The script never clicks; it only blocks your own click, with "Unlock anyway" beside it.
+  function applyCrimeLocks(crime, dock) {
+    const btns = [...dock.querySelectorAll('button.cs-go')].filter((b) => /\b\d+ nerve\b/.test(b.getAttribute('aria-label') || ''));
+    const d = apiState.street.districts[crime.district] || {};
+    const heatOverrides = loadHeatOverrides();
+    if (!d.hot && heatOverrides[crime.district]) { delete heatOverrides[crime.district]; GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(heatOverrides)); }
+    const heatLocked = !!d.hot && !heatOverrides[crime.district];
+    const mode = chainModeState();
+    const chainOverrides = mode ? loadChainOverrides() : {};
+    let chainUnder = false, chainWhy = '';
+    if (mode && mode.chain >= GROW_FROM && Number.isFinite(crime.chance) && crime.cost) {
+      chainUnder = Math.floor(chainSettlesAt(crime.cost, crime.chance) + 0.5) < mode.chain;
+      const need = growPctFor(crime.cost, mode.chain);
+      chainWhy = minGrowText(mode.chain) + (need != null ? ` (this one needs ${need}%, it is at ${crime.chance}%)` : '');
+    }
+    const chainLocked = chainUnder && !chainOverrides[crime.id];
+    btns.forEach((b) => {
+      b.classList.toggle('msx-heat-locked', heatLocked);
+      b.classList.toggle('msx-chain-locked', chainLocked);
+      if (heatLocked || chainLocked) { if (!b.disabled) b.disabled = true; b.dataset.msxLocked = '1'; }
+      else if (b.dataset.msxLocked) { delete b.dataset.msxLocked; b.disabled = false; }
+    });
+    const notes = [];
+    if (d.hot) {
+      notes.push(`<div class="msx-heatlock${heatLocked ? ' locked' : ''}">${heatLocked ? `🔒 ${escHtml(d.name || 'District')} heat ${d.heat}: locked` : '🔓 Hot, unlocked by you'}` +
+        ` <button type="button" class="msx-heat-toggle" data-district="${escHtml(crime.district)}">${heatLocked ? 'Unlock anyway' : 'Lock again'}</button></div>`);
+    }
+    if (chainUnder) {
+      notes.push(`<div class="msx-heatlock${chainLocked ? ' locked' : ''}">⛓️ Chain mode: ${escHtml(chainWhy)}. ${chainLocked ? 'Locked' : 'Unlocked by you'}` +
+        ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(crime.id)}">${chainLocked ? 'Unlock anyway' : 'Lock again'}</button></div>`);
+    }
+    let box = dock.querySelector('.msx-croplock');
+    const html = notes.join('');
+    if (!html) { if (box) box.remove(); return; }
+    if (!box) { box = document.createElement('div'); box.className = 'msx-croplock'; dock.querySelector('.cs-deal')?.after(box); }
+    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  }
+
   // A one-line banner at the top of the Crimes page while chain mode is on.
   function ensureChainModeBanner(mode) {
     let el = document.getElementById('msx-chainmode');
@@ -3776,6 +3916,11 @@
         draw(data);
         logObservations(data);
       }
+      // The rebuilt Crimes pages (0.33.0): overview table, per-nerve line and the locks on each job's page.
+      const onCrimes = isCrimesPage() || !!crimePageId();
+      ensureChainModeBanner(onCrimes ? chainModeState() : null);
+      drawCrimeTable();
+      if (onCrimes) drawCrimeDock();
       if (isStockPage()) syncNextMove();
       ensureCatClock();
       ensureTicker();
@@ -3826,7 +3971,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
