@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.33.1
+// @version      0.33.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -700,11 +700,10 @@
       #msx-crimetable small { display:block; margin-top:6px; color:var(--ms-smoke, #8d9289); }
       .cs-dock .msx-pernerve { margin:4px 0 0; font-size:11.5px; color:var(--ms-smoke, #8d9289); }
       .cs-dock .msx-chance { margin:4px 0 0; font-size:12px; }
-      .cs-dock .msx-chance b { color:var(--ms-lime, #b4df87); }
+      .cs-dock .msx-chance b { color:var(--ms-lime, #b4df87); font-size:17px; font-weight:800; margin-right:4px; } /* user: make it stand out */
       .cs-dock .msx-chance small { color:var(--ms-smoke, #8d9289); font-size:11px; }
-      .cs-dock .msx-tools { margin:4px 0 0; font-size:11.5px; color:var(--ms-smoke, #8d9289); }
-      .cs-dock .msx-tools a { color:var(--ms-bone, #e7ede1); text-decoration:underline dotted; }
-      .cs-dock .msx-tools a.msx-tool-none { color:var(--ms-red, #eb6561); font-weight:600; }
+      .cs-dock .cs-risk > span.msx-tool-link { cursor:pointer; }
+      .cs-dock .cs-risk > span.msx-tool-link:hover { text-decoration:underline; }
       .cs-dock .msx-croplock { display:flex; flex-direction:column; gap:4px; margin-top:6px; }
       .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
@@ -1067,10 +1066,11 @@
   // User request (0.18.1): clicking a crime's tool chip ("Fake manifest none", "Crowbar ×1") opens Whiskers & Co.
   // and scrolls to that tool. Your own click, a plain page change. Chip from a dev-tools capture (Screenshot 339):
   // article.rung > div.rung-main > div.tool-line > span (class "missing" when you own none).
+  const toolName = (chip) => chip.textContent.replace(/\s*(none|×\s*\d+|x\s*\d+)\s*$/i, '').trim();
   document.addEventListener('click', (e) => {
-    const chip = e.target.closest && e.target.closest('.rung .tool-line > span');
+    const chip = e.target.closest && e.target.closest('.rung .tool-line > span, .cs-dock .cs-risk > span');
     if (!chip) return;
-    const name = chip.textContent.replace(/\s*(none|×\s*\d+|x\s*\d+)\s*$/i, '').trim();
+    const name = toolName(chip);
     location.assign('/whiskers' + (name ? '#msx-item=' + encodeURIComponent(name) : ''));
   });
   function decorateToolChips() {
@@ -1836,23 +1836,18 @@
       if (line.textContent !== text) line.textContent = text;
     } else if (line) line.remove();
     drawCrimeChance(crime, dock, quote);
-    drawCrimeTools(crime, dock);
+    decorateCrimeTools(dock);
     if (crime) applyCrimeLocks(crime, dock);
   }
 
-  // The tools a job uses, from the game data (the rebuilt page doesn't list them), each a plain link to that item on
-  // Whiskers & Co. (user request 2026-10-10, like the old tool chips in 0.18.1); red when you have none.
-  function drawCrimeTools(crime, dock) {
-    let box = dock.querySelector('.msx-tools');
-    const tools = (crime && crime.tools) || [];
-    if (!tools.length) { if (box) box.remove(); return; }
-    const html = '🧰 ' + tools.map((t) => `<a href="/whiskers#msx-item=${encodeURIComponent(t.name)}" class="${t.held ? '' : 'msx-tool-none'}" title="Open Whiskers &amp; Co. at ${escHtml(t.name)}">` +
-      `${escHtml(t.name)} ${t.held ? '×' + t.held : '(none: buy)'}</a>`).join(' · ');
-    if (!box) { box = document.createElement('div'); box.className = 'msx-tools'; }
-    const after = dock.querySelector('.msx-chance') || dock.querySelector('.msx-pernerve') || dock.querySelector('dl.cs-quote');
-    if (!after) return;
-    if (after.nextElementSibling !== box) after.after(box);
-    if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
+  // The job's tools: the game lists them in the dock (p.cs-risk > span, "Bolt cutters ×9", class is-missing at ×0).
+  // Each becomes a plain link to that item on Whiskers & Co. (user request 2026-10-10, like the old chips in 0.18.1);
+  // the click itself is handled with the old chips' click handler below.
+  function decorateCrimeTools(dock) {
+    dock.querySelectorAll('.cs-risk > span').forEach((chip) => {
+      if (!chip.classList.contains('msx-tool-link')) chip.classList.add('msx-tool-link');
+      setTitle(chip, 'Open Whiskers & Co. at ' + toolName(chip));
+    });
   }
 
   // The job's success % (user request 2026-10-10: the page only says Safe / Good / Fair now). It is the game's own
@@ -4011,7 +4006,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-chance, .msx-tools, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
