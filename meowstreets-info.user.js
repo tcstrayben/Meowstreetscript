@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.33.2
+// @version      0.34.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -134,6 +134,26 @@
           chain: raw.crew.chain, chainAt: raw.crew.chain_at, chainEndsAt: raw.crew.chainEndsAt,
           treasury: raw.crew.treasury, respect: raw.crew.respect,
         };
+      }
+      // The crew's weekly contracts (2026-10-19): id, name, goal, got on every page. What counts and your own share only
+      // come with the Contracts tab's reply (see onCrewContractsResponse).
+      if (raw.crew && raw.crewWeek && Array.isArray(raw.crewWeek.contracts)) {
+        out.crewWeek = {
+          ends: Number(raw.crewWeek.ends) || 0,
+          contracts: raw.crewWeek.contracts.filter((c) => c && c.id).map((c) => ({ id: String(c.id), name: c.name || String(c.id), goal: Number(c.goal) || 0, got: Number(c.got) || 0, done: !!c.done })),
+        };
+      }
+      if (raw.street && Number.isFinite(raw.street.level)) out.playerLevel = raw.street.level;
+      // Crew perks with their ranks come with every /api/state (seen 2026-10-19), so the Perks tab never has to be
+      // opened: Inside line = ranks x step (% crime chance).
+      if (Array.isArray(raw.crewPerks)) {
+        const inside = raw.crewPerks.find((p) => p && p.id === 'crime');
+        out.crewPerkCrime = inside && Number.isFinite(inside.ranks) ? inside.ranks * (Number(inside.step) || 1) : 0;
+      }
+      // The gym you are at and its gain per stat (Cat Tree auto-lock, 0.34.0). `state: 'here'` marks it.
+      if (Array.isArray(raw.gyms)) {
+        const g = raw.gyms.find((x) => x && x.state === 'here') || raw.gyms.find((x) => x && raw.player && x.id === raw.player.gym);
+        if (g && g.gains && typeof g.gains === 'object') out.gym = { id: g.id, name: g.name, gains: { ...g.gains } };
       }
       // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
@@ -288,7 +308,16 @@
             coursesTaken++;
             // The exact wording the DOM reader already looks for, taken from the course's own real text instead
             // of guessing at page text -- so it stays a general crime-success bonus, not a crime-specific one.
-            const m = String(c.perk || '').match(/\+(\d+)\s*points?\s+to\s+every\s+crime.s\s+success\s+chance/i);
+            // From the course's own numbers (0.34.0): "Casing a joint" says "+4 points ON every crime's success
+            // chance" and the old "to every crime" text match missed it. A crimeChance add without a crime list
+            // counts for every crime. The wording (to/on) is the fallback when `mods` has no readable key.
+            let known = false;
+            (Array.isArray(c.mods) ? c.mods : []).forEach((md) => {
+              if (!md || md.key !== 'crimeChance') return;
+              known = true;
+              if (Number.isFinite(md.add) && !Array.isArray(md.crimes)) eduCrimePoints += md.add;
+            });
+            const m = !known && String(c.perk || '').match(/\+(\d+)\s*points?\s+(?:to|on)\s+every\s+crime.s\s+success\s+chance/i);
             if (m) eduCrimePoints += +m[1];
           } else if (Number.isFinite(c.ends_at)) {
             if (eduLandsAt == null || c.ends_at < eduLandsAt) eduLandsAt = c.ends_at;
@@ -298,8 +327,8 @@
       }
       // Every piece of a crime's success "bonus", which the game only hands over already added up (user request,
       // 0.17.7: "we need to see where each % is coming from"). `crimes` limits a piece to those crimes (the game's
-      // own crime ids, e.g. "fish"/"rooftop"); null = every crime. The Crew > Perks "Inside line" ranks aren't in
-      // this response, so that piece is added when drawing, from the Crew page read.
+      // own crime ids, e.g. "fish"/"rooftop"); null = every crime. Inside line (out.crewPerkCrime) is added when
+      // drawing, only while you are in a crew.
       out.crimeBonusParts = [];
       const addPart = (label, v, crimes) => { if (Number.isFinite(v) && v) out.crimeBonusParts.push({ label, v, crimes: crimes || null }); };
       const streetSense = ((raw.merits && raw.merits.lines) || []).find((l) => l && l.name === 'Street sense');
@@ -320,7 +349,7 @@
         if (!p || !p.owned) return;
         const m = String(p.description || '').match(/\+(\d+)\s*(?:points?\s+)?on\s+(.+?)\.?$/i);
         if (!m) return;
-        addPart(p.name, +m[1], /every crime/i.test(m[2]) ? null : [norm(m[2].replace(/['’]s success chance$/i, ''))]);
+        addPart(p.name, +m[1], /every crime/i.test(m[2]) ? null : [norm(m[2].replace(/^the\s+/i, '').replace(/['’]s success chance$/i, ''))]);
       });
       if (raw.crew && raw.crew.buffActive) addPart('crew chain', 5);
       // Whiskers & Co.'s own buy price and sell-back price for every item, keyed by the game's own item id (the
@@ -450,7 +479,8 @@
     // /api/action (0.28.0): the reply to every crime, train, deposit... carries the whole state too, so the numbers
     // (crew chain, nerve, heat, odds) update the moment you act instead of on the next page load.
     // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse };
+    // /api/crew/contracts (0.34.0) is the Crew > Contracts tab's own reply: what each crew contract counts.
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -690,7 +720,6 @@
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-heatlock button:hover { border-color:var(--ms-lime, #b4df87); }
       button.msx-heat-locked { opacity:.4; cursor:not-allowed !important; }
-      button.cs-go.msx-chain-locked { opacity:.4; cursor:not-allowed !important; }
       #msx-crimetable { margin-top:14px; padding:10px 12px; border-radius:10px; background:rgba(0,0,0,.28); font-size:12.5px; }
       #msx-crimetable h3 { margin:0 0 6px; font-size:14px; }
       #msx-crimetable table { border-collapse:collapse; width:100%; }
@@ -765,11 +794,13 @@
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-mycrewjob button:hover, #msx-myheist button:hover { border-color:var(--ms-lime, #b4df87); }
       #msx-mycrewjob .msx-postbtn { margin-left:8px; }
-      .msx-gymlock { display:block; width:fit-content; margin-top:8px; padding:4px 10px; border-radius:8px; cursor:pointer;
-        font-size:12px; font-family:inherit; color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25);
-        border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      .msx-gymlock:hover { border-color:var(--ms-lime, #b4df87); }
-      .msx-gymlock.locked { color:var(--ms-red, #eb6561); border-color:var(--ms-red, #eb6561); background:rgba(235,101,97,.12); }
+      #msx-gymlock { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 0 4px; font-size:12px; color:var(--ms-smoke, #8d9289); }
+      #msx-gymlock .msx-gl-chip { padding:3px 9px; border-radius:999px; border:1px solid var(--ms-line, rgba(231,237,225,.2)); background:rgba(0,0,0,.25);
+        color:var(--ms-bone, #e7ede1); font:inherit; cursor:pointer; }
+      #msx-gymlock .msx-gl-chip:hover { border-color:var(--ms-lime, #b4df87); }
+      #msx-gymlock .msx-gl-chip.locked { color:var(--ms-red, #eb6561); border-color:var(--ms-red, #eb6561); background:rgba(235,101,97,.12); }
+      #msx-gymlock label { display:inline-flex; align-items:center; gap:4px; cursor:pointer; }
+      #msx-gymlock .msx-gl-note { flex-basis:100%; color:var(--ms-red, #eb6561); }
       button.msx-train-locked { opacity:.45; cursor:not-allowed !important; }
       #msx-invest .msx-inv-warn { margin:8px 0; color:var(--ms-gold, #e9c46a); }
       #msx-invest .msx-inv-warn ul { margin:4px 0 0; padding-left:20px; }
@@ -803,9 +834,7 @@
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
       .right-column #msx-mycrewjob { margin:16px 0 0; }
       #msx-chainpost { margin:16px 0 0; }
-      #msx-chainmode { margin:0 0 12px; padding:8px 12px; border-radius:10px; font-size:13px; font-weight:600; color:var(--ms-lime, #b4df87);
-        background:rgba(180,223,135,.08); border:1px solid rgba(180,223,135,.35); }
-      .msx-heatlock button.msx-chain-toggle, .msx-heatlock button.msx-heat-toggle { margin-left:2px; }
+      .msx-heatlock button.msx-heat-toggle { margin-left:2px; }
       .msx-feat-how { margin-top:3px; font-size:12px; color:var(--ms-lime, #b4df87); }
       .msx-feat-how b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
@@ -842,24 +871,7 @@
       .msx-tag.stk.learn { background:transparent; color:var(--ms-smoke, #8d9289); border:1px dashed var(--ms-smoke, #8d9289); }
       .msx-tag.hot { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
       .msx-heat { margin-left:8px; font-size:11px; color:var(--ms-smoke, #8d9289); white-space:nowrap; }
-      .msx-legend { margin:0 0 8px; padding:5px 10px; border-radius:8px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:12px; color:var(--ms-bone, #e7ede1); }
-      .msx-legend summary { cursor:pointer; display:flex; align-items:center; gap:6px; list-style:none; }
-      .msx-legend summary::-webkit-details-marker { display:none; }
-      .msx-legend .msx-dot { width:8px; height:8px; border-radius:50%; flex:none; background:var(--ms-lime, #b4df87); }
-      .msx-legend.warn { border-color:var(--ms-gold, #e9c46a); }
-      .msx-legend.bad { border-color:var(--ms-red, #eb6561); }
-      .msx-legend.warn > summary .msx-dot, .msx-legend-row.warn .msx-dot { background:var(--ms-gold, #e9c46a); }
-      .msx-legend.bad > summary .msx-dot, .msx-legend-row.bad .msx-dot { background:var(--ms-red, #eb6561); }
-      .msx-legend-list { margin-top:6px; display:grid; gap:4px; }
-      .msx-legend-row { display:grid; grid-template-columns:8px 1fr; gap:0 6px; align-items:baseline; font-size:11px; }
-      .msx-legend-row .msx-dot { width:6px; height:6px; border-radius:50%; background:var(--ms-lime, #b4df87); }
-      .msx-legend-row a { color:var(--ms-bone, #e7ede1); font-weight:600; text-decoration:underline; }
-      .msx-legend-row span { grid-column:2; color:var(--ms-smoke, #8d9289); }
-      .msx-legend-row.warn span { color:var(--ms-gold, #e9c46a); }
-      .msx-legend-row.bad span { color:var(--ms-red, #eb6561); }
-      .msx-legend-key { margin:6px 0 0; font-size:10.5px; color:var(--ms-smoke, #8d9289); line-height:1.35; }
-      .msx-legend-key .ok { color:var(--ms-lime, #b4df87); } .msx-legend-key .warn { color:var(--ms-gold, #e9c46a); } .msx-legend-key .bad { color:var(--ms-red, #eb6561); }
       #msx-account { margin:18px 0; padding:16px 18px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
       #msx-account h2 { margin:0 0 2px; font-size:17px; }
@@ -900,6 +912,25 @@
       .msx-crewjob-inline { margin-left:2px; padding-left:8px; border-left:1px dashed var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-chain > .msx-crewjob-inline:first-of-type { margin-left:0; padding-left:0; border-left:0; }
       .msx-crewjob-inline.soon { color:var(--ms-gold, #e9c46a); }
+      /* Crew things are light blue (user request, 0.34.0): the sidebar crew box, crew contracts, crew job boxes. */
+      :root { --msx-crew:#8fcbff; }
+      .msx-rail > .msx-ticker.msx-chain, .msx-ticker.msx-chain { flex-wrap:wrap; box-shadow:inset 0 0 0 1px var(--msx-crew); background:rgba(143,203,255,.07); }
+      .msx-chain > .ms-icon { color:var(--msx-crew); }
+      .msx-contracts { flex-basis:100%; display:grid; gap:1px; font-size:11px; }
+      .msx-contracts .msx-ct-head { color:var(--msx-crew); font-weight:600; }
+      .msx-contracts .msx-ct { display:flex; justify-content:space-between; gap:8px; }
+      .msx-contracts .msx-ct b { font-weight:600; }
+      .msx-contracts .msx-ct.done { opacity:.55; }
+      .msx-contracts .msx-ct.off { opacity:.55; }
+      a.msx-crew-ct { outline:2px solid var(--msx-crew); outline-offset:2px; border-radius:6px; }
+      #msx-crimetable tr.msx-crew-row td:first-child { box-shadow:inset 3px 0 0 var(--msx-crew); padding-left:6px; }
+      #msx-crimetable .msx-ct-chip { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; color:var(--msx-crew); border:1px solid var(--msx-crew); }
+      .cs-dock.msx-crew-dock { outline:2px solid var(--msx-crew); outline-offset:3px; }
+      .msx-ct-line, #msx-ct-banner { margin:8px 0; padding:6px 10px; border-radius:8px; font-size:12.5px; color:var(--ms-bone, #e7ede1);
+        background:rgba(143,203,255,.08); border:1px solid var(--msx-crew); }
+      .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
+      .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
+      #msx-crewjobs, #msx-mycrewjob, #msx-chainpost button { border-color:var(--msx-crew); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
@@ -1006,7 +1037,7 @@
       // "other", so the line always adds up to the game's own number.
       const forThis = (p) => !p.crimes || p.crimes.some((k) => k === a.id || c.key.startsWith(norm(k)));
       const parts = ((apiState && apiState.crimeBonusParts) || []).filter(forThis).map((p) => ({ label: p.label, v: p.v }));
-      const inside = loadDb().mods?.crewPerkCrime;
+      const inside = apiState && Number.isFinite(apiState.crewPerkCrime) ? apiState.crewPerkCrime : loadDb().mods?.crewPerkCrime;
       if (apiState && apiState.crew && inside) parts.push({ label: 'Inside line', v: inside });
       const other = a.bonus - parts.reduce((s, p) => s + p.v, 0);
       parts.forEach((p) => bits.push(`${fmt(p.v)} ${escHtml(p.label)}`));
@@ -1051,7 +1082,7 @@
     if (!btn) return;
     const locked = hot && !overrides[c.district];
     if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-heat-locked'); }
-    else if (btn.classList.contains('msx-heat-locked')) { btn.classList.remove('msx-heat-locked'); if (!btn.classList.contains('msx-chain-locked')) btn.disabled = false; }
+    else if (btn.classList.contains('msx-heat-locked')) { btn.classList.remove('msx-heat-locked'); btn.disabled = false; }
     if (!hot) return;
     const mins = heat != null ? Math.max(0, heat - (HOT_HEAT - 1)) * 5 : 0; // cools 1 point per 5 minutes
     const when = mins ? ` · unlocks in ~${mins >= 60 ? Math.floor(mins / 60) + 'h ' : ''}${mins % 60}m` : '';
@@ -1088,11 +1119,6 @@
     let overridesChanged = false;
     Object.keys(overrides).forEach((d) => { if (data.heat[d] != null && data.heat[d] < HOT_HEAT) { delete overrides[d]; overridesChanged = true; } });
     if (overridesChanged) GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(overrides));
-    // Chain mode: "Unlock anyway" picks only last while it stays on.
-    const chainMode = chainModeState();
-    let chainOverrides = loadChainOverrides();
-    if (!chainMode && Object.keys(chainOverrides).length) { chainOverrides = {}; clearChainOverrides(); }
-    ensureChainModeBanner(chainMode);
     crewVotes = [];
     const scored = data.crimes.map((c) => ({ c, s: score(c, data.chain, data.heat[c.district]) }));
 
@@ -1153,7 +1179,6 @@
       box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
       host.appendChild(box);
       applyHeatLock(c, s.hot, h0, box, overrides);
-      applyChainModeLock(c, box, chainMode, chainOverrides);
 
       const best = [];
       if (x === bestXp) best.push('xp');
@@ -1264,12 +1289,10 @@
       if (rec.obs.length > MAX_STOCK_TICKS) rec.obs.shift();
       changed = true;
     });
-    // The next-tick time is exact here, but companies[] only gives the game's own opaque id, not the short id
-    // used everywhere else -- match it to a known stock by name instead (name is stable and already recorded).
+    // The next-tick time is exact here and the same for every company (0.34.0: taken on any page; it used to wait
+    // for a stock already recorded by name, which only the stock page did, hence "open Claw Street Ex once").
     (apiState.stocks.companies || []).forEach((c) => {
-      if (!c.name || !c.nextTick) return;
-      const known = Object.values(db.stocks).find((rec) => rec.name && norm(rec.name) === norm(c.name));
-      if (known && Number.isFinite(c.nextTick) && Math.abs(c.nextTick - nextMoveAnchor) > 2000) {
+      if (c && Number.isFinite(c.nextTick) && Math.abs(c.nextTick - nextMoveAnchor) > 2000) {
         nextMoveAnchor = c.nextTick;
         try { GM_setValue(NEXT_MOVE_KEY, c.nextTick); } catch (e) { /* ignore */ }
       }
@@ -1307,11 +1330,8 @@
   const SHARE_CREW_ID = 2;
   const inShareCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
   const sharingOn = () => !!settings.shareCrew && inShareCrew();
-  // Crew chain mode (0.23.0): leadership turns it on in Discord; the bot's reply to every crew update says
-  // { on, min }. Kept with when it was heard, and trusted for 30 minutes (then the locks lift by themselves).
-  const CHAIN_MODE_KEY = 'ms_chain_mode_v1';
-  const CHAIN_MODE_TTL_MS = 30 * 60000;
-  const CHAIN_OVERRIDE_KEY = 'ms_chain_override_v1'; // { [crimeKey]: true } "Unlock anyway", cleared when it turns off
+  // Crew chain mode (0.23.0–0.33.x) was retired in 0.34.0: a failed crime no longer costs the crew chain anything
+  // (API log "ubernew", 2026-10-20), so no crime can shrink it. Code kept in Archive/chain-mode/.
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
 
   // A random id for this install only (lets the bot slow down one noisy sender); not tied to your game account.
@@ -1360,12 +1380,6 @@
       headers: { 'Content-Type': 'application/json' },
       onload: (r) => {
         let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
-        if (j && j.chainMode && typeof j.chainMode === 'object') {
-          const m = { on: !!j.chainMode.on, min: Number(j.chainMode.min) || 90, type: j.chainMode.type === 'grow' ? 'grow' : 'pct', heard: Date.now() };
-          const old = GM_getValue(CHAIN_MODE_KEY, null);
-          GM_setValue(CHAIN_MODE_KEY, m);
-          if (!old || old.on !== m.on || old.min !== m.min || old.type !== m.type) schedule();
-        }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
       onerror: () => { if (done) done({ ok: false, error: 'could not reach the crew bot' }); },
@@ -1561,9 +1575,13 @@
     const pool = (sharingOn() && GM_getValue(FEAT_POOL_KEY, null)) || {};
     const hidden = meritFeats.filter((f) => f.hidden);
     const spots = [...document.querySelectorAll('.main-content *, main *')].filter((el) => !el.children.length && el.textContent.trim() === 'Hidden until you earn it.');
-    if (spots.length !== hidden.length) { old.forEach((n) => n.remove()); return; }
+    // Since 2026-10-19 the page names hidden feats you have earned, so its "???" boxes are only the ones not held.
+    // Older pages kept every hidden feat as "???". Whichever count matches is used; nothing is drawn if neither does.
+    const unheld = hidden.filter((f) => !f.held);
+    const list = spots.length === hidden.length ? hidden : spots.length === unheld.length ? unheld : null;
+    if (!list) { old.forEach((n) => n.remove()); return; }
     spots.forEach((el, i) => {
-      const f = hidden[i];
+      const f = list[i];
       const mine = f.held && f.name && f.criteria;
       const found = !mine && pool[f.id] && pool[f.id].criteria ? pool[f.id] : null;
       let line = el.nextElementSibling && el.nextElementSibling.classList.contains('msx-feat-how') ? el.nextElementSibling : null;
@@ -1691,87 +1709,12 @@
       : '<p class="msx-nc-note">Nobody new in the last 24 hours.</p>'));
   }
 
-  // ─── Crew chain mode lock (Crimes page, 0.23.0) ───────────────────────────
-  // While crew leadership has chain mode on (set in Discord, see above), every crime whose success % on its card
-  // is under the threshold gets its own Attempt button disabled, like the heat lock -- the script never attempts
-  // anything, it only blocks your own click. "Unlock anyway" per crime, until chain mode is turned off.
-  // { type: 'grow', chain } while chain mode applies to you, else null. Grow the chain is the only kind since the bot
-  // dropped Success % (2026-10-05); it uses the crew chain from the game's own data right now.
-  function chainModeState() {
-    const m = GM_getValue(CHAIN_MODE_KEY, null);
-    if (!sharingOn() || !m || !m.on || Date.now() - m.heard > CHAIN_MODE_TTL_MS) return null;
-    const chain = apiState && apiState.crew && Number.isFinite(apiState.crew.chain) ? apiState.crew.chain : null;
-    return chain == null ? null : { type: 'grow', chain };
-  }
-  // Where the crew chain settles if everyone pulled this crime at this success %: a success adds its nerve, a fail
-  // takes 10% off and adds nothing (players). = 10 x nerve x successes per fail. Table: chain-plateau.csv.
-  const chainSettlesAt = (nerve, pct) => (pct >= 100 ? Infinity : (10 * nerve * pct) / (100 - pct));
-  const GROW_FROM = 100; // under the first milestone every crime grows the chain, so nothing is locked
-  const MAX_PCT = 95; // the game caps success at 95%
-  // Lowest success % at which a crime of this nerve keeps a chain this long growing (same rounding as the lock), or
-  // null if not even 95% does.
-  function growPctFor(nerve, chain) {
-    for (let p = 1; p <= MAX_PCT; p++) if (Math.floor(chainSettlesAt(nerve, p) + 0.5) >= chain) return p;
-    return null;
-  }
-  // The cheapest crime (by nerve, from the game's crime list) that can still grow the chain, and the % it needs
-  // (user request, 0.25.1: "Minimum X nerve crime @ Y%"). null once no crime can.
-  function minGrowCrime(chain) {
-    // The game's own nerve costs since the 2026-10-10 rebuild (the clock job costs 16); the old built-in table before.
-    const costs = apiState && apiState.street ? apiState.street.crimes.map((c) => c.cost).filter((n) => n > 0) : Object.values(CRIMES).map((t) => t.nerve);
-    const nerves = [...new Set(costs)].sort((a, b) => a - b);
-    for (const n of nerves) { const p = growPctFor(n, chain); if (p != null) return { nerve: n, pct: p }; }
-    return null;
-  }
-  const minGrowText = (chain) => {
-    const m = minGrowCrime(chain);
-    return m ? `Minimum ${m.nerve} nerve crime @ ${m.pct}%` : 'no crime grows the chain at any %';
-  };
-  function clearChainOverrides() { GM_setValue(CHAIN_OVERRIDE_KEY, {}); }
-  function loadChainOverrides() { const o = GM_getValue(CHAIN_OVERRIDE_KEY, null); return o && typeof o === 'object' ? o : {}; }
-  document.addEventListener('click', (e) => {
-    const b = e.target.closest && e.target.closest('.msx-chain-toggle');
-    if (!b) return;
-    const o = loadChainOverrides();
-    if (o[b.dataset.crime]) delete o[b.dataset.crime]; else o[b.dataset.crime] = true;
-    GM_setValue(CHAIN_OVERRIDE_KEY, o);
-    schedule();
-  });
-  function applyChainModeLock(c, box, mode, overrides) {
-    const btn = c.card.querySelector('.rung-main > button.accent');
-    if (!btn) return;
-    const pct = c.success != null ? Math.round(c.success * 100) : null; // c.success is a fraction (0.95)
-    const nerve = c.nerve || (CRIMES[c.key] && CRIMES[c.key].nerve) || null;
-    let under = false, why = '', detail = '';
-    if (mode && pct != null && nerve && mode.chain >= GROW_FROM) {
-      const settles = Math.floor(chainSettlesAt(nerve, pct) + 0.5);
-      under = settles < mode.chain;
-      // The cheapest crime that still grows it; plus this crime's own % when it could get there at a higher %.
-      const m = minGrowCrime(mode.chain);
-      const need = growPctFor(nerve, mode.chain);
-      why = minGrowText(mode.chain) + (need != null && (!m || m.nerve !== nerve) ? ` (this one needs ${need}%)` : '');
-      detail = `At ${pct}% this crime settles the chain at ${settles.toLocaleString()}; the chain is ${mode.chain.toLocaleString()}, so it would shrink it.`;
-    }
-    const locked = under && !overrides[c.key];
-    if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-chain-locked'); }
-    else if (btn.classList.contains('msx-chain-locked')) {
-      btn.classList.remove('msx-chain-locked');
-      if (!btn.classList.contains('msx-heat-locked')) btn.disabled = false;
-    }
-    if (!under) return;
-    const note = document.createElement('div');
-    note.className = 'msx-heatlock' + (locked ? ' locked' : '');
-    if (detail) note.title = detail;
-    note.innerHTML = (locked ? `⛓️ Chain mode: ${why}. Attempt locked` : `⛓️ Chain mode: ${why}. Unlocked by you`) +
-      ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(c.key)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
-    box.prepend(note);
-  }
   // ─── The rebuilt Crimes pages (0.33.0) ────────────────────────────────────
   // Game build 2026-10-10: /crimes is a street map with "The ladder" of 12 jobs, and each job has its own page,
   // /crimes/<id>, with places to pick (button.cs-hotspot) and a dock for the picked one: Odds / Payout / Heat / XP
   // (dl.cs-quote) and the buttons (button.cs-go, aria-label "Dive, The butcher's yard, 3 nerve, safe odds").
   // Layout from the API log's page snapshots ("newapiscan", 2026-10-10). The odds are only a word now (Safe / Good /
-  // Fair), so the numbers here are pay and XP per nerve; the crime's % is still in the game's data for chain mode.
+  // Fair), so the numbers here are pay and XP per nerve; the crime's own % is still in the game's data (`crimes[]`).
   const crimePageId = () => { const m = location.pathname.match(/^\/crimes\/([a-z]+)\/?$/); return m ? m[1] : null; };
   const streetCrime = (id) => (apiState && apiState.street && apiState.street.crimes.find((c) => c.id === id)) || null;
   // A place's best paying button: pay per nerve uses the middle of the range; a job that pays once at the end (safe,
@@ -1801,7 +1744,9 @@
     const topCash = top('cash'), topXp = top('xp');
     const body = rows.map((r) => {
       const v = r.best && r.best.v;
-      return `<tr><td>${escHtml(r.c.name)}</td><td>${Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
+      const ct = contractForCrime(r.c.id);
+      const chip = ct ? `<span class="msx-ct-chip" title="Crew contract ${escHtml(ct.name)}">Crew ${fmtInt(ct.got)}/${fmtInt(ct.goal)}</span>` : '';
+      return `<tr${ct ? ' class="msx-crew-row"' : ''}><td>${escHtml(r.c.name)}${chip}</td><td>${Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
         `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
         `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td></tr>`;
     }).join('');
@@ -1813,7 +1758,7 @@
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
 
-  // One job's page: pay and XP per nerve under the dock's numbers, then the heat and chain mode locks.
+  // One job's page: pay and XP per nerve under the dock's numbers, the success %, the crew contract line and the heat lock.
   function drawCrimeDock() {
     const id = crimePageId();
     const dock = id && document.querySelector('.cs-dock');
@@ -1836,6 +1781,7 @@
       if (line.textContent !== text) line.textContent = text;
     } else if (line) line.remove();
     drawCrimeChance(crime, dock, quote);
+    drawContractLine(id, dock);
     decorateCrimeTools(dock);
     if (crime) applyCrimeLocks(crime, dock);
   }
@@ -1866,27 +1812,17 @@
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
 
-  // The same two locks as before the rebuild, on the new buttons: only buttons that cost nerve (not "Walk out",
-  // "Next house"). The script never clicks; it only blocks your own click, with "Unlock anyway" beside it.
+  // The heat lock on the new buttons: only buttons that cost nerve (not "Walk out", "Next house"). The script never
+  // clicks; it only blocks your own click, with "Unlock anyway" beside it. (The chain mode lock was retired in 0.34.0.)
   function applyCrimeLocks(crime, dock) {
     const btns = [...dock.querySelectorAll('button.cs-go')].filter((b) => /\b\d+ nerve\b/.test(b.getAttribute('aria-label') || ''));
     const d = apiState.street.districts[crime.district] || {};
     const heatOverrides = loadHeatOverrides();
     if (!d.hot && heatOverrides[crime.district]) { delete heatOverrides[crime.district]; GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(heatOverrides)); }
     const heatLocked = !!d.hot && !heatOverrides[crime.district];
-    const mode = chainModeState();
-    const chainOverrides = mode ? loadChainOverrides() : {};
-    let chainUnder = false, chainWhy = '';
-    if (mode && mode.chain >= GROW_FROM && Number.isFinite(crime.chance) && crime.cost) {
-      chainUnder = Math.floor(chainSettlesAt(crime.cost, crime.chance) + 0.5) < mode.chain;
-      const need = growPctFor(crime.cost, mode.chain);
-      chainWhy = minGrowText(mode.chain) + (need != null ? ` (this one needs ${need}%, it is at ${crime.chance}%)` : '');
-    }
-    const chainLocked = chainUnder && !chainOverrides[crime.id];
     btns.forEach((b) => {
       b.classList.toggle('msx-heat-locked', heatLocked);
-      b.classList.toggle('msx-chain-locked', chainLocked);
-      if (heatLocked || chainLocked) { if (!b.disabled) b.disabled = true; b.dataset.msxLocked = '1'; }
+      if (heatLocked) { if (!b.disabled) b.disabled = true; b.dataset.msxLocked = '1'; }
       else if (b.dataset.msxLocked) { delete b.dataset.msxLocked; b.disabled = false; }
     });
     const notes = [];
@@ -1894,26 +1830,11 @@
       notes.push(`<div class="msx-heatlock${heatLocked ? ' locked' : ''}">${heatLocked ? `🔒 ${escHtml(d.name || 'District')} heat ${d.heat}: locked` : '🔓 Hot, unlocked by you'}` +
         ` <button type="button" class="msx-heat-toggle" data-district="${escHtml(crime.district)}">${heatLocked ? 'Unlock anyway' : 'Lock again'}</button></div>`);
     }
-    if (chainUnder) {
-      notes.push(`<div class="msx-heatlock${chainLocked ? ' locked' : ''}">⛓️ Chain mode: ${escHtml(chainWhy)}. ${chainLocked ? 'Locked' : 'Unlocked by you'}` +
-        ` <button type="button" class="msx-chain-toggle" data-crime="${escHtml(crime.id)}">${chainLocked ? 'Unlock anyway' : 'Lock again'}</button></div>`);
-    }
     let box = dock.querySelector('.msx-croplock');
     const html = notes.join('');
     if (!html) { if (box) box.remove(); return; }
     if (!box) { box = document.createElement('div'); box.className = 'msx-croplock'; dock.querySelector('.cs-deal')?.after(box); }
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
-  }
-
-  // A one-line banner at the top of the Crimes page while chain mode is on.
-  function ensureChainModeBanner(mode) {
-    let el = document.getElementById('msx-chainmode');
-    const host = document.querySelector('.main-content') || document.querySelector('main');
-    if (!mode || !host) { if (el) el.remove(); return; }
-    if (!el) { el = document.createElement('div'); el.id = 'msx-chainmode'; host.prepend(el); }
-    const rule = `only crimes that grow the chain (now ${mode.chain.toLocaleString()}${mode.chain < GROW_FROM ? ', nothing locked under 100' : `: ${minGrowText(mode.chain)}`})`;
-    const text = `⛓️ Crew chain mode is on: ${rule} (set by crew leadership in Discord)`;
-    if (el.textContent !== text) el.textContent = text;
   }
 
   function stockStats(id, currentPrice) {
@@ -2172,7 +2093,7 @@
     const el = document.createElement('a');
     el.href = '/claw-street-ex';
     el.className = 'msx-ticker msx-pill-link';
-    el.title = 'Time until the next Claw Street Ex price move (synced from the stock page, then counted forward every 15 minutes)';
+    el.title = 'Time until the next Claw Street Ex price move (from the game data on any page, counted forward every 15 minutes)';
     el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-stocks"></use></svg><span class="msx-ticker-text"></span>';
     vitals.parentNode.insertBefore(el, vitals);
     updateTicker();
@@ -2184,7 +2105,7 @@
     let out;
     let soon = false;
     if (!nextMoveAnchor) {
-      out = 'Stocks: open Claw Street Ex once to sync';
+      out = 'Stocks: waiting for game data';
     } else {
       const now = Date.now();
       const remain = (((nextMoveAnchor - now) % TICK_PERIOD_MS) + TICK_PERIOD_MS) % TICK_PERIOD_MS;
@@ -2201,7 +2122,6 @@
   // crew chain dies. We save it and count down to it on every page. Other crew members' crimes can extend
   // the chain, so it is re-synced whenever the Crew page is open.
   const CHAIN_KEY = 'ms_crew_chain_state';
-  const CHAIN_STALE_MS = 20 * 60 * 1000; // the pill turns red if the Crew page hasn't been read for this long
   let chainState = null; // { expires: ms, count }
   try { chainState = JSON.parse(GM_getValue(CHAIN_KEY, 'null')); } catch (e) { chainState = null; }
 
@@ -2240,7 +2160,7 @@
     const el = document.createElement('a');
     el.href = '/crew';
     el.className = 'msx-ticker msx-chain msx-pill-link';
-    el.title = 'Your crew job and the crew +5% bonus (opens the Crew page)';
+    el.title = 'Your crew: crew job, +5% bonus and this week\'s contracts (opens the Crew page)';
     // 0.28.0: no crew chain countdown any more (the game shows its own, user request); this box only holds the crew
     // job and +5% timers and is hidden while neither is running.
     el.innerHTML = '<svg class="ms-icon" width="14" height="14" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-faction"></use></svg>';
@@ -2254,7 +2174,7 @@
   function updateChainPill() {
     const el = document.querySelector('.msx-chain');
     if (!el) return;
-    const show = !!el.querySelector('.msx-crewjob-inline');
+    const show = !!el.querySelector('.msx-crewjob-inline, .msx-contracts');
     const want = show ? '' : 'none';
     if (el.style.display !== want) el.style.display = want;
   }
@@ -2276,6 +2196,133 @@
   // identical value -- so every title assignment on a per-second timer goes through here instead of `el.title =`.
   function setTitle(el, text) { if (el.title !== text) el.title = text; }
 
+  // ─── Crew contracts (user request, 0.34.0) ─────────────────────────────────
+  // The crew's weekly contracts (three so far: Fish run, Crate week, Open season). `crewWeek` in /api/state on every
+  // page gives id, name, goal and got. What a contract counts (crime / attack energy / ...), its rule and level, the pay
+  // and your own share only come with the Crew > Contracts tab's reply (/api/crew/contracts); that is kept here for
+  // the week. A contract whose id is a crime id (fish, crates) counts that crime even before the tab has been opened.
+  // Shown in the sidebar crew box, on the crime it counts (blue), and as a line on the pages an attack or heist
+  // contract is about. Crew things are light blue.
+  const CONTRACTS_KEY = 'ms_crew_contracts_v1';
+  function onCrewContractsResponse(json) {
+    if (!json || !Array.isArray(json.contracts)) return;
+    GM_setValue(CONTRACTS_KEY, {
+      ends: Number(json.ends) || 0, at: Date.now(),
+      list: json.contracts.filter((c) => c && c.id).map((c) => ({
+        id: String(c.id), name: c.name || String(c.id), counts: typeof c.counts === 'string' ? c.counts : null, task: c.task || '', rule: c.rule || '',
+        level: Number.isFinite(c.level) ? c.level : null, goal: Number(c.goal) || 0, got: Number(c.got) || 0, done: !!c.done,
+        mine: Number.isFinite(c.mine) ? c.mine : null, pay: c.pay && typeof c.pay === 'object' ? c.pay : null,
+      })),
+    });
+    schedule();
+  }
+
+  function crewContracts() {
+    if (!apiState || !apiState.crew) return null;
+    const week = apiState.crewWeek;
+    const saved = GM_getValue(CONTRACTS_KEY, null);
+    const ends = week ? week.ends : saved && saved.ends;
+    if (!ends || ends <= Date.now()) return null;
+    const extra = saved && saved.ends === ends && Array.isArray(saved.list) ? saved.list : [];
+    const crimes = (apiState.street && apiState.street.crimes) || [];
+    const list = (week ? week.contracts : extra).map((c) => {
+      const x = extra.find((e) => e.id === c.id) || {};
+      let crime = crimes.find((k) => k.id === c.id) || null;
+      if (!crime && x.task) crime = crimes.find((k) => x.task.toLowerCase().includes(String(k.name).toLowerCase())) || null;
+      const counts = x.counts || (crime ? 'crime' : null);
+      const kind = counts === 'crime' ? 'crime' : /attack/.test(counts || '') ? 'attack' : /heist/.test(counts || '') ? 'heist' : counts ? 'other' : null;
+      return {
+        id: c.id, name: c.name, goal: c.goal, got: c.got, done: c.done, kind, counts,
+        crimeId: kind === 'crime' && crime ? crime.id : null, crimeName: kind === 'crime' && crime ? crime.name : null,
+        task: x.task || '', rule: x.rule || '', level: x.level ?? null, mine: x.mine ?? null, mineAt: saved && saved.at, pay: x.pay || null,
+      };
+    });
+    return { ends, list };
+  }
+
+  function fmtInt(n) { return Number(n || 0).toLocaleString('en-US'); }
+  function fmtLeft(ms) {
+    const h = Math.max(0, Math.floor(ms / 3600000));
+    return h >= 24 ? `${Math.floor(h / 24)}d ${h % 24}h` : h >= 1 ? `${h}h ${Math.floor((ms % 3600000) / 60000)}m` : `${Math.max(1, Math.round(ms / 60000))}m`;
+  }
+  const contractUnit = (c) => (/energy/.test(c.counts || '') ? ' energy' : '');
+  const contractLabel = (c) => (c.crimeName || (c.kind === 'attack' ? 'Attacks outside crew' : c.kind === 'heist' ? 'Heists' : c.name));
+  function contractTitle(c) {
+    const pay = c.pay ? `Pays ${[c.pay.respect ? c.pay.respect + ' respect' : '', c.pay.cash ? fmtMoney(c.pay.cash) : '', c.pay.item ? `${c.pay.quantity || 1} ${c.pay.item}` : ''].filter(Boolean).join(', ')}.` : '';
+    const mine = c.mine != null ? ` You: ${fmtInt(c.mine)} (when you last opened Crew > Contracts).` : '';
+    return `${c.name}: ${c.task || contractLabel(c)}. ${c.rule ? c.rule + ' ' : ''}${pay}${mine}`.replace(/\.\./g, '.').trim();
+  }
+  const contractOff = (c) => c.level != null && apiState && Number.isFinite(apiState.playerLevel) && apiState.playerLevel < c.level;
+
+  // Sidebar: the list inside the crew box (the box itself is the old crew job / +5% box, now always shown in a crew).
+  function updateContractsPill() {
+    const box = document.querySelector('.msx-chain');
+    if (!box) return;
+    const cc = crewContracts();
+    let el = box.querySelector('.msx-contracts');
+    if (!cc || !cc.list.length) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('div'); el.className = 'msx-contracts'; box.appendChild(el); }
+    const rows = cc.list.map((c) => `<span class="msx-ct${c.done ? ' done' : ''}${contractOff(c) ? ' off' : ''}" title="${escHtml(contractTitle(c))}">` +
+      `<span>${c.done ? '✅ ' : ''}${escHtml(contractLabel(c))}${contractOff(c) ? ` (L${c.level}+)` : ''}</span><b>${fmtInt(c.got)}/${fmtInt(c.goal)}${contractUnit(c)}</b></span>`).join('');
+    const html = `<span class="msx-ct-head">Crew contracts · ${fmtLeft(cc.ends - Date.now())} left</span>${rows}`;
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+  }
+
+  // Crimes overview: a blue ring on the contract's crime in the ladder and on the street map.
+  function markContractCrimes() {
+    const cc = crewContracts();
+    const byCrime = new Map();
+    ((cc && cc.list) || []).forEach((c) => { if (c.crimeId && !c.done) byCrime.set(c.crimeId, c); });
+    document.querySelectorAll('a.cs-step, a.cs-spot, a.cs-li, a.msx-crew-ct').forEach((a) => {
+      const m = (a.getAttribute('href') || '').match(/^\/crimes\/([a-z]+)\/?$/);
+      const c = m ? byCrime.get(m[1]) : null;
+      if (a.classList.contains('msx-crew-ct') !== !!c) a.classList.toggle('msx-crew-ct', !!c);
+      if (c) setTitle(a, `Crew contract ${c.name}: ${fmtInt(c.got)}/${fmtInt(c.goal)}`);
+      else if (a.title && a.title.startsWith('Crew contract ')) a.removeAttribute('title');
+    });
+  }
+
+  // The contract counting this crime, if any (for the overview table and the job's page).
+  function contractForCrime(id) {
+    const cc = crewContracts();
+    return (cc && cc.list.find((c) => c.crimeId === id && !c.done)) || null;
+  }
+
+  // A job's page: a blue ring on the dock and a line under the odds.
+  function drawContractLine(id, dock) {
+    const c = contractForCrime(id);
+    let line = dock.querySelector('.msx-ct-line');
+    dock.classList.toggle('msx-crew-dock', !!c);
+    if (!c) { if (line) line.remove(); return; }
+    const cc = crewContracts();
+    const html = `🤝 <b>Crew contract · ${escHtml(c.name)}</b>: ${fmtInt(c.got)}/${fmtInt(c.goal)}` +
+      `${c.mine != null ? ` (you ${fmtInt(c.mine)})` : ''} · ${fmtLeft(cc.ends - Date.now())} left` +
+      (c.rule ? ` <small>${escHtml(c.rule)}</small>` : '');
+    if (!line) { line = document.createElement('div'); line.className = 'msx-ct-line'; }
+    const after = dock.querySelector('.msx-chance') || dock.querySelector('.msx-pernerve') || dock.querySelector('dl.cs-quote');
+    if (after && after.nextElementSibling !== line) after.after(line);
+    if (line.dataset.html !== html) { line.innerHTML = html; line.dataset.html = html; }
+    setTitle(line, contractTitle(c));
+  }
+
+  // Attack and heist contracts: a line at the top of the pages they are about (Players, a cat's profile, fights;
+  // Heists). Other kinds only show in the sidebar until we see what they count.
+  function drawContractBanner() {
+    const path = location.pathname.replace(/\/+$/, '');
+    const want = /^\/(players|cat\/\d+|fight\/[^/]+)$/.test(path) ? 'attack' : path === '/heists' ? 'heist' : null;
+    const cc = want && crewContracts();
+    const c = cc && cc.list.find((x) => x.kind === want && !x.done);
+    let el = document.getElementById('msx-ct-banner');
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!c || !host) { if (el) el.remove(); return; }
+    if (!el) { el = document.createElement('div'); el.id = 'msx-ct-banner'; }
+    if (host.firstElementChild !== el) host.prepend(el);
+    const html = `🤝 <b>Crew contract · ${escHtml(c.name)}</b>: ${fmtInt(c.got)}/${fmtInt(c.goal)}${contractUnit(c)}` +
+      `${c.mine != null ? ` (you ${fmtInt(c.mine)})` : ''} · ${fmtLeft(cc.ends - Date.now())} left` +
+      (c.task ? ` <small>${escHtml(c.task)}${c.rule ? '. ' + escHtml(c.rule) : ''}</small>` : '');
+    if (el.dataset.html !== html) { el.innerHTML = html; el.dataset.html = html; }
+  }
+
   // ─── Your crew job right now (sidebar, every page) ─────────────────────────
   // Only known once the game's own data gives it an end time -- a job still recruiting members has none yet, so
   // it stays hidden until it actually launches. Lives inside the crew chain's own box (same shield icon, same
@@ -2288,7 +2335,7 @@
     if (!seg) {
       seg = document.createElement('span');
       seg.className = 'msx-crewjob-inline';
-      chainEl.appendChild(seg);
+      chainEl.insertBefore(seg, chainEl.querySelector('.msx-contracts'));
     }
     const remain = job.endsAt - Date.now();
     const text = remain > 0 ? fmtClock(remain) : 'done';
@@ -2311,7 +2358,7 @@
       seg = document.createElement('span');
       seg.className = 'msx-crewjob-inline msx-crewbuff-inline';
       const job = chainEl.querySelector('.msx-crewjob-inline');
-      if (job) job.before(seg); else chainEl.appendChild(seg);
+      if (job) job.before(seg); else chainEl.insertBefore(seg, chainEl.querySelector('.msx-contracts'));
     }
     setTitle(seg, `Crew +5% crime chance ends at ${fmtTime(crew.buffUntil)}`);
     seg.classList.toggle('soon', remain <= 15 * 60 * 1000);
@@ -2599,7 +2646,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
+    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -2607,7 +2654,7 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, .msx-gymlock, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-gymlock, #msx-ct-banner, .msx-ct-line, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
     // A locked Train button is this script's own doing, not something the game itself did -- a page capture
     // should reflect the real page, so the lock is undone on the clone (never on the live page) before saving.
     clone.querySelectorAll('button.msx-train-locked').forEach((n) => { n.disabled = false; n.classList.remove('msx-train-locked'); });
@@ -2660,6 +2707,7 @@
         if (apiState.crew.buffActive) mods.crewPctSeen = pct;
         found = true; touch('crew');
       }
+      if (Number.isFinite(apiState.crewPerkCrime)) { mods.crewPerkCrime = apiState.crewPerkCrime; found = true; touch('perks'); }
       if (apiState.education) {
         mods.eduCrimePoints = apiState.education.eduCrimePoints;
         mods.coursesTaken = apiState.education.coursesTaken;
@@ -2669,7 +2717,9 @@
       mods.apiAt = apiState.at;
     }
 
-    if (path === '/merits') {
+    // Page reads below are only fallbacks for when the game data hasn't arrived: /api/state carries all of it on every page.
+    const apiHas = (k) => !!(apiState && (k === 'merits' ? Object.keys(apiState.meritLines || {}).length : apiState[k]));
+    if (path === '/merits' && !apiHas('merits')) {
       const ranks = {};
       document.querySelectorAll('[role="progressbar"]').forEach((b) => {
         const m = (b.getAttribute('aria-valuetext') || '').match(/(\d+)\s+of\s+(\d+)\s+ranks/i);
@@ -2683,24 +2733,10 @@
       }
     }
 
-    if (path === '/crew') {
-      if (document.querySelector('.cd-hero')) touch('crew');
-      // The crew chain block carries "+5% crime · <time>": a day of +5 crime success earned at each 250 milestone.
-      if (document.querySelector('.cd-chain')) {
-        const tag = document.querySelector('.cd-chain .tag.warn');
-        const m = tag && tag.textContent.match(/\+(\d+)%\s*crime/i);
-        const iso = tag?.querySelector('time[datetime]')?.getAttribute('datetime');
-        const until = iso ? Date.parse(iso) : NaN;
-        mods.crewBonus = m && Number.isFinite(until) ? { pct: +m[1], until } : { pct: 0, until: 0 };
-        if (mods.crewBonus.pct > 0) mods.crewPctSeen = mods.crewBonus.pct;
-        found = true; touch('crew');
-      }
-      // The Perks tab lists "Inside line +1% crime chance" (only rendered while that tab is open).
-      const perk = readMainText(8000).match(/Inside line\s*\+(\d+)%\s*crime chance/i);
-      if (perk) { mods.crewPerkCrime = +perk[1]; found = true; touch('perks'); }
-    }
+    // The Crew page is no longer read (0.34.0): its blocks were rebuilt on 2026-10-19, and the chain, the +5% window
+    // (crew.buff_until) and the Inside line ranks (crewPerks) all come with /api/state on every page.
 
-    if (path === '/mews') {
+    if (path === '/mews' && !apiHas('crew')) {
       // "Crew chain reached 250: +15 respect and a day of +5% crime chance." The window lasts 24 hours from that entry
       // (checked against the Crew page: 06:55 UTC entry, window ended 06:55 UTC the next day).
       const DAY_MS = 24 * 3600 * 1000;
@@ -2720,7 +2756,7 @@
       }
     }
 
-    if (path.startsWith('/education')) {
+    if (path.startsWith('/education') && !apiHas('education')) {
       const text = readMainText(6000);
       const pts = text.match(/Every crime.s success chance\s*\+(\d+)\s*points?/i);
       const taken = text.match(/(\d+)\s+of\s+48\s+taken/i);
@@ -2814,126 +2850,121 @@
     saveDb(db);
   }
 
-  // ─── Cat Tree: lock a stat so its Train button can't be clicked (user request) ─────────────
-  // Still strictly read-only: this never clicks or submits anything on its own. It only disables the game's own
-  // Train button for a stat you've chosen to lock, so a stray click -- or just habit -- can't train it by
-  // accident; unlocking it is instant too. Checked against a real capture of the page (dev tools, 2026-10-01):
-  // each stat is an `article.station-card` whose Train button carries `aria-label="Train <stat>"` -- a reliable,
-  // real selector, not a guess. The lock itself is kept in this browser's storage (not exported, not sent
-  // anywhere), the same place everything else here is kept.
-  const GYM_LOCK_KEY = 'ms_gym_locks_v1';
+  // ─── Cat Tree: stat locks (user request 0.15.8; rebuilt 0.34.0 for the new gym page) ──────
+  // Read-only: this never trains or clicks anything. It only blocks YOUR click on the game's Train button while the
+  // stat you have picked is locked. The page (so since at least 2026-10-10) has stat chips
+  // `button.gy-seg-b[aria-pressed]` (aria-label "Dexterity, 14.39. ...") and ONE Train button `button.gy-go`
+  // ("Train dexterity 5 times"). A stat is locked when you lock it, or by auto-lock (on unless turned off): any stat
+  // the gym you're at trains slower than its best. At the Ironworks Strength and Defense are x1.6 and Speed and
+  // Dexterity x1.0, so Speed and Dexterity lock. The multipliers are the game's own (`gyms[].gains`, the one with
+  // state 'here'). Clicking a chip flips it, auto-locked ones too (kept per gym). Stored in this browser only.
+  const GYM_LOCK_KEY = 'ms_gym_locks_v1'; // { strength: true, ..., unlock: { <gymId>: { speed: true } } }
+  const GYM_AUTO_KEY = 'ms_gym_autolock_v1'; // '1' (default) or '0'
+  const GYM_STATS = ['strength', 'defense', 'speed', 'dexterity'];
   function loadGymLocks() { try { return JSON.parse(GM_getValue(GYM_LOCK_KEY, '{}')) || {}; } catch (e) { return {}; } }
   function saveGymLocks(locks) { GM_setValue(GYM_LOCK_KEY, JSON.stringify(locks)); }
+  const gymAutoOn = () => GM_getValue(GYM_AUTO_KEY, '1') !== '0';
+  const capWord = (w) => w.charAt(0).toUpperCase() + w.slice(1);
+  const onCatTree = () => location.pathname.replace(/\/+$/, '') === '/cat-tree';
+
+  // For each stat: 'you' (your own lock), 'auto' (slower here than this gym's best) or null.
+  function gymLockReasons() {
+    const locks = loadGymLocks();
+    const gym = apiState && apiState.gym;
+    const gains = gym && gym.gains;
+    const best = gains ? Math.max(...GYM_STATS.map((k) => Number(gains[k]) || 0)) : 0;
+    const freed = (gym && locks.unlock && locks.unlock[gym.id]) || {};
+    const out = {};
+    GYM_STATS.forEach((k) => {
+      const slower = gymAutoOn() && best > 0 && (Number(gains[k]) || 0) < best;
+      out[k] = locks[k] === true ? 'you' : slower && !freed[k] ? 'auto' : null;
+    });
+    return out;
+  }
+
+  function pickedStat() {
+    const chip = document.querySelector('button.gy-seg-b[aria-pressed="true"]');
+    const m = chip && (chip.getAttribute('aria-label') || chip.textContent || '').match(/^\s*(strength|defense|speed|dexterity)\b/i);
+    if (m) return m[1].toLowerCase();
+    const go = document.querySelector('button.gy-go');
+    const g = go && go.textContent.match(/\bTrain\s+(strength|defense|speed|dexterity)\b/i);
+    return g ? g[1].toLowerCase() : null;
+  }
+
+  // Click on a chip: a locked stat unlocks (your lock dropped; an auto lock is lifted for this gym only), an unlocked
+  // one locks (a lifted auto lock goes back to auto, otherwise it becomes your own lock).
+  function toggleGymLock(stat) {
+    const locks = loadGymLocks();
+    const gymId = apiState && apiState.gym && apiState.gym.id;
+    const freed = gymId && locks.unlock && locks.unlock[gymId];
+    if (gymLockReasons()[stat]) {
+      delete locks[stat];
+      saveGymLocks(locks);
+      if (gymLockReasons()[stat] === 'auto' && gymId) {
+        locks.unlock = locks.unlock || {};
+        (locks.unlock[gymId] = locks.unlock[gymId] || {})[stat] = true;
+      }
+    } else if (freed && freed[stat]) delete freed[stat];
+    else locks[stat] = true;
+    saveGymLocks(locks);
+    applyGymLocks();
+  }
 
   function applyGymLocks() {
-    if (location.pathname.replace(/\/+$/, '') !== '/cat-tree') return;
-    const locks = loadGymLocks();
-    document.querySelectorAll('article.station-card').forEach((card) => {
-      const btn = card.querySelector('button[aria-label^="Train "]');
-      if (!btn) return;
-      const stat = btn.getAttribute('aria-label').replace(/^Train\s+/i, '').trim().toLowerCase();
-      const statCap = stat.charAt(0).toUpperCase() + stat.slice(1);
-      const host = btn.closest('.card-do') || card;
-      let toggle = host.querySelector('.msx-gymlock');
-      if (!toggle) {
-        toggle = document.createElement('button');
-        toggle.type = 'button';
-        toggle.className = 'msx-gymlock';
-        host.appendChild(toggle);
-        toggle.addEventListener('click', (e) => {
-          e.preventDefault(); e.stopPropagation();
-          const cur = loadGymLocks();
-          cur[stat] = !cur[stat];
-          saveGymLocks(cur);
-          applyGymLocks();
-        });
-      }
-      const locked = !!locks[stat];
-      toggle.textContent = locked ? `🔒 ${statCap} locked` : `🔓 Lock ${statCap}`;
-      setTitle(toggle, locked
-        ? `Train is disabled here until you unlock it. This never trains or clicks anything for you -- it only blocks your own click.`
-        : `Disable the Train button here, so ${statCap} can't be trained by a stray click. Never clicks it for you either way.`);
-      toggle.classList.toggle('locked', locked);
-      btn.disabled = locked;
-      btn.classList.toggle('msx-train-locked', locked);
-    });
+    let bar = document.getElementById('msx-gymlock');
+    const go = onCatTree() && document.querySelector('button.gy-go');
+    const seg = go && document.querySelector('.gy-seg');
+    if (!go || !seg) { if (bar) bar.remove(); return; }
+    if (!bar) {
+      bar = document.createElement('div');
+      bar.id = 'msx-gymlock';
+      bar.addEventListener('click', (e) => {
+        const chip = e.target.closest && e.target.closest('button[data-stat]');
+        if (chip) { e.preventDefault(); toggleGymLock(chip.dataset.stat); }
+      });
+      bar.addEventListener('change', (e) => {
+        if (e.target.matches && e.target.matches('input.msx-gymauto')) { GM_setValue(GYM_AUTO_KEY, e.target.checked ? '1' : '0'); applyGymLocks(); }
+      });
+    }
+    if (seg.nextElementSibling !== bar) seg.after(bar);
+    const why = gymLockReasons();
+    const gym = apiState && apiState.gym;
+    const gains = gym && gym.gains;
+    const best = gains ? Math.max(...GYM_STATS.map((k) => Number(gains[k]) || 0)) : 0;
+    const x = (k) => (gains && Number.isFinite(Number(gains[k])) ? ` ×${Number(gains[k]).toFixed(1)}` : '');
+    const picked = pickedStat();
+    const blocked = picked && why[picked];
+    const chips = GYM_STATS.map((k) => `<button type="button" data-stat="${k}" class="msx-gl-chip${why[k] ? ' locked' : ''}" title="${
+      why[k] === 'auto' ? `Locked: this gym trains ${capWord(k)} slower than its best. Click to allow it here.`
+        : why[k] === 'you' ? 'Locked by you. Click to unlock.' : 'Click to lock: the Train button is blocked while this stat is picked.'
+    }">${why[k] ? '🔒' : '🔓'} ${capWord(k)}${x(k)}</button>`).join('');
+    const auto = `<label title="Lock every stat this gym trains slower than its best (the game's own multipliers). Never trains or clicks anything.">` +
+      `<input type="checkbox" class="msx-gymauto"${gymAutoOn() ? ' checked' : ''}> Auto-lock slower stats${best ? ` (best here ×${best.toFixed(1)})` : ''}</label>`;
+    const note = blocked ? `<span class="msx-gl-note">Train is blocked: ${capWord(picked)} is locked${
+      blocked === 'auto' && gains ? ` (×${Number(gains[picked]).toFixed(1)} here, best ×${best.toFixed(1)})` : ''}. Click its chip to unlock.</span>` : '';
+    const html = `<span>Locks:</span>${chips}${auto}${note}`;
+    if (bar.dataset.html !== html) { bar.innerHTML = html; bar.dataset.html = html; }
+    if (go.disabled !== !!blocked) go.disabled = !!blocked;
+    go.classList.toggle('msx-train-locked', !!blocked);
+    setTitle(go, blocked ? `${capWord(picked)} is locked by MeowStreets Extra Info. Unlock it in the Locks row above.` : '');
   }
 
-  // ─── "Script data" checklist (top of the sidebar) ─────────────────────────
-  // The script only knows what you have opened. This shows which pages it has read recently and which need a visit.
-  // Green = up to date, gold = open that page once to refresh, red = never read. The links only navigate when you click.
-  const HOUR = 3600000;
-  function ago(ms) {
-    const m = Math.max(0, Math.round(ms / 60000));
-    if (m < 2) return 'just now';
-    if (m < 90) return m + ' min ago';
-    if (m < 48 * 60) return Math.round(m / 60) + ' h ago';
-    return Math.round(m / 1440) + ' days ago';
-  }
+  // Backup for the moment between picking a stat and the next redraw: a click on Train while the picked stat is
+  // locked is stopped before the game sees it. Only ever blocks; it never clicks anything.
+  window.addEventListener('click', (e) => {
+    const go = e.target && e.target.closest && e.target.closest('button.gy-go');
+    if (!go || !onCatTree()) return;
+    const stat = pickedStat();
+    if (stat && gymLockReasons()[stat]) {
+      e.preventDefault(); e.stopImmediatePropagation();
+      toast(`${capWord(stat)} is locked (MeowStreets Extra Info). Unlock it in the Locks row above Train.`);
+      applyGymLocks();
+    }
+  }, true);
 
-  function dataStatus() {
-    const db = loadDb();
-    const mods = db.mods || {};
-    const at = mods.at || {};
-    const now = Date.now();
-    const rows = [];
-    const add = (name, href, note, state, text) => rows.push({ name, href, note, state, text });
-    const seen = (t, maxAge) => (t ? (now - t > maxAge ? 'warn' : 'ok') : 'bad');
-
-    add('Merits', '/merits', '', seen(at.merits, 24 * HOUR), at.merits ? 'read ' + ago(now - at.merits) : 'not read yet');
-
-    let eduState = seen(at.education, 24 * HOUR);
-    let eduText = at.education ? 'read ' + ago(now - at.education) : 'not read yet';
-    if (at.education && mods.eduLandsAt && now > mods.eduLandsAt) { eduState = 'warn'; eduText = 'a course has landed, open it to update'; }
-    add('Education', '/education', '', eduState, eduText);
-
-    // The crew chain dies after 30 minutes without a crime and anyone in the crew can extend it, so Crew goes stale after 20.
-    const crewSeen = Math.max(at.crew || 0, chainState?.syncedAt || 0);
-    let crewState = seen(crewSeen, CHAIN_STALE_MS);
-    let crewText = crewSeen ? 'read ' + ago(now - crewSeen) : 'not read yet';
-    if (crewSeen && crewState === 'ok' && mods.crewBonus?.pct > 0 && mods.crewBonus.until < now) { crewState = 'warn'; crewText = 'crew +5% window ended, check for a new one'; }
-    add('Crew (chain and +5% bonus)', '/crew', 'every 20 min', crewState, crewText);
-
-    add('Crew > Perks tab', '/crew', 'then click the Perks tab', seen(at.perks, 24 * HOUR), at.perks ? 'read ' + ago(now - at.perks) : 'not read yet');
-
-    let lastStock = 0;
-    Object.values(db.stocks || {}).forEach((st) => { const o = st.obs?.[st.obs.length - 1]; if (o) lastStock = Math.max(lastStock, Date.parse(o.t) || 0); });
-    add('Claw Street Ex (prices)', '/claw-street-ex', '', seen(lastStock, 2 * HOUR), lastStock ? 'last logged ' + ago(now - lastStock) : 'not read yet');
-    return rows;
-  }
-
-  function ensureLegend() {
-    if (document.querySelector('.msx-legend')) return;
-    const anchor = document.querySelector('.sidebar .msx-clock-row') || document.querySelector('.sidebar .brand') || document.querySelector('.sidebar .profile');
-    if (!anchor || !anchor.parentNode) return;
-    const el = document.createElement('details');
-    el.className = 'msx-legend';
-    el.innerHTML = '<summary><i class="msx-dot"></i><span class="msx-legend-sum"></span></summary>' +
-      '<div class="msx-legend-list"></div>' +
-      '<p class="msx-legend-key"><b class="ok">Green</b> up to date · <b class="warn">Gold</b> open that page once to refresh · <b class="bad">Red</b> never read. ' +
-      'The script only knows what you have opened.</p>';
-    anchor.after(el);
-    updateLegend();
-  }
-
-  function updateLegend() {
-    const el = document.querySelector('.msx-legend');
-    if (!el) return;
-    const rows = dataStatus();
-    const bad = rows.filter((r) => r.state === 'bad').length;
-    const warn = rows.filter((r) => r.state === 'warn').length;
-    const state = bad ? 'bad' : warn ? 'warn' : 'ok';
-    const sum = bad ? `Script data: ${bad} page${bad === 1 ? '' : 's'} not read yet` : warn ? `Script data: ${warn} to check` : 'Script data: all up to date';
-    const sumEl = el.querySelector('.msx-legend-sum');
-    if (sumEl.textContent !== sum) sumEl.textContent = sum;
-    el.className = 'msx-legend ' + state;
-    const html = rows.map((r) => `<div class="msx-legend-row ${r.state}"><i class="msx-dot"></i><a href="${r.href}">${r.name}</a>` +
-      `<span>${r.text}${r.note ? ' · ' + r.note : ''}</span></div>`).join('');
-    const list = el.querySelector('.msx-legend-list');
-    if (list.innerHTML !== html) list.innerHTML = html;
-  }
-
-  setInterval(updateLegend, 30000);
+  // The "Script data" checklist (which pages to open) was removed in 0.34.0: merits, education, crew, crew perks and
+  // stock prices all come with /api/state on every page now, so there is nothing to go and open. (Its crew row went
+  // red after 20 minutes; the crew chain window is 15 minutes since 2026-10-19 and every page refreshes it anyway.)
 
   const currentPath = () => location.pathname.replace(/\/+$/, '') || '/';
 
@@ -3953,18 +3984,19 @@
       }
       // The rebuilt Crimes pages (0.33.0): overview table, per-nerve line and the locks on each job's page.
       const onCrimes = isCrimesPage() || !!crimePageId();
-      ensureChainModeBanner(onCrimes ? chainModeState() : null);
       drawCrimeTable();
       if (onCrimes) drawCrimeDock();
+      markContractCrimes();
+      drawContractBanner();
       if (isStockPage()) syncNextMove();
       ensureCatClock();
       ensureTicker();
-      ensureLegend();
-      updateLegend();
+      document.querySelector('.msx-legend')?.remove();
       syncChain();
       ensureChainPill();
       updateCrewJobPill();
       updateCrewBuffPill();
+      updateContractsPill();
       updateChainPill();
       updateHeistPill();
       updateCompanionPill();
@@ -4006,7 +4038,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-chainmode, #msx-myheist, #msx-trading, #msx-crimetable, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
@@ -4029,7 +4061,6 @@
         if (!incoming.shopPrices) incoming.shopPrices = {};
         dbCache = incoming;
       } catch (e) { dbCache = null; }
-      updateLegend(); // show the newly saved read times right away
     });
     GM_addValueChangeListener(CHAIN_KEY, (name, oldValue, newValue, remote) => {
       if (!remote) return;
@@ -4039,7 +4070,6 @@
       if (!remote) return;
       try { settings = { ...DEFAULT_SETTINGS, ...JSON.parse(newValue) }; } catch (e) { return; }
       updateAccountPanel();
-      updateLegend();
     });
     GM_addValueChangeListener(INVEST_KEY, (name, oldValue, newValue, remote) => {
       if (remote) { invest = null; investSig = ''; }
