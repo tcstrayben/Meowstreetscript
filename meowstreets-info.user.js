@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.36.0
+// @version      0.37.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -939,6 +939,7 @@
       .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
       .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
       #msx-crewjobs, #msx-mycrewjob, #msx-chainpost button { border-color:var(--msx-crew); }
+      .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
@@ -2734,6 +2735,24 @@
   // A cat-face clock goes beside the logo (`.sidebar .brand`, seen in a dev-tools capture, Screenshot 335) and a
   // short line under that row counts down to the reset. The weekly reset is in the tooltip only.
   const UTC_DAY_MS = 86400000;
+  // ─── XP to the next level (sidebar, every page, user request 0.37.0) ─────
+  // The game's XP bar only shows "Lv 15" and "86%", but its screen-reader label has the exact numbers:
+  // aria-valuetext "2,519 of 2,900 XP, 86% of the way to level 16". A small line under the bar shows them:
+  // "2,519 / 2,900 XP · 381 to go". Read from the bar each time, so it follows the game's own number.
+  function ensureXpLine() {
+    const line = document.querySelector('.sidebar .xp-line');
+    const bar = line && line.querySelector('[role="progressbar"][aria-valuetext]');
+    const m = bar && bar.getAttribute('aria-valuetext').match(/([\d,]+)\s+of\s+([\d,]+)\s+XP(?:.*?level\s+(\d+))?/i);
+    let el = document.querySelector('.sidebar .msx-xpline');
+    if (!m) { if (el) el.remove(); return; }
+    const have = num(m[1]), need = num(m[2]);
+    const text = `${have.toLocaleString('en-US')} / ${need.toLocaleString('en-US')} XP · ${Math.max(0, need - have).toLocaleString('en-US')} to go`;
+    if (!el) { el = document.createElement('div'); el.className = 'msx-xpline'; }
+    if (line.nextElementSibling !== el) line.after(el);
+    if (el.textContent !== text) el.textContent = text;
+    setTitle(el, m[3] ? `XP to level ${m[3]} (from the game's own XP bar)` : 'XP to the next level (from the game\'s own XP bar)');
+  }
+
   function ensureCatClock() {
     const brand = document.querySelector('.sidebar .brand');
     if (!brand) return;
@@ -2786,7 +2805,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -4130,6 +4149,7 @@
       drawContractBanner();
       if (isStockPage()) syncNextMove();
       ensureCatClock();
+      ensureXpLine();
       ensureTicker();
       document.querySelector('.msx-legend')?.remove();
       syncChain();
@@ -4180,7 +4200,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
