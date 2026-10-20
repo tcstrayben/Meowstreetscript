@@ -13,6 +13,7 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 - **"Copy for Discord" (Crew and Heists pages):** while you're actually in a crew job and/or a heist, a ready-to-paste message per one — who has a seat, which are open (and what stat each wants, for crew jobs), the minimum level, and the payout — with a button that copies it to your clipboard. In more than one at once, a tab per job/heist lets you switch which message is shown.
 - **Investment Tracker (Claw Street Ex):** tracks money put into and pulled out of crew stock investments, and what's actually been made.
 - **Cat Tree:** lock any stat so the Train button can't train it by accident; auto-lock (on by default) locks the stats your current gym trains slower than its best. Unlocking is one click.
+- **Players page:** a green 💰 beside cats the crew has mugged for over $1,000 at least twice (from the crew attack log and your own attacks).
 - **Trading page:** the cheapest currently-open listing for every item, next to Whiskers & Co.'s own buy price (tax included) and what it pays to sell the item back — flagging both an underpriced listing not worth skipping and a listing cheap enough to buy and immediately resell for a profit.
 - **Whiskers & Co.:** the price range for items whose price changes hourly, and your discounted price.
 - **Account page:** the script's settings.

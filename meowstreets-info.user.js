@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.34.0
+// @version      0.35.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -144,6 +144,12 @@
         };
       }
       if (raw.street && Number.isFinite(raw.street.level)) out.playerLevel = raw.street.level;
+      // Your own recent attacks (every page): the ones where you took cash, for the 💰 muggable mark (0.35.0). Same attack
+      // ids as the crew attack log, so one mug is never counted twice.
+      if (Array.isArray(raw.attacks) && raw.player && raw.player.id != null) {
+        out.myMugs = raw.attacks.filter((a) => a && a.id != null && a.attacker_id === raw.player.id && Number(a.stolen) > 0)
+          .map((a) => ({ id: a.id, victim: a.defender_id, name: '', stolen: Number(a.stolen), at: a.created_at || 0 }));
+      }
       // Crew perks with their ranks come with every /api/state (seen 2026-10-19), so the Perks tab never has to be
       // opened: Inside line = ranks x step (% crime chance).
       if (Array.isArray(raw.crewPerks)) {
@@ -480,7 +486,8 @@
     // (crew chain, nerve, heat, odds) update the moment you act instead of on the next page load.
     // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
     // /api/crew/contracts (0.34.0) is the Crew > Contracts tab's own reply: what each crew contract counts.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse };
+    // /api/crew/attacks (0.35.0) is the Crew > Crew attacks log: mugs by the crew, for the 💰 muggable mark.
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
@@ -931,6 +938,8 @@
       .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
       .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
       #msx-crewjobs, #msx-mycrewjob, #msx-chainpost button { border-color:var(--msx-crew); }
+      .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
+      .msx-muggable svg { display:block; }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
@@ -1597,6 +1606,80 @@
     });
   }
 
+  // ─── 💰 Muggable cats (user request, 0.35.0) ───────────────────────────────
+  // A cat the crew has mugged for over $1,000 at least twice gets a small green money bag beside its name on the
+  // Players page. Counted from the crew attack log (Crew > Crew attacks, its own reply /api/crew/attacks: side "out",
+  // result "mug", stolen) whenever that log loads, plus your own attacks from the game data on every page. Each mug is
+  // kept once by its attack id, in this browser only (`ms_mugs_v1`), so the count grows as more of the log is seen.
+  const MUGS_KEY = 'ms_mugs_v1';
+  const MUG_MIN = 1000, MUG_TIMES = 2, MUGS_MAX = 2000;
+  let muggableCache = null; // { [catId]: { times, best, last } }, rebuilt when a new mug is saved
+  function noteMugs(list) {
+    const m = GM_getValue(MUGS_KEY, null) || {};
+    let changed = false;
+    (list || []).forEach((a) => {
+      if (!a || a.id == null || a.victim == null || !(a.stolen > MUG_MIN)) return;
+      const k = String(a.id);
+      if (m[k]) { if (a.name && !m[k].n) { m[k].n = a.name; changed = true; } return; }
+      m[k] = { v: String(a.victim), n: a.name || '', s: a.stolen, at: a.at || 0 };
+      changed = true;
+    });
+    if (!changed) return;
+    const keys = Object.keys(m);
+    if (keys.length > MUGS_MAX) keys.sort((x, y) => (m[x].at || 0) - (m[y].at || 0)).slice(0, keys.length - MUGS_MAX).forEach((k) => delete m[k]);
+    GM_setValue(MUGS_KEY, m);
+    muggableCache = null;
+    schedule();
+  }
+  function onCrewAttacksResponse(json) {
+    if (!json || !Array.isArray(json.attacks)) return;
+    noteMugs(json.attacks.filter((a) => a && a.side === 'out' && a.result === 'mug' && a.them && a.them.id != null)
+      .map((a) => ({ id: a.id, victim: a.them.id, name: a.them.name || '', stolen: Number(a.stolen) || 0, at: a.at || 0 })));
+  }
+  let myMugsAt = null;
+  function noteMyMugs() {
+    if (!apiState || !apiState.myMugs || apiState.at === myMugsAt) return;
+    myMugsAt = apiState.at;
+    noteMugs(apiState.myMugs);
+  }
+  // { [catId]: { times, best, last } } for cats mugged over $1,000 at least twice.
+  function muggable() {
+    if (muggableCache) return muggableCache;
+    const by = {};
+    Object.values(GM_getValue(MUGS_KEY, null) || {}).forEach((x) => {
+      const c = by[x.v] || (by[x.v] = { times: 0, best: 0, last: 0 });
+      c.times++; c.best = Math.max(c.best, x.s); c.last = Math.max(c.last, x.at || 0);
+    });
+    muggableCache = {};
+    Object.entries(by).forEach(([id, c]) => { if (c.times >= MUG_TIMES) muggableCache[id] = c; });
+    return muggableCache;
+  }
+  const MONEYBAG_SVG = '<svg viewBox="0 0 24 24" width="15" height="15" aria-hidden="true"><path d="M9 2.5h6l-1.7 3.4h-2.6Z" fill="#5fae3b"/>' +
+    '<path d="M10.3 5.9h3.4c3.9 2.1 6.5 5.7 6.5 9.4 0 3.7-3.3 5.7-8.2 5.7s-8.2-2-8.2-5.7c0-3.7 2.6-7.3 6.5-9.4Z" fill="#7cc95a" stroke="#3f7d28" stroke-width="1"/>' +
+    '<text x="12" y="17.6" font-size="8.5" font-weight="700" text-anchor="middle" fill="#14310b" font-family="sans-serif">$</text></svg>';
+  function muggableTitle(c) {
+    return `Muggable: the crew has mugged this cat for over $1,000 ${c.times} times (biggest ${fmtMoney(c.best)}${c.last ? ', last ' + new Date(c.last).toUTCString().slice(5, 11) : ''}).`;
+  }
+  const muggableBadge = (id) => {
+    const c = muggable()[String(id)];
+    return c ? ` <span class="msx-muggable" title="${escHtml(muggableTitle(c))}">${MONEYBAG_SVG}</span>` : '';
+  };
+  // The game's player table: the badge goes right after the name button in each row. Rows are virtual (re-used as you
+  // scroll), so each badge remembers whose it is and is moved or removed when the row changes.
+  function markMuggableRows() {
+    if (location.pathname.replace(/\/+$/, '') !== '/players') return;
+    const mug = muggable();
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
+      const c = m ? mug[m[1]] : null;
+      let tag = b.nextElementSibling && b.nextElementSibling.classList.contains('msx-muggable') ? b.nextElementSibling : null;
+      if (!c) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-muggable'; tag.innerHTML = MONEYBAG_SVG; b.after(tag); }
+      tag.dataset.id = m[1];
+      setTitle(tag, muggableTitle(c));
+    });
+  }
+
   // ─── "No crew" and "New cats" lists (Players page, 0.25.0; fixed + new cats 0.27.0) ─────
   // The Players list only renders the ~15 rows on screen, so rows can't just be hidden. Two fold-out lists sit above
   // it instead, built from the page's own /api/players replies (API log "newsinceredoplayer", 2026-10-06):
@@ -1645,7 +1728,7 @@
 
   // Profile link (user request, 0.27.1): a plain link the player clicks, opening the game's own profile page in a new
   // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
-  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>`;
+  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
   const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
 
@@ -4005,7 +4088,9 @@
       updateBankPill();
       arrangeRail(); // all the timers into one box under the vitals (0.29.0)
       drawHiddenFeats();
+      noteMyMugs();
       ensureNoCrewPanel();
+      markMuggableRows();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -4038,7 +4123,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
