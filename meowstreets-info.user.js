@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.35.0
+// @version      0.36.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -144,10 +144,11 @@
         };
       }
       if (raw.street && Number.isFinite(raw.street.level)) out.playerLevel = raw.street.level;
+      if (raw.rules && Number.isFinite(raw.rules.mugProtection)) out.mugProtectionMs = raw.rules.mugProtection;
       // Your own recent attacks (every page): the ones where you took cash, for the 💰 muggable mark (0.35.0). Same attack
       // ids as the crew attack log, so one mug is never counted twice.
       if (Array.isArray(raw.attacks) && raw.player && raw.player.id != null) {
-        out.myMugs = raw.attacks.filter((a) => a && a.id != null && a.attacker_id === raw.player.id && Number(a.stolen) > 0)
+        out.myMugs = raw.attacks.filter((a) => a && a.id != null && a.attacker_id === raw.player.id && Number(a.stolen) > 0 && a.defender_id != null)
           .map((a) => ({ id: a.id, victim: a.defender_id, name: '', stolen: Number(a.stolen), at: a.created_at || 0 }));
       }
       // Crew perks with their ranks come with every /api/state (seen 2026-10-19), so the Perks tab never has to be
@@ -940,6 +941,8 @@
       #msx-crewjobs, #msx-mycrewjob, #msx-chainpost button { border-color:var(--msx-crew); }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
+      .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
+        color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
@@ -1633,13 +1636,49 @@
   }
   function onCrewAttacksResponse(json) {
     if (!json || !Array.isArray(json.attacks)) return;
-    noteMugs(json.attacks.filter((a) => a && a.side === 'out' && a.result === 'mug' && a.them && a.them.id != null)
-      .map((a) => ({ id: a.id, victim: a.them.id, name: a.them.name || '', stolen: Number(a.stolen) || 0, at: a.at || 0 })));
+    const mugs = json.attacks.filter((a) => a && a.side === 'out' && a.result === 'mug' && a.them && a.them.id != null)
+      .map((a) => ({ id: a.id, victim: a.them.id, name: a.them.name || '', stolen: Number(a.stolen) || 0, at: a.at || 0, by: (a.us && a.us.name) || '' }));
+    noteLastMugs(mugs);
+    noteMugs(mugs);
   }
+
+  // ─── 🛡️ When a lying-low cat can be mugged again (user request, 0.36.0) ─────────
+  // A mugged cat is "safe from muggers for an hour" (game text; rules.mugProtection 3,600,000 ms) and shows as
+  // `lying_low` in the player list, with no end time. When the mug was ours (crew attack log, any amount, or your own
+  // attacks), the end is the mug time + 1 hour: "🛡️ ready 04:12" beside the name while they lie low.
+  const LASTMUG_KEY = 'ms_lastmug_v1'; // { [catId]: { at, by } }, only the last hour or two is kept
+  const MUG_SAFE_MS = 3600000;
+  function clockAt(ts) { return new Date(ts).toLocaleTimeString([], { hour: 'numeric', minute: '2-digit' }); }
+  const mugSafeMs = () => (apiState && Number.isFinite(apiState.mugProtectionMs) ? apiState.mugProtectionMs : MUG_SAFE_MS);
+  function noteLastMugs(list) {
+    const m = GM_getValue(LASTMUG_KEY, null) || {};
+    const now = Date.now();
+    let changed = false;
+    (list || []).forEach((a) => {
+      if (!a || a.victim == null || !(a.at > now - 2 * mugSafeMs())) return;
+      const k = String(a.victim);
+      if (!m[k] || m[k].at < a.at) { m[k] = { at: a.at, by: a.by || '' }; changed = true; }
+    });
+    Object.keys(m).forEach((k) => { if (!(m[k].at > now - 2 * mugSafeMs())) { delete m[k]; changed = true; } });
+    if (changed) { GM_setValue(LASTMUG_KEY, m); schedule(); }
+  }
+  // { until, at, by } while a cat we mugged is still safe, else null. `lyingLow` false from the game wins.
+  function safeUntil(id, lyingLow) {
+    if (lyingLow === false) return null;
+    const x = (GM_getValue(LASTMUG_KEY, null) || {})[String(id)];
+    const until = x ? x.at + mugSafeMs() : 0;
+    return until > Date.now() ? { until, at: x.at, by: x.by } : null;
+  }
+  const safeTitle = (s) => `Lying low: mugged${s.by ? ' by ' + s.by : ''} at ${clockAt(s.at)}, safe from muggers for an hour, so it can be mugged again at ${clockAt(s.until)} (your time).`;
+  const safeTag = (id, lyingLow) => {
+    const s = safeUntil(id, lyingLow);
+    return s ? ` <span class="msx-lowtag" title="${escHtml(safeTitle(s))}">🛡️ ready ${clockAt(s.until)}</span>` : '';
+  };
   let myMugsAt = null;
   function noteMyMugs() {
     if (!apiState || !apiState.myMugs || apiState.at === myMugsAt) return;
     myMugsAt = apiState.at;
+    noteLastMugs(apiState.myMugs.map((a) => ({ ...a, by: 'you' })));
     noteMugs(apiState.myMugs);
   }
   // { [catId]: { times, best, last } } for cats mugged over $1,000 at least twice.
@@ -1678,7 +1717,23 @@
       tag.dataset.id = m[1];
       setTitle(tag, muggableTitle(c));
     });
+    // 🛡️ ready time, after the name (and the bag, if any).
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
+      const info = m && playerInfo(m[1]);
+      const s = m ? safeUntil(m[1], info ? info.lyingLow : undefined) : null;
+      const host = b.parentElement;
+      let tag = host && host.querySelector(':scope > .msx-lowtag');
+      if (!s) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-lowtag'; }
+      const after = b.nextElementSibling && b.nextElementSibling.classList.contains('msx-muggable') ? b.nextElementSibling : b;
+      if (after.nextElementSibling !== tag) after.after(tag);
+      const text = `🛡️ ready ${clockAt(s.until)}`;
+      if (tag.textContent !== text) tag.textContent = text;
+      setTitle(tag, safeTitle(s));
+    });
   }
+  setInterval(() => { if (location.pathname.replace(/\/+$/, '') === '/players') markMuggableRows(); }, 20000); // the 🛡️ tag goes once the hour is up
 
   // ─── "No crew" and "New cats" lists (Players page, 0.25.0; fixed + new cats 0.27.0) ─────
   // The Players list only renders the ~15 rows on screen, so rows can't just be hidden. Two fold-out lists sit above
@@ -1694,6 +1749,7 @@
   const playerListOpen = { 'msx-nocrew': false, 'msx-newcats': false };
   const isPlayersPage = () => location.pathname.replace(/\/+$/, '') === '/players';
 
+  function playerInfo(id) { return players.api.get(String(id)); }
   function onPlayersResponse(json) {
     const rows = json && Array.isArray(json.rows) ? json.rows : null;
     if (!rows) return;
@@ -1703,6 +1759,7 @@
       players.api.set(String(c.id), {
         id: Number(c.id), name: c.name, level: Number.isFinite(c.level) ? c.level : null, rank: Number.isFinite(c.rank) ? c.rank : null,
         joined: Number.isFinite(c.created_at) ? c.created_at : null, crew: c.crew && c.crew.name ? String(c.crew.name) : '', none: !c.crew,
+        lyingLow: typeof c.lying_low === 'boolean' ? c.lying_low : undefined,
       });
     });
     if (!players.api.size) return;
@@ -1728,7 +1785,7 @@
 
   // Profile link (user request, 0.27.1): a plain link the player clicks, opening the game's own profile page in a new
   // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
-  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}`;
+  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
   const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
 
@@ -4123,7 +4180,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
