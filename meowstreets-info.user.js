@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.38.0
+// @version      0.39.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -187,8 +187,9 @@
       // failReturn, chance and energy/nerve cost are the game's own, real numbers for a heist launched right now.
       // "profit" is the average per-cat profit on success, confirmed against the user's own completed heist
       // (stake + profit matched the average of the real per-member payouts exactly).
-      // bands[].minLevel is the real minimum player level per heist tier (heistQuote.targets itself is already
-      // filtered to what this player can see, so it never says this directly) -- matched by `tier` below.
+      // bands[].minLevel is the level a PLANNER needs for that tier (a level 15 planner gets tier 3, minLevel 12). It
+      // is NOT needed to join: a level 2 cat joined a tier 3 cold store (2026-10-21), and level 7 and 9 cats earlier.
+      // So it is kept in the data but no longer shown as "Level N+" on heist messages (0.39.0).
       const heistMinLevelByTier = {};
       if (raw.heistRules && Array.isArray(raw.heistRules.bands)) {
         raw.heistRules.bands.forEach((b) => { if (b && b.tier != null) heistMinLevelByTier[b.tier] = b.minLevel; });
@@ -245,6 +246,12 @@
         // ever one job to consider); a job still only planning has no end time to show there yet.
         const withEnd = out.myCrewJobs.filter((j) => j.mine && j.endsAt).sort((a, b) => a.endsAt - b.endsAt);
         if (withEnd.length) out.activeCrewJob = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
+      }
+      // Heist roles (0.39.0): the game's own `roles` list, [{ id, name, stat }]. Not the crew job table: a heist
+      // Lockpicker uses strength, a crew job Lockpicker dexterity.
+      if (Array.isArray(raw.roles)) {
+        out.heistRoles = {};
+        raw.roles.forEach((r) => { if (r && r.id) out.heistRoles[r.id] = { title: r.name || r.id, stat: r.stat || null }; });
       }
       // Role -> {title, stat}, the game's own data (crewJobRoles) -- which stat a seat actually uses, not a guess.
       if (raw.crewJobRoles && typeof raw.crewJobRoles === 'object') {
@@ -873,7 +880,8 @@
       .msx-shopprice { display:inline-flex; align-items:center; gap:4px; font-size:11px; }
       .msx-shopprice small { color:var(--ms-smoke, #8d9289); font-size:10px; }
       .msx-shopprice.old { opacity:.55; }
-      .msx-shopprice svg { display:block; margin-left:-2px; }
+      .msx-shopprice svg.msx-goldbag { display:block; margin-left:-2px; }
+      .msx-shopprice svg.msx-shopico { display:block; flex:none; color:var(--ms-smoke, #8d9289); }
       .msx-pq { font-weight:700; padding:0 4px; border-radius:4px; }
       .msx-pq-top { color:#9a9a9a; background:#0b0b0b; }
       .msx-pq-high { color:var(--ms-red, #eb6561); }
@@ -1392,6 +1400,7 @@
         stake: h.stake, profit: h.profit, failReturn: h.failReturn, chance: h.chance, energy: h.energy, nerve: h.nerve,
       }));
       body.heistsDone = apiState.heistsDone;
+      if (apiState.heistRoles) body.heistRoles = apiState.heistRoles;
     }
     return body;
   }
@@ -2669,7 +2678,7 @@
   // (`base`, `baseMin`, `baseMax`); the position in the range is the same either way. Where the price
   // sits in its range (0% = the lowest it can be) picks the colour: top quarter black, then red, yellow, and the lowest
   // quarter green. Gold bags for the very lowest: 1 in the lowest 10%, 2 in the lowest 5%, 3 at the lowest price.
-  const GOLDBAG_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M9 2.5h6l-1.7 3.4h-2.6Z" fill="#c9a227"/>' +
+  const GOLDBAG_SVG = '<svg class="msx-goldbag" viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M9 2.5h6l-1.7 3.4h-2.6Z" fill="#c9a227"/>' +
     '<path d="M10.3 5.9h3.4c3.9 2.1 6.5 5.7 6.5 9.4 0 3.7-3.3 5.7-8.2 5.7s-8.2-2-8.2-5.7c0-3.7 2.6-7.3 6.5-9.4Z" fill="#e9c46a" stroke="#9a7a12" stroke-width="1"/>' +
     '<text x="12" y="17.6" font-size="8.5" font-weight="700" text-anchor="middle" fill="#4a3a06" font-family="sans-serif">$</text></svg>';
   function shopPriceInfo(id) {
@@ -2695,7 +2704,9 @@
       `It moves every hour between ${fmtMoney(it.min)} and ${fmtMoney(it.max)}; now at ${Math.round(s.pos * 100)}% of that (0% = lowest): ${word}.` +
       (s.bags === 3 ? ' This is the lowest it can be.' : s.bags ? ` In the lowest ${s.bags === 2 ? '5' : '10'}%.` : '') +
       (it.until ? (s.old ? ` The price changed at ${fmtTime(it.until)}; it updates on your next page load.` : ` Next price at ${fmtTime(it.until)}.`) : '');
-    return `<span class="msx-shopprice${s.old ? ' old' : ''}" title="${escHtml(title)}"><b class="msx-pq msx-pq-${s.band}">${fmtMoney(it.price)}</b>` +
+    // The game's own Whiskers & Co. icon (sidebar nav: <use href="#ms-market">), user request 0.38.1.
+    const shopIcon = '<svg class="ms-icon msx-shopico" width="12" height="12" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><use href="#ms-market"></use></svg>';
+    return `<span class="msx-shopprice${s.old ? ' old' : ''}" title="${escHtml(title)}">${shopIcon}<b class="msx-pq msx-pq-${s.band}">${fmtMoney(it.price)}</b>` +
       `<small>${fmtMoney(it.min)}–${fmtMoney(it.max)}</small>${GOLDBAG_SVG.repeat(s.bags)}</span>`;
   }
 
@@ -3743,33 +3754,43 @@
   // Same idea as the crew job message, but for a heist you're actually in. Heists carry no role->stat lookup
   // the way crew jobs do (checked -- there's no `heistRoles` anywhere in the game's own data), so an open seat
   // just says how many are left, not what it wants.
+  // Laid out like the crew job message (0.39.0): open seats with the stat each needs, filled seats with role, stat and
+  // who, then payout and odds. Roles and stats from the game's own heist `roles` list.
   function buildHeistMessage(heist, crewName) {
     const title = heist.name || 'Heist';
+    const roles = (apiState && apiState.heistRoles) || {};
+    const roleName = (r) => (roles[r] && roles[r].title) || r || 'someone';
+    const roleStat = (r) => (roles[r] && roles[r].stat) || null;
     const filled = heist.members || [];
     const seatsTotal = heist.maxMembers || filled.length;
     const openCount = Math.max(0, seatsTotal - filled.length);
     const lines = [];
     lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${heist.tier ? ` (tier ${heist.tier})` : ''}`);
-    if (heist.minLevel != null) lines.push(`🔒 Level ${heist.minLevel}+`);
     if (heist.status !== 'running') {
-      lines.push(`Recruiting — ${filled.length}/${seatsTotal} in the clowder${heist.minMembers ? `, ${heist.minMembers} minimum to launch` : ''}`);
+      lines.push(`Recruiting — ${filled.length}/${seatsTotal} seats filled${heist.minMembers ? `, ${heist.minMembers} minimum to launch` : ''}`);
+      if (openCount > 0) {
+        const taken = new Set(filled.map((m) => m.role));
+        const open = Object.keys(roles).filter((r) => !taken.has(r)).slice(0, openCount);
+        lines.push('', '🟡 Open:');
+        if (open.length) open.forEach((r) => lines.push(`• ${roleName(r)}${roleStat(r) ? ` — needs ${roleStat(r)}` : ''}`));
+        else lines.push(`• ${openCount} seat${openCount === 1 ? '' : 's'} open`);
+      }
     } else {
       const remain = heist.endsAt ? heist.endsAt - Date.now() : null;
       lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
     }
     if (filled.length) {
-      lines.push('', '✅ In the clowder:');
-      filled.forEach((m) => lines.push(`• ${m.role || 'someone'}${m.name ? ` — ${m.name}` : ''}`));
+      lines.push('', '✅ Filled:');
+      filled.forEach((m) => lines.push(`• ${roleName(m.role)}${roleStat(m.role) ? ` (${roleStat(m.role)})` : ''}${m.name ? ` — ${m.name}` : ''}`));
     }
-    if (heist.status !== 'running' && openCount > 0) lines.push('', `🟡 ${openCount} seat${openCount === 1 ? '' : 's'} open`);
     const payoutBits = [];
-    if (heist.stake != null) payoutBits.push(`💰 ${money0(heist.stake)} stake`);
-    if (heist.profit != null) payoutBits.push(`+${money0(heist.profit)} profit each`);
+    if (heist.profit != null) payoutBits.push(`💰 +${money0(heist.profit)} profit each`);
     if (heist.failReturn != null) payoutBits.push(`${money0(heist.failReturn)} back on a bust`);
     const oddsBits = [];
     if (heist.chance != null) oddsBits.push(`🎲 ${heist.chance}% chance`);
     if (heist.energy != null) oddsBits.push(`${heist.energy} energy`);
     if (heist.nerve != null) oddsBits.push(`${heist.nerve} nerve`);
+    if (heist.stake != null) oddsBits.push(`${money0(heist.stake)} stake`);
     if (payoutBits.length || oddsBits.length) lines.push('');
     if (payoutBits.length) lines.push(payoutBits.join(' · '));
     if (oddsBits.length) lines.push(oddsBits.join(' · '));
