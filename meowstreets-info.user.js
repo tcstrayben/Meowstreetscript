@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.39.0
+// @version      0.40.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -94,6 +94,7 @@
         education: null, companion: null, protectedUntil: 0, bountyOnMe: 0, cooldowns: {}, usedUp: [], energy: null, nerve: null, caps: null,
         crimeBonusParts: [], storeItems: {}, listings: [], shopItems: [], marketRate: 1, marketDiscounts: [], weeklyResetAt: 0, crewJobsSeen: false,
         heists: [], crewJobTiers: [], heistXp: null, activeCrewJob: null, activeHeist: null, myCrewJobs: [], myHeists: [], crewJobRoles: null, deposits: [],
+        gymSpent: null, gymsNext: [],
       };
       (raw.crimes || []).forEach((c) => {
         if (!c || !c.name) return;
@@ -161,7 +162,11 @@
       if (Array.isArray(raw.gyms)) {
         const g = raw.gyms.find((x) => x && x.state === 'here') || raw.gyms.find((x) => x && raw.player && x.id === raw.player.gym);
         if (g && g.gains && typeof g.gains === 'object') out.gym = { id: g.id, name: g.name, gains: { ...g.gains } };
+        // The gyms that open next (0.40.0): only those in state 'next' carry `required` (energy trained to open them).
+        out.gymsNext = raw.gyms.filter((x) => x && x.state === 'next' && Number.isFinite(x.required))
+          .map((x) => ({ id: x.id, name: x.name, short: x.short || x.name, required: x.required, price: Number(x.price) || 0 }));
       }
+      if (Number.isFinite(raw.gymEnergySpent)) out.gymSpent = raw.gymEnergySpent; // all energy ever spent training
       // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
       if (Array.isArray(raw.deposits)) {
@@ -816,6 +821,12 @@
       #msx-gymlock .msx-gl-chip.locked { color:var(--ms-red, #eb6561); border-color:var(--ms-red, #eb6561); background:rgba(235,101,97,.12); }
       #msx-gymlock label { display:inline-flex; align-items:center; gap:4px; cursor:pointer; }
       #msx-gymlock .msx-gl-note { flex-basis:100%; color:var(--ms-red, #eb6561); }
+      #msx-gymnext { margin:2px 0 6px; font-size:12px; color:var(--ms-smoke, #8d9289); text-align:center; }
+      #msx-gymnext b { color:var(--ms-bone, #e7ede1); font-weight:600; }
+      .co-plate .msx-gymtogo { display:block; font-size:10px; line-height:1.2; color:var(--ms-smoke, #8d9289); white-space:nowrap; }
+      #msx-gymfig { margin:4px 0; font-size:12px; color:var(--ms-bone, #e7ede1); }
+      .tf-members th.msx-sorthead { cursor:pointer; }
+      .tf-members th.msx-sorthead .msx-sortmark { color:var(--ms-lime, #b4df87); }
       button.msx-train-locked { opacity:.45; cursor:not-allowed !important; }
       #msx-invest .msx-inv-warn { margin:8px 0; color:var(--ms-gold, #e9c46a); }
       #msx-invest .msx-inv-warn ul { margin:4px 0 0; padding-left:20px; }
@@ -3179,6 +3190,91 @@
     }
   }, true);
 
+  // ─── Cat Tree: energy trained towards the next gym (0.40.0, user request) ──────
+  // The game only draws a bar for this (the numbers sit in its screen-reader text), so the script writes them out:
+  // a line under the gym's description in the training view, "x to go" on each next gym's door in the Switch gyms
+  // hall, and the exact figures on that gym's card. From the game's own data (`gymEnergySpent`, and `required` on
+  // the gyms in state 'next'), sent with every page and after every training session.
+  const n0 = (v) => Math.round(v).toLocaleString('en-US');
+  function drawGymProgress() {
+    const spent = apiState && apiState.gymSpent;
+    const next = (apiState && apiState.gymsNext) || [];
+    const on = onCatTree() && Number.isFinite(spent);
+    // Training view: one line under the description.
+    const say = on && document.querySelector('p.gy-say');
+    let line = document.getElementById('msx-gymnext');
+    if (!say) { if (line) line.remove(); } else {
+      if (!line) { line = document.createElement('div'); line.id = 'msx-gymnext'; }
+      if (say.nextElementSibling !== line) say.after(line);
+      const groups = {};
+      next.forEach((g) => { (groups[g.required] = groups[g.required] || []).push(g); });
+      const parts = Object.keys(groups).map(Number).sort((a, b) => a - b).map((req) => {
+        const names = groups[req].map((g) => g.short).join(' & ');
+        const left = req - spent;
+        return left > 0 ? `${names} open at ${n0(req)} · <b>${n0(left)} to go</b>` : `${names}: <b>ready to join</b>`;
+      });
+      const html = `⚡ ${n0(spent)} energy trained${parts.length ? ' · ' + parts.join(' · ') : ''}`;
+      if (line.dataset.html !== html) { line.innerHTML = html; line.dataset.html = html; }
+      const prices = next.filter((g) => g.price).map((g) => `${g.name} $${n0(g.price)}`);
+      setTitle(line, prices.length ? `Membership once open: ${prices.join(', ')}. From the game's own data.` : 'Energy you have spent training, from the game\'s own data.');
+    }
+    // Switch gyms hall: "x to go" on each next gym's door, exact figures on the picked gym's card.
+    const byName = (name) => next.find((g) => g.name === name || g.short === name);
+    document.querySelectorAll('.co-door.st-next .co-plate').forEach((plate) => {
+      const g = on && byName((plate.querySelector('b') || {}).textContent);
+      let tag = plate.querySelector('.msx-gymtogo');
+      if (!g) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('small'); tag.className = 'msx-gymtogo'; plate.appendChild(tag); }
+      const text = g.required > spent ? `${n0(g.required - spent)} to go` : 'ready';
+      if (tag.textContent !== text) tag.textContent = text;
+    });
+    const card = document.querySelector('.gy-panel .co-card');
+    const g = on && card && card.querySelector('.gy-chip.st-next') && byName((card.querySelector('.gy-room-head h3') || {}).textContent);
+    let fig = document.getElementById('msx-gymfig');
+    if (!g) { if (fig) fig.remove(); return; }
+    const doBox = card.querySelector('.co-do');
+    if (!doBox) return;
+    if (!fig) { fig = document.createElement('div'); fig.id = 'msx-gymfig'; }
+    const bar = doBox.querySelector('.progress');
+    if (bar ? bar.nextElementSibling !== fig : fig.parentNode !== doBox) { if (bar) bar.after(fig); else doBox.prepend(fig); }
+    const left = g.required - spent;
+    const text = `${n0(Math.min(spent, g.required))} of ${n0(g.required)} energy trained · ${left > 0 ? `${n0(left)} to go` : 'ready to join'}`;
+    if (fig.textContent !== text) fig.textContent = text;
+  }
+
+  // ─── Crew Info tab: members sorted by last action (0.40.0, user request) ──────
+  // The game lists members by rank. This puts the most recently active first, from each row's own "Last action"
+  // time (`td.tf-seen time[datetime]`). Click the Last action header to switch back to the game's order (its own #
+  // column) and again to sort. Only moves the rows on screen; it clicks and sends nothing.
+  const CREW_SORT_KEY = 'ms_crew_sort_v1'; // '1' (default) = last action first, '0' = the game's order
+  const crewSortOn = () => GM_getValue(CREW_SORT_KEY, '1') !== '0';
+  function sortCrewMembers() {
+    const table = document.querySelector('.tf-members table.tf-table');
+    const body = table && table.tBodies[0];
+    if (!body) return;
+    const head = [...table.querySelectorAll('thead th')].find((th) => /^\s*Last action/i.test(th.textContent));
+    if (head) {
+      head.classList.add('msx-sorthead');
+      let mark = head.querySelector('.msx-sortmark');
+      if (!mark) { mark = document.createElement('span'); mark.className = 'msx-sortmark'; head.appendChild(mark); }
+      const text = crewSortOn() ? ' ▼' : '';
+      if (mark.textContent !== text) mark.textContent = text;
+      setTitle(head, crewSortOn() ? 'Sorted by last action (MeowStreets Extra Info). Click for the game\'s order.' : 'Click to sort by last action (MeowStreets Extra Info).');
+    }
+    const rows = [...body.rows];
+    const gameNo = (tr) => { const v = parseInt((tr.querySelector('td.tf-q') || {}).textContent, 10); return Number.isFinite(v) ? v : 1e9; };
+    const seen = (tr) => { const t = tr.querySelector('td.tf-seen time[datetime]'); const v = t ? Date.parse(t.getAttribute('datetime')) : NaN; return Number.isFinite(v) ? v : -Infinity; };
+    const want = rows.slice().sort(crewSortOn() ? (a, b) => (seen(b) - seen(a)) || (gameNo(a) - gameNo(b)) : (a, b) => gameNo(a) - gameNo(b));
+    if (want.every((tr, i) => tr === rows[i])) return;
+    want.forEach((tr) => body.appendChild(tr));
+  }
+  window.addEventListener('click', (e) => {
+    const th = e.target && e.target.closest && e.target.closest('.tf-members th.msx-sorthead');
+    if (!th) return;
+    GM_setValue(CREW_SORT_KEY, crewSortOn() ? '0' : '1');
+    sortCrewMembers();
+  });
+
   // The "Script data" checklist (which pages to open) was removed in 0.34.0: merits, education, crew, crew perks and
   // stock prices all come with /api/state on every page now, so there is nothing to go and open. (Its crew row went
   // red after 20 minutes; the crew chain window is 15 minutes since 2026-10-19 and every page refreshes it anyway.)
@@ -4203,6 +4299,8 @@
       readEventsFromApi();
       readGym();
       applyGymLocks();
+      drawGymProgress();
+      sortCrewMembers();
       readTraining();
       if (isCrimesPage() && document.querySelector('.ladders article.rung')) {
         const data = readAll();
