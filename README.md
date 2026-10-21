@@ -8,6 +8,7 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 
 - **Crimes page:** exact success % for every crime, broken down (base, mastery, merits, education, crew bonus, perks, heat); exact XP and cash per nerve; item drop odds; heat warnings; the best crimes highlighted; crimes that count for a crew contract marked in blue with the crew's progress.
 - **Claw Street Ex (stocks):** logs every price you've seen and flags whether the current price looks low or high against its own history; a countdown to the next price tick and perk timing.
+- **Tuna and catnip prices:** under each in the sidebar, the Whiskers & Co. price now and its hourly range (normal prices), coloured by where it sits in the range (black = top 25%, red, yellow, green = lowest 25%), with gold bags near the lowest.
 - **XP bar:** the exact XP under the sidebar's XP bar ("2,519 / 2,900 XP · 381 to go").
 - **Sidebar timers** (every page): a light-blue crew box with the crew's +5% bonus timer, your crew job's countdown if one's running and this week's crew contracts with their progress, a heist countdown while you're in one, companion care reminders (feed/groom/errand), PvP status (mug protection and any bounty on you), Premium tuna/Catnip tea cooldowns, a stock tick countdown, a cat clock with the daily reset, and a bank pill when a deposit is ready to collect.
 - **Heists & Crew pages:** exact XP/energy, XP/nerve, $/energy, $/nerve for every heist and every crew job tier.

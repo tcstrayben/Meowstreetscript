@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.37.0
+// @version      0.38.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -868,7 +868,17 @@
       a.msx-pill-link:hover { border-color:var(--ms-lime, #b4df87); }
       .msx-consumable { flex-wrap:wrap; row-gap:4px; }
       .msx-consumable .msx-item { display:inline-flex; align-items:center; gap:4px; }
-      .msx-consumable .msx-item:not(:last-child) { margin-right:14px; }
+      .msx-consumable .msx-itemcol { display:inline-flex; flex-direction:column; gap:2px; }
+      .msx-consumable .msx-itemcol:not(:last-child) { margin-right:14px; }
+      .msx-shopprice { display:inline-flex; align-items:center; gap:4px; font-size:11px; }
+      .msx-shopprice small { color:var(--ms-smoke, #8d9289); font-size:10px; }
+      .msx-shopprice.old { opacity:.55; }
+      .msx-shopprice svg { display:block; margin-left:-2px; }
+      .msx-pq { font-weight:700; padding:0 4px; border-radius:4px; }
+      .msx-pq-top { color:#9a9a9a; background:#0b0b0b; }
+      .msx-pq-high { color:var(--ms-red, #eb6561); }
+      .msx-pq-mid { color:var(--ms-gold, #e9c46a); }
+      .msx-pq-low { color:var(--ms-lime, #b4df87); }
       .msx-item-icon { width:30px; height:30px; flex:none; }
       #msx-invest .msx-inv-chart { width:100%; max-width:480px; height:auto; color:var(--ms-bone, #e7ede1); }
       #msx-invest .msx-inv-legend { display:flex; flex-wrap:wrap; gap:4px 14px; font-size:12px; }
@@ -2653,6 +2663,42 @@
     { label: 'Premium tuna', family: 'tuna', resource: 'energy' },
     { label: 'Catnip tea', family: 'catnip', resource: 'nerve' },
   ];
+  // Whiskers & Co. price under each item (user request, 0.38.0). Tuna and catnip change price every hour within a range;
+  // the game sends price, range and the next change on every page (`items[]`). Shown at the NORMAL price and range
+  // (user: players see the normal range here, and their own discounted price in the store), so the discount is undone
+  // (`base`, `baseMin`, `baseMax`); the position in the range is the same either way. Where the price
+  // sits in its range (0% = the lowest it can be) picks the colour: top quarter black, then red, yellow, and the lowest
+  // quarter green. Gold bags for the very lowest: 1 in the lowest 10%, 2 in the lowest 5%, 3 at the lowest price.
+  const GOLDBAG_SVG = '<svg viewBox="0 0 24 24" width="12" height="12" aria-hidden="true"><path d="M9 2.5h6l-1.7 3.4h-2.6Z" fill="#c9a227"/>' +
+    '<path d="M10.3 5.9h3.4c3.9 2.1 6.5 5.7 6.5 9.4 0 3.7-3.3 5.7-8.2 5.7s-8.2-2-8.2-5.7c0-3.7 2.6-7.3 6.5-9.4Z" fill="#e9c46a" stroke="#9a7a12" stroke-width="1"/>' +
+    '<text x="12" y="17.6" font-size="8.5" font-weight="700" text-anchor="middle" fill="#4a3a06" font-family="sans-serif">$</text></svg>';
+  function shopPriceInfo(id) {
+    const raw = apiState && apiState.storeItems && apiState.storeItems[id];
+    if (!raw) return null;
+    const pick = (normal, game) => (Number.isFinite(normal) ? normal : game);
+    const it = { ...raw, price: pick(raw.base, raw.price), min: pick(raw.baseMin, raw.min), max: pick(raw.baseMax, raw.max) };
+    if (!Number.isFinite(it.price) || !Number.isFinite(it.min) || !Number.isFinite(it.max) || it.max <= it.min) return null;
+    // Position from the game's own (discounted) figures when they are there: exact, no rounding from undoing it.
+    const gp = Number.isFinite(raw.price) && Number.isFinite(raw.min) && Number.isFinite(raw.max) && raw.max > raw.min;
+    const pos = Math.min(1, Math.max(0, gp ? (raw.price - raw.min) / (raw.max - raw.min) : (it.price - it.min) / (it.max - it.min)));
+    const lowest = gp ? raw.price <= raw.min : it.price <= it.min;
+    const band = pos > 0.75 ? 'top' : pos > 0.5 ? 'high' : pos > 0.25 ? 'mid' : 'low';
+    const bags = lowest ? 3 : pos <= 0.05 ? 2 : pos <= 0.10 ? 1 : 0;
+    return { it, pos, band, bags, old: it.until > 0 && it.until <= Date.now() };
+  }
+  function shopPriceHtml(f) {
+    const s = shopPriceInfo(f.family);
+    if (!s) return '';
+    const { it } = s;
+    const word = { top: 'top 25% (dear)', high: 'upper middle', mid: 'lower middle', low: 'lowest 25% (cheap)' }[s.band];
+    const title = `${f.label} at Whiskers & Co. now: ${fmtMoney(it.price)} (normal price${it.disc ? '; your discount takes some off in the store' : ''}). ` +
+      `It moves every hour between ${fmtMoney(it.min)} and ${fmtMoney(it.max)}; now at ${Math.round(s.pos * 100)}% of that (0% = lowest): ${word}.` +
+      (s.bags === 3 ? ' This is the lowest it can be.' : s.bags ? ` In the lowest ${s.bags === 2 ? '5' : '10'}%.` : '') +
+      (it.until ? (s.old ? ` The price changed at ${fmtTime(it.until)}; it updates on your next page load.` : ` Next price at ${fmtTime(it.until)}.`) : '');
+    return `<span class="msx-shopprice${s.old ? ' old' : ''}" title="${escHtml(title)}"><b class="msx-pq msx-pq-${s.band}">${fmtMoney(it.price)}</b>` +
+      `<small>${fmtMoney(it.min)}–${fmtMoney(it.max)}</small>${GOLDBAG_SVG.repeat(s.bags)}</span>`;
+  }
+
   function updateConsumablesPill() {
     if (!apiState) { document.querySelector('.msx-consumable')?.remove(); return; }
     const now = Date.now();
@@ -2668,7 +2714,8 @@
       else if (expires && expires > now) text = fmtClock(expires - now);
       else text = full ? `${f.resource} full` : 'ready';
       const used = capped ? cap : Math.min(cap, uses[f.family].length); // 0.30.0: uses today out of the daily cap
-      return `<span class="msx-item" title="${f.label}: ${used} of ${cap} used today (resets 00:00 UTC)">${ITEM_ICONS[f.family] || ''}${text} <small class="msx-uses${used >= cap ? ' full' : ''}">${used}/${cap}</small></span>`;
+      return `<span class="msx-itemcol"><span class="msx-item" title="${f.label}: ${used} of ${cap} used today (resets 00:00 UTC)">${ITEM_ICONS[f.family] || ''}${text} <small class="msx-uses${used >= cap ? ' full' : ''}">${used}/${cap}</small></span>` +
+        `${shopPriceHtml(f)}</span>`;
     });
     let el = document.querySelector('.msx-consumable');
     if (!el) {
@@ -2680,7 +2727,7 @@
       el.className = 'msx-ticker msx-consumable msx-pill-link';
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
-    setTitle(el, 'Whether Premium tuna and Catnip tea are off cooldown, from the game’s own data');
+    setTitle(el, 'Premium tuna and Catnip tea: cooldown, uses today and the Whiskers & Co. price now, from the game’s own data');
     el.classList.toggle('soon', anyCapped);
     const html = bits.join('');
     if (el.innerHTML !== html) el.innerHTML = html;
