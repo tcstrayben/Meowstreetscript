@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.40.0
+// @version      0.41.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -73,6 +73,7 @@
   const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
   const num = (s) => parseFloat(String(s).replace(/,/g, ''));
   const fmtMoney = (n) => '$' + (n >= 100 ? Math.round(n).toLocaleString() : n.toFixed(1));
+  const n0 = (v) => Math.round(v).toLocaleString('en-US'); // whole number with commas
   const escHtml = (s) => String(s).replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
   const isCrimesPage = () => location.pathname.replace(/\/+$/, '') === '/crimes';
 
@@ -167,6 +168,18 @@
           .map((x) => ({ id: x.id, name: x.name, short: x.short || x.name, required: x.required, price: Number(x.price) || 0 }));
       }
       if (Number.isFinite(raw.gymEnergySpent)) out.gymSpent = raw.gymEnergySpent; // all energy ever spent training
+      // Cat Café pet and brush (0.41.0): when each can be done again, and what it gives right now.
+      if (raw.cafe && typeof raw.cafe === 'object') {
+        const p = raw.cafe.pet || {}, b = raw.cafe.brush || {};
+        out.cafe = { petAt: Number(p.readyAt) || 0, petGain: p.gain, petPrice: p.price, brushAt: Number(b.readyAt) || 0, brushGain: b.gain, brushPrice: b.price };
+      }
+      // Your own recent attacks, for the half-XP tag (0.41.0). Attacking the same cat again within `repeatWindow` (3 h)
+      // of your last attack on it gives half XP (checked on your saved fights; another cat's attack doesn't count).
+      if (Array.isArray(raw.attacks) && raw.player && raw.player.id != null) {
+        out.myAttacks = raw.attacks.filter((a) => a && a.attacker_id === raw.player.id && a.defender_id != null && Number(a.created_at) > 0)
+          .map((a) => ({ id: a.id, victim: a.defender_id, name: a.defender || '', at: Number(a.created_at) }));
+      }
+      if (raw.combat && Number(raw.combat.repeatWindow) > 0) out.repeatWindow = Number(raw.combat.repeatWindow);
       // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
       if (Array.isArray(raw.deposits)) {
@@ -971,6 +984,9 @@
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
+      .msx-halfxp { margin-left:4px; font-size:11px; color:var(--ms-gold, #e9c46a); white-space:nowrap; cursor:help; vertical-align:middle; }
+      .cp-chips > .msx-halfxp { margin-left:0; }
+      .msx-cafe b { font-weight:600; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
@@ -1712,6 +1728,45 @@
     noteLastMugs(apiState.myMugs.map((a) => ({ ...a, by: 'you' })));
     noteMugs(apiState.myMugs);
   }
+  // ─── Half XP for 3 h after you attack a cat (0.41.0, user request) ─────────
+  // Confirmed on your saved fights: a repeat attack within 3 h of your last one on that cat gave exactly half XP
+  // (Pussy 6 -> 3, Tiger 24 -> 12), and Krispy hitting Tiger 31 min before you didn't halve yours. Kept per cat:
+  // the time of your last attack on it, from your own `attacks` in every game reply (it lists your last 10).
+  const HALFXP_KEY = 'ms_my_attacks_v1'; // { [catId]: lastAttackAt }
+  const repeatMs = () => (apiState && apiState.repeatWindow) || 3 * 3600000;
+  let myAttacksAt = null;
+  function noteMyAttacks() {
+    if (!apiState || !apiState.myAttacks || apiState.at === myAttacksAt) return;
+    myAttacksAt = apiState.at;
+    const m = { ...(GM_getValue(HALFXP_KEY, null) || {}) };
+    const now = Date.now();
+    let changed = false;
+    apiState.myAttacks.forEach((a) => { const k = String(a.victim); if (!(m[k] >= a.at)) { m[k] = a.at; changed = true; } });
+    Object.keys(m).forEach((k) => { if (m[k] + repeatMs() <= now) { delete m[k]; changed = true; } });
+    if (changed) GM_setValue(HALFXP_KEY, m);
+  }
+  function halfXpUntil(id) {
+    const at = (GM_getValue(HALFXP_KEY, null) || {})[String(id)];
+    const until = at ? at + repeatMs() : 0;
+    return until > Date.now() ? { at, until } : null;
+  }
+  const halfXpText = (h) => `½ XP until ${clockAt(h.until)}`;
+  const halfXpTitle = (h) => `You attacked this cat at ${clockAt(h.at)}. Attacking the same cat again within ${Math.round(repeatMs() / 3600000)} hours ` +
+    `of your last attack on it gives half XP (seen in your own fights; other cats' attacks on it don't count). Full XP again at ${clockAt(h.until)} (your time).`;
+  const halfXpTag = (id) => { const h = halfXpUntil(id); return h ? ` <span class="msx-halfxp" title="${escHtml(halfXpTitle(h))}">${halfXpText(h)}</span>` : ''; };
+  // Profile pages (/cat/<id>): the tag goes with the game's own chips under the name ("Level 5").
+  function drawProfileHalfXp() {
+    const m = location.pathname.replace(/\/+$/, '').match(/^\/cat\/(\d+)$/);
+    const chips = m && document.querySelector('.cp-lead .cp-chips');
+    let tag = document.querySelector('.cp-chips > .msx-halfxp');
+    const h = chips && halfXpUntil(m[1]);
+    if (!h) { if (tag) tag.remove(); return; }
+    if (!tag) { tag = document.createElement('span'); tag.className = 'tag msx-halfxp'; }
+    if (tag.parentElement !== chips) chips.appendChild(tag);
+    if (tag.textContent !== halfXpText(h)) tag.textContent = halfXpText(h);
+    setTitle(tag, halfXpTitle(h));
+  }
+
   // { [catId]: { times, best, last } } for cats mugged over $1,000 at least twice.
   function muggable() {
     if (muggableCache) return muggableCache;
@@ -1763,8 +1818,27 @@
       if (tag.textContent !== text) tag.textContent = text;
       setTitle(tag, safeTitle(s));
     });
+    // ½ XP tag, last in the row (after the name, bag and 🛡️).
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
+      const h = m ? halfXpUntil(m[1]) : null;
+      const host = b.parentElement;
+      let tag = host && host.querySelector(':scope > .msx-halfxp');
+      if (!h) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-halfxp'; }
+      const sibs = [...host.children].filter((x) => x === b || x.classList.contains('msx-muggable') || x.classList.contains('msx-lowtag'));
+      const after = sibs[sibs.length - 1];
+      if (after.nextElementSibling !== tag) after.after(tag);
+      if (tag.textContent !== halfXpText(h)) tag.textContent = halfXpText(h);
+      setTitle(tag, halfXpTitle(h));
+    });
   }
-  setInterval(() => { if (location.pathname.replace(/\/+$/, '') === '/players') markMuggableRows(); }, 20000); // the 🛡️ tag goes once the hour is up
+  // The 🛡️ and ½ XP tags go once their time is up.
+  setInterval(() => {
+    const path = location.pathname.replace(/\/+$/, '');
+    if (path === '/players') markMuggableRows();
+    if (/^\/cat\/\d+$/.test(path)) drawProfileHalfXp();
+  }, 20000);
 
   // ─── "No crew" and "New cats" lists (Players page, 0.25.0; fixed + new cats 0.27.0) ─────
   // The Players list only renders the ~15 rows on screen, so rows can't just be hidden. Two fold-out lists sit above
@@ -1816,7 +1890,7 @@
 
   // Profile link (user request, 0.27.1): a plain link the player clicks, opening the game's own profile page in a new
   // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
-  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}`;
+  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}${halfXpTag(c.id)}`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
   const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
 
@@ -2560,6 +2634,33 @@
     if (el.innerHTML !== html) el.innerHTML = html;
   }
 
+  // ─── Cat Café pet and brush (sidebar, every page, 0.41.0, user request) ────
+  // A countdown for each until it can be done again, then "ready". From the game's own `cafe.pet/brush.readyAt`.
+  // A plain link to the Cat Café; it never pets or brushes anything itself.
+  const CAFE_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M9 18h26v11c0 6-5 10-11 10h-4c-6 0-11-4-11-10Z" fill="#E7EDE1"/><path d="M35 21c6 0 7 3 6 6s-4 4-7 4" fill="none" stroke="#E7EDE1" stroke-width="3.2" stroke-linecap="round"/><ellipse cx="22" cy="18" rx="13" ry="3.4" fill="#8A6A4A"/><path d="M17 12c-2-3 2-4 0-7M26 12c-2-3 2-4 0-7" fill="none" stroke="#8A8F86" stroke-width="1.5" stroke-linecap="round"/><ellipse cx="22" cy="41" rx="16" ry="3" fill="#8A8F86"/></svg>';
+  function updateCafePill() {
+    const c = apiState && apiState.cafe;
+    let el = document.querySelector('.msx-cafe');
+    if (!c || !(c.petAt || c.brushAt)) { if (el) el.remove(); return; }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('a');
+      el.href = '/cat-cafe';
+      el.className = 'msx-ticker msx-cafe msx-pill-link';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    const now = Date.now();
+    const part = (label, at) => (at > now ? `${label} ${fmtClock(at - now)}` : `${label} <b>ready</b>`);
+    const html = `${CAFE_ICON}${part('Pet', c.petAt)} · ${part('Brush', c.brushAt)}`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+    el.classList.toggle('soon', c.petAt <= now || c.brushAt <= now);
+    const when = (at) => (at > now ? `ready at ${fmtTime(at)}` : 'ready now');
+    const gives = (g, p, what) => (Number.isFinite(g) && Number.isFinite(p) ? `, +${g} ${what} for $${n0(p)}` : '');
+    setTitle(el, `Cat Café. Pet a cat: ${when(c.petAt)}${gives(c.petGain, c.petPrice, 'happiness')}. ` +
+      `Brush a cat: ${when(c.brushAt)}${gives(c.brushGain, c.brushPrice, 'nerve')}. Figures as of your last page load.`);
+  }
+
   // A plain heist-mask icon for the heist pill below -- drawn in the same flat style as the item/cat icons (not
   // the game's own art) so it needs no request either.
   const HEIST_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M4 20c4-6 12-9 20-9s16 3 20 9c-3 7-10 12-20 12S7 27 4 20Z" fill="#182316"/><ellipse cx="15" cy="19" rx="5" ry="4" fill="#E7EDE1"/><ellipse cx="33" cy="19" rx="5" ry="4" fill="#E7EDE1"/><circle cx="15" cy="19" r="2" fill="#182316"/><circle cx="33" cy="19" r="2" fill="#182316"/><path d="M2 18 8 20M46 18 40 20" stroke="#182316" stroke-width="2.4" stroke-linecap="round"/></svg>';
@@ -2760,8 +2861,8 @@
   // money/energy/nerve/life/happy box (and above Overview), joined to it like part of the same box, with a line
   // between each timer. The pills keep being built where they always were; this moves them into the box each run.
   // The box copies the vitals box's own background, border and corners at run time (its exact style is the game's).
-  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank)',
-    '.msx-consumable', '.msx-companion', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
+  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank):not(.msx-cafe)',
+    '.msx-consumable', '.msx-companion', '.msx-cafe', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
   function arrangeRail() {
     const vitals = document.querySelector('.sidebar .rail-vitals');
     if (!vitals || !vitals.parentNode) return;
@@ -2874,7 +2975,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); arrangeRail(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -3195,7 +3296,6 @@
   // a line under the gym's description in the training view, "x to go" on each next gym's door in the Switch gyms
   // hall, and the exact figures on that gym's card. From the game's own data (`gymEnergySpent`, and `required` on
   // the gyms in state 'next'), sent with every page and after every training session.
-  const n0 = (v) => Math.round(v).toLocaleString('en-US');
   function drawGymProgress() {
     const spent = apiState && apiState.gymSpent;
     const next = (apiState && apiState.gymsNext) || [];
@@ -4332,8 +4432,11 @@
       arrangeRail(); // all the timers into one box under the vitals (0.29.0)
       drawHiddenFeats();
       noteMyMugs();
+      noteMyAttacks();
       ensureNoCrewPanel();
       markMuggableRows();
+      drawProfileHalfXp();
+      updateCafePill();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -4366,7 +4469,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
