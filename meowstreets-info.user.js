@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.41.0
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, to your crew's own Discord bot (which shares the crew's stock price history and how to get hidden feats back). Sharing is only offered to members of the crew the bot serves.
+// @version      0.42.0
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -173,6 +173,9 @@
         const p = raw.cafe.pet || {}, b = raw.cafe.brush || {};
         out.cafe = { petAt: Number(p.readyAt) || 0, petGain: p.gain, petPrice: p.price, brushAt: Number(b.readyAt) || 0, brushGain: b.gain, brushPrice: b.price };
       }
+      // Pier Nine (0.42.0): casts today, the bucket (each fish's grams, value and when it goes off) and the fish book.
+      const pier = raw.pier && typeof raw.pier === 'object' ? readPier(raw.pier) : null;
+      if (pier) out.pier = pier;
       // Your own recent attacks, for the half-XP tag (0.41.0). Attacking the same cat again within `repeatWindow` (3 h)
       // of your last attack on it gives half XP (checked on your saved fights; another cat's attack doesn't count).
       if (Array.isArray(raw.attacks) && raw.player && raw.player.id != null) {
@@ -180,6 +183,20 @@
           .map((a) => ({ id: a.id, victim: a.defender_id, name: a.defender || '', at: Number(a.created_at) }));
       }
       if (raw.combat && Number(raw.combat.repeatWindow) > 0) out.repeatWindow = Number(raw.combat.repeatWindow);
+      // Other cats' gear and stats, last seen in a fight (0.42.0). Each of your last 10 fights carries `state` (JSON
+      // text) with both cats' level, exact stats, max health and gear ids at the time. Your own side is skipped.
+      if (raw.player && raw.player.id != null) out.myId = raw.player.id; // only the id, never the rest of `player`
+      out.gearNames = {};
+      [...(Array.isArray(raw.gear) ? raw.gear : []), ...(Array.isArray(raw.throwables) ? raw.throwables : [])]
+        .forEach((g) => { if (g && g.id && g.name) out.gearNames[g.id] = g.name; });
+      out.fightCats = [];
+      (Array.isArray(raw.attacks) ? raw.attacks : []).forEach((a) => {
+        let s = null;
+        try { s = a && (typeof a.state === 'string' ? JSON.parse(a.state) : a.state); } catch (e) { s = null; }
+        const at = a && Number(a.created_at);
+        if (!s || !(at > 0)) return;
+        [s.a, s.d].forEach((c) => { const r = c && c.id !== out.myId && gearRecord(c, at, true); if (r) out.fightCats.push(r); });
+      });
       // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
       if (Array.isArray(raw.deposits)) {
@@ -465,7 +482,7 @@
 
   function onApiStateResponse(json) {
     const ex = extractApiState(json);
-    if (ex) { apiState = ex; noteUses(ex.events); schedule(); shareCrew(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+    if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); schedule(); shareCrew(); syncGear(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
 
   // ─── Tuna / catnip uses today (0.30.0, user request) ──────────────────────
@@ -513,13 +530,16 @@
     // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
     // /api/crew/contracts (0.34.0) is the Crew > Contracts tab's own reply: what each crew contract counts.
     // /api/crew/attacks (0.35.0) is the Crew > Crew attacks log: mugs by the crew, for the 💰 muggable mark.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse };
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse, '/api/crew/attack': onCrewAttackResponse, '/api/pier': onPierResponse };
+    // /api/fight/<code> (0.42.0) is a fight page's own reply: both cats' gear, for the ⚔️ record. /api/pier and anything
+    // under it (0.42.0): the Pier page's weekly board, and the pier itself if a cast's reply carries it.
+    const handlerFor = (path) => HANDLERS[path] || (/^\/api\/fight\/[\w-]+$/.test(path) ? onFightResponse : /^\/api\/pier\//.test(path) ? onPierResponse : null);
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
         const p = realFetch.apply(this, args);
         p.then((res) => {
-          try { const h = res && res.url && HANDLERS[pathOf(res.url)]; if (h) res.clone().json().then(h).catch(() => {}); } catch (e) { /* ignore */ }
+          try { const h = res && res.url && handlerFor(pathOf(res.url)); if (h) res.clone().json().then(h).catch(() => {}); } catch (e) { /* ignore */ }
         }).catch(() => {});
         return p;
       };
@@ -531,7 +551,7 @@
       const sendOrig = RealXHR.prototype.send;
       RealXHR.prototype.send = function (...args) {
         this.addEventListener('loadend', () => {
-          try { const h = this.__msxUrl && HANDLERS[pathOf(this.__msxUrl)]; if (h && this.responseText) h(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
+          try { const h = this.__msxUrl && handlerFor(pathOf(this.__msxUrl)); if (h && this.responseText) h(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
         });
         return sendOrig.apply(this, args);
       };
@@ -986,7 +1006,13 @@
       .msx-muggable svg { display:block; }
       .msx-halfxp { margin-left:4px; font-size:11px; color:var(--ms-gold, #e9c46a); white-space:nowrap; cursor:help; vertical-align:middle; }
       .cp-chips > .msx-halfxp { margin-left:0; }
-      .msx-cafe b { font-weight:600; }
+      .msx-geartag { margin-left:4px; font-size:12px; cursor:help; vertical-align:middle; }
+      #msx-catgear { margin:8px 0; padding:6px 10px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.5; }
+      #msx-catgear .msx-catgear-stats { opacity:.85; }
+      .msx-cafe b, .msx-pier b { font-weight:600; }
+      #msx-pierlog { margin:10px 0; padding:8px 12px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.55; }
+      #msx-pierlog .msx-pierlog-t { font-weight:600; margin-bottom:4px; }
+      #msx-pierlog .msx-pierlog-h { margin-top:6px; opacity:.75; text-transform:uppercase; font-size:10px; letter-spacing:.05em; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
@@ -1767,6 +1793,164 @@
     setTitle(tag, halfXpTitle(h));
   }
 
+  // ─── ⚔️ Other cats' gear and stats, last seen in a fight (0.42.0, user request) ───
+  // Kept per cat, newest first by timestamp: gear (level, health, primary, secondary, thrown, armour) with `at`, the
+  // exact stats with their own `stAt` (only fight records carry them). A newer sighting replaces what it knows; an
+  // older one only fills gaps. From three places, all replies the game's own pages already load:
+  //   your last 10 fights (`attacks[].state`, every page): level, stats, max health, all four gear slots
+  //   a fight page (/api/fight/<code>): both cats' level, max health and gear, as at the start of that fight
+  //   an opened crew attack (/api/crew/attack): only the weapons each cat actually used, by name
+  // With crew sharing on, records also go to the crew bot and the crew's come back (src 'crew'), so they stay fresh
+  // without anyone opening the page again.
+  const GEAR_KEY = 'ms_cat_gear_v1'; // { [catId]: { n, at, lv, hp, p, s, t, a, st: [str, def, spd, dex], stAt, src, d } }
+  const GEAR_MAX = 3000;
+  const GEAR_FIELDS = ['lv', 'hp', 'p', 's', 't', 'a'];
+  // One cat from a fight's `state` side or a fight page (same field names); stats only from `state`.
+  function gearRecord(c, at, withStats) {
+    if (!c || c.id == null) return null;
+    const r = { id: c.id, n: c.name || '', at, p: c.primary || null, s: c.secondary || null, t: c.thrown || null, a: c.armor || null };
+    if (Number.isFinite(c.level)) r.lv = c.level;
+    if (Number.isFinite(c.maxHp)) r.hp = c.maxHp;
+    const s = withStats && c.stats;
+    if (s && [s.strength, s.defense, s.speed, s.dexterity].every(Number.isFinite)) { r.st = [s.strength, s.defense, s.speed, s.dexterity]; r.stAt = at; }
+    return r;
+  }
+  // `undefined` = not known from this sighting, null = none.
+  function mergeGear(old, nw) {
+    const r = old ? { ...old } : { n: '', at: 0 };
+    const newer = nw.at > (r.at || 0);
+    if (nw.n && (newer || !r.n)) r.n = nw.n;
+    GEAR_FIELDS.forEach((k) => { if (nw[k] !== undefined && (newer || r[k] === undefined)) r[k] = nw[k]; });
+    if (newer) { r.at = nw.at; r.src = nw.src; }
+    if (Array.isArray(nw.st) && !(r.stAt >= nw.stAt)) { r.st = nw.st; r.stAt = nw.stAt; }
+    const strip = (x) => JSON.stringify(x ? { ...x, d: 0 } : null);
+    return strip(r) === strip(old) ? null : r;
+  }
+  function noteGear(list, src) {
+    if (!list || !list.length) return;
+    const m = GM_getValue(GEAR_KEY, null) || {};
+    let changed = false;
+    list.forEach((nw) => {
+      if (!nw || nw.id == null) return;
+      const k = String(nw.id);
+      const r = mergeGear(m[k], { ...nw, src });
+      if (!r) return;
+      if (src !== 'crew') r.d = 1; // still to send to the crew bot
+      m[k] = r; changed = true;
+    });
+    if (!changed) return;
+    const keys = Object.keys(m);
+    if (keys.length > GEAR_MAX) keys.sort((x, y) => Math.max(m[x].at || 0, m[x].stAt || 0) - Math.max(m[y].at || 0, m[y].stAt || 0)).slice(0, keys.length - GEAR_MAX).forEach((k) => delete m[k]);
+    GM_setValue(GEAR_KEY, m);
+    schedule();
+  }
+  let fightCatsAt = null;
+  function noteFightCats() {
+    if (!apiState || !apiState.fightCats || apiState.at === fightCatsAt) return;
+    fightCatsAt = apiState.at;
+    noteGear(apiState.fightCats, 'you');
+  }
+  // A fight page's own reply: both cats as at the start of that fight.
+  function onFightResponse(json) {
+    const at = json && Number(json.startedAt);
+    if (!(at > 0)) return;
+    const me = apiState && apiState.myId;
+    noteGear([json.attacker, json.defender].filter((c) => c && c.id !== me).map((c) => gearRecord(c, at, false)).filter(Boolean), 'you');
+  }
+  // An opened crew attack: the weapons each side swung (by name; "Pounce" is no weapon). Armour isn't in it.
+  function onCrewAttackResponse(json) {
+    const at = json && Number(json.at);
+    if (!(at > 0) || !json.attacker || !json.defender) return;
+    const byName = {};
+    Object.entries((apiState && apiState.gearNames) || {}).forEach(([id, name]) => { byName[name] = id; });
+    const log = Array.isArray(json.log) ? json.log : [];
+    const me = apiState && apiState.myId;
+    const out = [];
+    [['attacker', json.attacker], ['defender', json.defender]].forEach(([who, c]) => {
+      if (!c || c.id == null || c.id === me) return;
+      const r = { id: c.id, n: c.name || '', at };
+      if (Number.isFinite(c.level)) r.lv = c.level;
+      if (Number.isFinite(c.maxHp)) r.hp = c.maxHp;
+      log.forEach((e) => {
+        const slot = e && e.who === who && { primary: 'p', secondary: 's', thrown: 't' }[e.slot];
+        if (slot && byName[e.weapon]) r[slot] = byName[e.weapon];
+      });
+      out.push(r);
+    });
+    noteGear(out, 'you');
+  }
+  const catGear = (id) => (GM_getValue(GEAR_KEY, null) || {})[String(id)] || null;
+  const seenAt = (t) => new Date(t).toLocaleString([], { day: 'numeric', month: 'short', hour: 'numeric', minute: '2-digit' });
+  const gearName = (id) => (id === undefined ? '?' : id === null ? 'none' : ((apiState && apiState.gearNames) || {})[id] || id);
+  // { gear, stats } as two lines of plain text.
+  function gearLines(g) {
+    const gear = `Seen in a fight ${seenAt(g.at)}${g.src === 'crew' ? ' (crew)' : ''}: ` +
+      [g.lv != null ? 'Level ' + g.lv : null, 'Primary ' + gearName(g.p), 'Secondary ' + gearName(g.s), 'Thrown ' + gearName(g.t), 'Armour ' + gearName(g.a),
+        g.hp != null ? n0(g.hp) + ' HP' : null].filter(Boolean).join(' · ');
+    const st = g.st;
+    const stats = st ? `Str ${n0(st[0])} · Def ${n0(st[1])} · Spd ${n0(st[2])} · Dex ${n0(st[3])} (total ${n0(st[0] + st[1] + st[2] + st[3])})` +
+      (Math.abs(g.stAt - g.at) > 60000 ? `, as of ${seenAt(g.stAt)}` : '') : 'Stats not seen yet (only your own fights show them).';
+    return { gear, stats };
+  }
+  const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + '\nWhat they had then; they may have changed gear or trained since.'; };
+  const gearTag = (id) => { const g = catGear(id); return g ? ` <span class="msx-geartag" title="${escHtml(gearTitle(g))}">⚔️</span>` : ''; };
+  // Profile pages: two lines under the Attack button's reason.
+  function drawProfileGear() {
+    const m = location.pathname.replace(/\/+$/, '').match(/^\/cat\/(\d+)$/);
+    const lead = m && document.querySelector('.cp-deck > .cp-lead');
+    let box = document.getElementById('msx-catgear');
+    const g = lead && catGear(m[1]);
+    if (!g) { if (box) box.remove(); return; }
+    if (!box) { box = document.createElement('div'); box.id = 'msx-catgear'; }
+    const anchor = lead.nextElementSibling && lead.nextElementSibling.classList.contains('reason') ? lead.nextElementSibling : lead;
+    if (anchor.nextElementSibling !== box) anchor.after(box);
+    const l = gearLines(g);
+    const html = `<div>⚔️ ${escHtml(l.gear)}</div><div class="msx-catgear-stats">${escHtml(l.stats)}</div>`;
+    if (box.innerHTML !== html) box.innerHTML = html;
+    setTitle(box, 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear or trained since.');
+  }
+
+  // Crew pool (sharing on): send what you saw, get back what the crew saw. The bot keeps the newest per cat too.
+  const GEAR_POOL_URL = 'http://168.138.79.225:3001/v1/gear';
+  const GEAR_SYNC_KEY = 'ms_gear_sync_v1'; // { since: the bot's upTo from the last sync }
+  const GEAR_SYNC_GAP_MS = 5 * 60000, GEAR_SEND_GAP_MS = 65000, GEAR_SEND_MAX = 300;
+  let gearSyncAt = 0, gearSyncBusy = false;
+  function syncGear() {
+    if (!sharingOn() || gearSyncBusy || typeof GM_xmlhttpRequest !== 'function') return;
+    const m = GM_getValue(GEAR_KEY, null) || {};
+    const dirty = Object.keys(m).filter((k) => m[k].d);
+    const gap = Date.now() - gearSyncAt;
+    if (gap < GEAR_SEND_GAP_MS || (!dirty.length && gap < GEAR_SYNC_GAP_MS)) return;
+    const send = dirty.slice(0, GEAR_SEND_MAX).map((k) => {
+      const r = m[k];
+      const o = { id: Number(k), n: r.n, at: r.at };
+      GEAR_FIELDS.forEach((f) => { if (r[f] !== undefined) o[f] = r[f]; });
+      if (r.st) { o.st = r.st; o.stAt = r.stAt; }
+      return o;
+    });
+    const sync = GM_getValue(GEAR_SYNC_KEY, null) || {};
+    gearSyncAt = Date.now(); gearSyncBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: GEAR_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, cats: send, since: Number.isFinite(sync.since) ? sync.since : null }),
+      onload: (r) => {
+        gearSyncBusy = false;
+        let j = null;
+        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        if (!j || !j.ok) return;
+        // Sent ones are clean again, unless they changed while the request was out.
+        const now = GM_getValue(GEAR_KEY, null) || {};
+        send.forEach((o) => { const x = now[String(o.id)]; if (x && x.d && x.at === o.at && x.stAt === o.stAt) delete x.d; });
+        GM_setValue(GEAR_KEY, now);
+        noteGear(Object.entries(j.cats || {}).map(([id, c]) => ({ ...c, id: Number(id) })), 'crew');
+        if (Number.isFinite(j.upTo)) GM_setValue(GEAR_SYNC_KEY, { since: j.upTo });
+        if (dirty.length > GEAR_SEND_MAX || j.more) setTimeout(syncGear, GEAR_SEND_GAP_MS + 1000);
+      },
+      onerror: () => { gearSyncBusy = false; },
+      ontimeout: () => { gearSyncBusy = false; },
+    });
+  }
+
   // { [catId]: { times, best, last } } for cats mugged over $1,000 at least twice.
   function muggable() {
     if (muggableCache) return muggableCache;
@@ -1832,12 +2016,26 @@
       if (tag.textContent !== halfXpText(h)) tag.textContent = halfXpText(h);
       setTitle(tag, halfXpTitle(h));
     });
+    // ⚔️ last seen gear and stats (hover), last of all.
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
+      const g = m ? catGear(m[1]) : null;
+      const host = b.parentElement;
+      let tag = host && host.querySelector(':scope > .msx-geartag');
+      if (!g) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-geartag'; tag.textContent = '⚔️'; }
+      const sibs = [...host.children].filter((x) => x === b || x.classList.contains('msx-muggable') || x.classList.contains('msx-lowtag') || x.classList.contains('msx-halfxp'));
+      const after = sibs[sibs.length - 1];
+      if (after.nextElementSibling !== tag) after.after(tag);
+      setTitle(tag, gearTitle(g));
+    });
   }
   // The 🛡️ and ½ XP tags go once their time is up.
   setInterval(() => {
     const path = location.pathname.replace(/\/+$/, '');
     if (path === '/players') markMuggableRows();
     if (/^\/cat\/\d+$/.test(path)) drawProfileHalfXp();
+    syncGear(); // the crew's gear records, every 5 minutes while sharing is on
   }, 20000);
 
   // ─── "No crew" and "New cats" lists (Players page, 0.25.0; fixed + new cats 0.27.0) ─────
@@ -1890,7 +2088,7 @@
 
   // Profile link (user request, 0.27.1): a plain link the player clicks, opening the game's own profile page in a new
   // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
-  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}${halfXpTag(c.id)}`;
+  const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}${halfXpTag(c.id)}${gearTag(c.id)}`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
   const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
 
@@ -2661,6 +2859,186 @@
       `Brush a cat: ${when(c.brushAt)}${gives(c.brushGain, c.brushPrice, 'nerve')}. Figures as of your last page load.`);
   }
 
+  // ─── Pier Nine (sidebar + catch log, 0.42.0, user request) ─────────────────
+  // From the game's own `pier` (every page): casts used today of 10 (back at 00:00 UTC), the bucket (fish, grams,
+  // value, `off` = when it goes off, 3 days after the catch) and the fish book ({ kind: [count, best grams] }). The
+  // Pier page's own /api/pier adds the week's biggest. A plain link; it never casts anything itself.
+  function readPier(p) {
+    if (!Number.isFinite(p.today) || !Number.isFinite(p.limit)) return null;
+    const book = {}, best = {};
+    Object.entries(p.book && typeof p.book === 'object' ? p.book : {}).forEach(([k, v]) => { if (Array.isArray(v)) { book[k] = Number(v[0]) || 0; best[k] = Number(v[1]) || 0; } });
+    return {
+      today: p.today, limit: p.limit, spot: p.spot || null, hook: p.hook || null, tide: p.tide || null, hour: p.hour || null, book, best,
+      bucket: (Array.isArray(p.bucket) ? p.bucket : []).filter((f) => f && f.f && Number(f.at) > 0)
+        .map((f) => ({ f: f.f, g: Number(f.g) || 0, v: Number(f.v) || 0, at: Number(f.at), off: Number(f.off) || 0 })),
+    };
+  }
+  const PIER_SPOTS = { boards: 'Under the boards', outflow: 'The outflow', end: 'The end of the pier', fence: 'By the fence' };
+  const spotName = (s) => PIER_SPOTS[s] || (s ? s.charAt(0).toUpperCase() + s.slice(1) : '?');
+  const fishName = (f) => (f ? f.charAt(0).toUpperCase() + f.slice(1) : '?');
+  const kg = (g) => (g / 1000).toFixed(1) + ' kg';
+  // Over a day: "2d 10h"; under: the usual h:mm:ss.
+  const fmtLong = (ms) => (ms >= 86400000 ? `${Math.floor(ms / 86400000)}d ${Math.floor((ms % 86400000) / 3600000)}h` : fmtClock(ms));
+  // Casts left now: the count in the data is for the UTC day it was sent; a new UTC day means all 10 again.
+  function pierCastsLeft(p, at) {
+    return utcDay(at) === utcDay(Date.now()) ? Math.max(0, p.limit - p.today) : p.limit;
+  }
+  const PIER_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M8 6 40 6" stroke="#8A8F86" stroke-width="3" stroke-linecap="round"/><path d="M36 6v20" stroke="#E7EDE1" stroke-width="1.6"/><path d="M36 26c0 5-4 7-7 5" fill="none" stroke="#E7EDE1" stroke-width="2.2" stroke-linecap="round"/><path d="M6 36c6-6 16-6 22 0-6 6-16 6-22 0Z" fill="#7FB3C8"/><path d="M28 36l7-5v10Z" fill="#7FB3C8"/><circle cx="12" cy="35" r="1.4" fill="#182316"/></svg>';
+  let pierBoard = null; // [{ name, fish, grams, me }] from the Pier page's own /api/pier
+  function updatePierPill() {
+    const p = apiState && apiState.pier;
+    let el = document.querySelector('.msx-pier');
+    if (!p) { if (el) el.remove(); return; }
+    if (!el) {
+      const anchor = document.querySelector('.msx-chain') || document.querySelector('.msx-ticker') || document.querySelector('.sidebar .rail-vitals');
+      if (!anchor || !anchor.parentNode) return;
+      el = document.createElement('a');
+      el.href = '/pier-nine';
+      el.className = 'msx-ticker msx-pier msx-pill-link';
+      if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
+    }
+    const now = Date.now();
+    const left = pierCastsLeft(p, apiState.at);
+    const fresh = p.bucket.filter((f) => f.off > now).sort((a, b) => a.off - b.off);
+    const worth = fresh.reduce((s, f) => s + f.v, 0);
+    const reset = Date.parse(utcDay(now) + 'T00:00:00Z') + 86400000;
+    const casts = left > 0 ? `<b>${left}</b> cast${left > 1 ? 's' : ''} left` : `Casts back in ${fmtClock(reset - now)}`;
+    const next = fresh[0];
+    const soonOff = next && next.off - now < 24 * 3600000 ? ` · 1st off ${fmtClock(next.off - now)}` : '';
+    const html = `${PIER_ICON}${casts}${fresh.length ? ` · ${fmtMoney(worth)}` : ''}${soonOff}`;
+    if (el.innerHTML !== html) el.innerHTML = html;
+    el.classList.toggle('soon', left > 0);
+    const lines = [`Pier Nine. ${left} of ${p.limit} casts left today (all back at 00:00 UTC, ${fmtTime(reset)} your time).`];
+    if (fresh.length) {
+      lines.push(`Bucket: ${fresh.length} fish worth ${fmtMoney(worth)}.`);
+      lines.push(`Next to go off: ${fishName(next.f)} ${kg(next.g)} (${fmtMoney(next.v)}), goes off at ${seenAt(next.off)}`);
+    }
+    const mine = pierBoard ? pierBoard.findIndex((b) => b.me) : -1;
+    if (mine >= 0) lines.push(`This week's biggest: you are #${mine + 1} (${fishName(pierBoard[mine].fish)} ${kg(pierBoard[mine].grams)}).`);
+    lines.push('Figures as of your last page load.');
+    setTitle(el, lines.join('\n'));
+  }
+  // The weekly board, as the Pier page's noticeboard shows it (the top 5 only).
+  function onPierResponse(json) {
+    if (json && Array.isArray(json.board)) {
+      const me = apiState && apiState.myId;
+      pierBoard = json.board.filter((b) => b && b.fish).map((b) => ({ name: b.name || '', fish: b.fish, grams: Number(b.grams) || 0, me: b.id === me }));
+    }
+    // A reply that carries the pier itself (a cast's reply may) counts like a state.
+    const p = json && (json.pier || (Array.isArray(json.bucket) && Number.isFinite(json.today) ? json : null));
+    const pier = p && readPier(p);
+    if (pier && apiState) { apiState.pier = pier; notePierCasts(pier, Date.now()); noteFish(pier); }
+    schedule();
+  }
+
+  // Catch log: each time the cast count goes up by exactly one between two replies the same UTC day, that one cast
+  // happened under the spot, bait, tide and hour of the newer reply. What it brought up = the fish-book kind whose
+  // count rose (junk too: boots, cans), with weight and value from the bucket fish caught since. Two or more casts
+  // between replies can't be told apart, so they are not logged.
+  const PIER_LOG_KEY = 'ms_pier_log_v1'; // { last: { day, today, book, bucketAts }, casts: [{ at, spot, hook, tide, hour, f, g, v }] }
+  const PIER_LOG_MAX = 3000;
+  function notePierCasts(p, at) {
+    const log = GM_getValue(PIER_LOG_KEY, null) || { last: null, casts: [] };
+    const last = log.last;
+    const day = utcDay(at);
+    const ats = p.bucket.map((f) => f.at);
+    if (last && last.day === day && p.today === last.today + 1) {
+      const rose = Object.keys(p.book).filter((k) => p.book[k] > (last.book[k] || 0));
+      const fish = p.bucket.filter((f) => !last.bucketAts.includes(f.at)).sort((a, b) => b.at - a.at)[0];
+      const f = rose.length === 1 ? rose[0] : fish ? fish.f : null;
+      const c = { at, spot: p.spot, hook: p.hook, tide: p.tide, hour: p.hour, f };
+      if (fish && fish.f === f) { c.g = fish.g; c.v = fish.v; }
+      log.casts.push(c);
+      if (log.casts.length > PIER_LOG_MAX) log.casts.splice(0, log.casts.length - PIER_LOG_MAX);
+    }
+    if (!last || last.day !== day || last.today !== p.today || JSON.stringify(last.book) !== JSON.stringify(p.book)) {
+      log.last = { day, today: p.today, book: p.book, bucketAts: ats };
+      GM_setValue(PIER_LOG_KEY, log);
+    }
+  }
+  let pierNotedAt = null;
+  function notePierFromState() {
+    if (!apiState || !apiState.pier || apiState.at === pierNotedAt) return;
+    pierNotedAt = apiState.at;
+    notePierCasts(apiState.pier, apiState.at);
+    noteFish(apiState.pier);
+  }
+
+  // Fish values (0.42.0, user request): every fish seen in your bucket, once each (kind + catch time), with its weight
+  // and value. From your 14 fish on 2026-11-04 the value is weight x a fixed price per kind, rounded to $10 (carp
+  // ~$100/kg, mullet ~$90/kg, conger ~$55/kg), so the price per kg is worked out from all of a kind's weights together.
+  const FISH_KEY = 'ms_fish_seen_v1'; // { 'kind:at': { f, g, v, at } }
+  const FISH_MAX = 5000;
+  function noteFish(p) {
+    const m = GM_getValue(FISH_KEY, null) || {};
+    let changed = false;
+    p.bucket.forEach((f) => { const k = f.f + ':' + f.at; if (!m[k] && f.g > 0) { m[k] = { f: f.f, g: f.g, v: f.v, at: f.at }; changed = true; } });
+    if (!changed) return;
+    const keys = Object.keys(m);
+    if (keys.length > FISH_MAX) keys.sort((a, b) => m[a].at - m[b].at).slice(0, keys.length - FISH_MAX).forEach((k) => delete m[k]);
+    GM_setValue(FISH_KEY, m);
+  }
+  // { kind: { n, minG, maxG, minV, maxV, perKg } } from every fish recorded.
+  function fishValues() {
+    const by = {};
+    Object.values(GM_getValue(FISH_KEY, null) || {}).forEach((x) => {
+      const k = by[x.f] || (by[x.f] = { n: 0, minG: Infinity, maxG: 0, minV: Infinity, maxV: 0, g: 0, v: 0 });
+      k.n++; k.g += x.g; k.v += x.v;
+      k.minG = Math.min(k.minG, x.g); k.maxG = Math.max(k.maxG, x.g); k.minV = Math.min(k.minV, x.v); k.maxV = Math.max(k.maxV, x.v);
+    });
+    Object.values(by).forEach((k) => { k.perKg = k.g > 0 ? (k.v / k.g) * 1000 : 0; });
+    return by;
+  }
+  function fishValueRows(p) {
+    const vals = fishValues();
+    const usd = (n) => '$' + n0(n);
+    const range = (a, b, f) => (a === b ? f(a) : `${f(a)}–${f(b)}`);
+    const kgRange = (a, b) => (a === b ? kg(a) : `${(a / 1000).toFixed(1)}–${kg(b)}`);
+    const kinds = [...new Set([...Object.keys(vals), ...Object.keys(p.book)])]
+      .sort((a, b) => ((vals[b] && vals[b].perKg) || -1) - ((vals[a] && vals[a].perKg) || -1) || (p.book[b] || 0) - (p.book[a] || 0));
+    return kinds.map((f) => {
+      const k = vals[f], caught = p.book[f], best = p.best[f];
+      const parts = [];
+      if (k) parts.push(`~${usd(k.perKg)}/kg`, `${k.n} seen, ${kgRange(k.minG, k.maxG)}, ${range(k.minV, k.maxV, usd)}`);
+      if (caught) parts.push(`caught ${caught}` + (best > 0 ? `, best ${kg(best)}${k ? ` (~${usd(Math.round((best * k.perKg) / 10000) * 10)})` : ''}` : ', no weight'));
+      if (!k && best > 0) parts.push('value not seen yet');
+      return `<div><b>${escHtml(fishName(f))}</b> ${parts.join(' · ')}</div>`;
+    }).join('');
+  }
+  // Pier page: the bucket and what bites where, from your own logged casts, under the game's dock.
+  function drawPierLog() {
+    const host = location.pathname.replace(/\/+$/, '') === '/pier-nine' && document.querySelector('section.pl');
+    let box = document.getElementById('msx-pierlog');
+    const p = apiState && apiState.pier;
+    if (!host || !p) { if (box) box.remove(); return; }
+    if (!box) { box = document.createElement('div'); box.id = 'msx-pierlog'; }
+    if (host.nextElementSibling !== box) host.after(box);
+    const now = Date.now();
+    const fresh = p.bucket.filter((f) => f.off > now).sort((a, b) => a.off - b.off);
+    const casts = (GM_getValue(PIER_LOG_KEY, null) || { casts: [] }).casts;
+    const rows = [];
+    const values = fishValueRows(p);
+    if (fresh.length) {
+      rows.push(`<div><b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))}. Next to go off: ${escHtml(fishName(fresh[0].f))} ${kg(fresh[0].g)} ` +
+        `(${fmtMoney(fresh[0].v)}) in ${fmtLong(fresh[0].off - now)}.</div>`);
+    }
+    const group = (key, name) => {
+      const by = {};
+      casts.forEach((c) => { const g = by[c[key]] || (by[c[key]] = { n: 0, kinds: {} }); g.n++; const f = c.f || 'nothing'; g.kinds[f] = (g.kinds[f] || 0) + 1; });
+      return Object.entries(by).sort((a, b) => b[1].n - a[1].n).map(([k, g]) => `<div><b>${escHtml(name(k))}</b> (${g.n} cast${g.n > 1 ? 's' : ''}): ` +
+        Object.entries(g.kinds).sort((a, b) => b[1] - a[1]).map(([f, n]) => `${escHtml(f === 'nothing' ? 'nothing' : fishName(f))} ${n}`).join(', ') + '</div>').join('');
+    };
+    if (casts.length) {
+      rows.push(`<div class="msx-pierlog-h">By spot</div>${group('spot', spotName)}`);
+      rows.push(`<div class="msx-pierlog-h">By bait</div>${group('hook', (k) => fishName(k === 'null' ? 'no bait' : k))}`);
+      rows.push(`<div class="msx-pierlog-h">By tide</div>${group('tide', (k) => k)}`);
+      rows.push(`<div class="msx-pierlog-h">Day or night</div>${group('hour', fishName)}`);
+    } else rows.push('<div>No casts logged yet. Each cast you make from now on is logged with its spot, bait, tide and time of day.</div>');
+    if (values) rows.push(`<div class="msx-pierlog-h">Fish values (best per kg first; from every fish seen in your bucket)</div>${values}`);
+    const html = `<div class="msx-pierlog-t">🎣 Your catch log (${casts.length} cast${casts.length === 1 ? '' : 's'}, kept on this computer)</div>${rows.join('')}`;
+    if (box.innerHTML !== html) box.innerHTML = html;
+  }
+
   // A plain heist-mask icon for the heist pill below -- drawn in the same flat style as the item/cat icons (not
   // the game's own art) so it needs no request either.
   const HEIST_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M4 20c4-6 12-9 20-9s16 3 20 9c-3 7-10 12-20 12S7 27 4 20Z" fill="#182316"/><ellipse cx="15" cy="19" rx="5" ry="4" fill="#E7EDE1"/><ellipse cx="33" cy="19" rx="5" ry="4" fill="#E7EDE1"/><circle cx="15" cy="19" r="2" fill="#182316"/><circle cx="33" cy="19" r="2" fill="#182316"/><path d="M2 18 8 20M46 18 40 20" stroke="#182316" stroke-width="2.4" stroke-linecap="round"/></svg>';
@@ -2861,8 +3239,8 @@
   // money/energy/nerve/life/happy box (and above Overview), joined to it like part of the same box, with a line
   // between each timer. The pills keep being built where they always were; this moves them into the box each run.
   // The box copies the vitals box's own background, border and corners at run time (its exact style is the game's).
-  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank):not(.msx-cafe)',
-    '.msx-consumable', '.msx-companion', '.msx-cafe', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
+  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank):not(.msx-cafe):not(.msx-pier)',
+    '.msx-consumable', '.msx-companion', '.msx-cafe', '.msx-pier', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
   function arrangeRail() {
     const vitals = document.querySelector('.sidebar .rail-vitals');
     if (!vitals || !vitals.parentNode) return;
@@ -2975,7 +3353,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); arrangeRail(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -4363,7 +4741,7 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices and the feats you have earned (for chain and job posts, the crew\'s shared stock lows/highs and how to get hidden feats; nothing else, never sent to MeowStreets)</label></div>';
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned and other cats\' gear and stats from your fights (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats and the crew\'s ⚔️ last-seen gear; nothing else, never sent to MeowStreets)</label></div>';
     host.appendChild(box);
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
@@ -4436,7 +4814,10 @@
       ensureNoCrewPanel();
       markMuggableRows();
       drawProfileHalfXp();
+      drawProfileGear();
       updateCafePill();
+      updatePierPill();
+      drawPierLog();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -4469,7 +4850,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
