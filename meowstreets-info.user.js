@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.42.0
+// @version      0.43.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -513,7 +513,7 @@
   }
   function onMewsResponse(json) {
     const rows = json && Array.isArray(json.rows) ? json.rows : null;
-    if (rows) { noteUses(rows.map((r) => ({ id: r.id, body: r.body, kind: r.kind, at: r.at }))); schedule(); }
+    if (rows) { const ev = rows.map((r) => ({ id: r.id, body: r.body, kind: r.kind, at: r.at })); noteUses(ev); noteBaitPrices(ev); schedule(); }
   }
 
   // Only a full state is taken (an error reply, e.g. { error }, would otherwise blank everything).
@@ -1713,6 +1713,7 @@
       .map((a) => ({ id: a.id, victim: a.them.id, name: a.them.name || '', stolen: Number(a.stolen) || 0, at: a.at || 0, by: (a.us && a.us.name) || '' }));
     noteLastMugs(mugs);
     noteMugs(mugs);
+    noteGearLevels(json.attacks);
   }
 
   // ─── 🛡️ When a lying-low cat can be mugged again (user request, 0.36.0) ─────────
@@ -1849,6 +1850,20 @@
     if (!apiState || !apiState.fightCats || apiState.at === fightCatsAt) return;
     fightCatsAt = apiState.at;
     noteGear(apiState.fightCats, 'you');
+  }
+  // The Crew attacks list: each row has the other cat's level. Kept for cats that already have a ⚔️ record (a level
+  // alone starts none), only if newer than what's known. Only the level changes: the gear's "seen" time stays, so old
+  // gear never looks newer than it is. Kept on this computer only (the crew pool goes by the gear time).
+  function noteGearLevels(rows) {
+    const g = GM_getValue(GEAR_KEY, null) || {};
+    let changed = false;
+    rows.forEach((a) => {
+      const r = a && a.them && g[String(a.them.id)];
+      const at = a && Number(a.at);
+      if (!r || !Number.isFinite(a.them.level) || !(at > Math.max(r.at || 0, r.lvAt || 0)) || r.lv === a.them.level) return;
+      r.lv = a.them.level; r.lvAt = at; changed = true;
+    });
+    if (changed) { GM_setValue(GEAR_KEY, g); schedule(); }
   }
   // A fight page's own reply: both cats as at the start of that fight.
   function onFightResponse(json) {
@@ -2869,6 +2884,7 @@
     Object.entries(p.book && typeof p.book === 'object' ? p.book : {}).forEach(([k, v]) => { if (Array.isArray(v)) { book[k] = Number(v[0]) || 0; best[k] = Number(v[1]) || 0; } });
     return {
       today: p.today, limit: p.limit, spot: p.spot || null, hook: p.hook || null, tide: p.tide || null, hour: p.hour || null, book, best,
+      bait: Object.fromEntries(Object.entries(p.bait && typeof p.bait === 'object' ? p.bait : {}).filter(([, n]) => Number.isFinite(n))),
       bucket: (Array.isArray(p.bucket) ? p.bucket : []).filter((f) => f && f.f && Number(f.at) > 0)
         .map((f) => ({ f: f.f, g: Number(f.g) || 0, v: Number(f.v) || 0, at: Number(f.at), off: Number(f.off) || 0 })),
     };
@@ -2948,18 +2964,41 @@
       const f = rose.length === 1 ? rose[0] : fish ? fish.f : null;
       const c = { at, spot: p.spot, hook: p.hook, tide: p.tide, hour: p.hour, f };
       if (fish && fish.f === f) { c.g = fish.g; c.v = fish.v; }
+      // Bait used = what went down since the last reply (a thrown prawn counts too). If the bait on the hook didn't go
+      // down (bought more in between), one of it is assumed. Cost at the tackle hut's price (baitPrices).
+      const used = {};
+      Object.keys(p.bait).forEach((k) => { const d = ((last.bait || {})[k] || 0) - p.bait[k]; if (d > 0) used[k] = d; });
+      if (p.hook && !used[p.hook] && last.bait) used[p.hook] = 1;
+      if (Object.keys(used).length) { c.used = used; c.cost = Object.entries(used).reduce((s, [k, n]) => s + n * (baitPrices()[k] || 0), 0); }
       log.casts.push(c);
       if (log.casts.length > PIER_LOG_MAX) log.casts.splice(0, log.casts.length - PIER_LOG_MAX);
     }
-    if (!last || last.day !== day || last.today !== p.today || JSON.stringify(last.book) !== JSON.stringify(p.book)) {
-      log.last = { day, today: p.today, book: p.book, bucketAts: ats };
+    if (!last || last.day !== day || last.today !== p.today || JSON.stringify(last.book) !== JSON.stringify(p.book) || JSON.stringify(last.bait) !== JSON.stringify(p.bait)) {
+      log.last = { day, today: p.today, book: p.book, bait: p.bait, bucketAts: ats };
       GM_setValue(PIER_LOG_KEY, log);
     }
+  }
+  // Bait prices, each: from your Mews ("5 squid strips for $200.", kind pier_buy_bait) whenever one passes by; until then
+  // the ones seen on 2026-11-04 (worms $5, squid strips $40, prawns $50).
+  const BAIT_KEY = 'ms_bait_prices_v1';
+  const BAIT_NAMES = { worm: 'worms', worms: 'worms', 'squid strip': 'squid', 'squid strips': 'squid', squid: 'squid', prawn: 'prawns', prawns: 'prawns' };
+  function baitPrices() { return { worms: 5, squid: 40, prawns: 50, ...(GM_getValue(BAIT_KEY, null) || {}) }; }
+  function noteBaitPrices(events) {
+    const m = { ...(GM_getValue(BAIT_KEY, null) || {}) };
+    let changed = false;
+    (events || []).forEach((e) => {
+      const x = e && e.kind === 'pier_buy_bait' && String(e.body).match(/^(\d+) ([a-z ]+?) for \$([\d,]+)\./i);
+      const k = x && BAIT_NAMES[x[2].toLowerCase()];
+      const each = x && Number(x[3].replace(/,/g, '')) / Number(x[1]);
+      if (k && each > 0 && m[k] !== each) { m[k] = each; changed = true; }
+    });
+    if (changed) GM_setValue(BAIT_KEY, m);
   }
   let pierNotedAt = null;
   function notePierFromState() {
     if (!apiState || !apiState.pier || apiState.at === pierNotedAt) return;
     pierNotedAt = apiState.at;
+    noteBaitPrices(apiState.events);
     notePierCasts(apiState.pier, apiState.at);
     noteFish(apiState.pier);
   }
@@ -2994,12 +3033,13 @@
     const usd = (n) => '$' + n0(n);
     const range = (a, b, f) => (a === b ? f(a) : `${f(a)}–${f(b)}`);
     const kgRange = (a, b) => (a === b ? kg(a) : `${(a / 1000).toFixed(1)}–${kg(b)}`);
+    const avg = (f) => (vals[f] ? vals[f].v / vals[f].n : -1);
     const kinds = [...new Set([...Object.keys(vals), ...Object.keys(p.book)])]
-      .sort((a, b) => ((vals[b] && vals[b].perKg) || -1) - ((vals[a] && vals[a].perKg) || -1) || (p.book[b] || 0) - (p.book[a] || 0));
+      .sort((a, b) => avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0));
     return kinds.map((f) => {
       const k = vals[f], caught = p.book[f], best = p.best[f];
       const parts = [];
-      if (k) parts.push(`~${usd(k.perKg)}/kg`, `${k.n} seen, ${kgRange(k.minG, k.maxG)}, ${range(k.minV, k.maxV, usd)}`);
+      if (k) parts.push(`avg ${usd(k.v / k.n)} a catch`, `${k.n} seen, ${kgRange(k.minG, k.maxG)}, ${range(k.minV, k.maxV, usd)}`);
       if (caught) parts.push(`caught ${caught}` + (best > 0 ? `, best ${kg(best)}${k ? ` (~${usd(Math.round((best * k.perKg) / 10000) * 10)})` : ''}` : ', no weight'));
       if (!k && best > 0) parts.push('value not seen yet');
       return `<div><b>${escHtml(fishName(f))}</b> ${parts.join(' · ')}</div>`;
@@ -3022,10 +3062,20 @@
       rows.push(`<div><b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))}. Next to go off: ${escHtml(fishName(fresh[0].f))} ${kg(fresh[0].g)} ` +
         `(${fmtMoney(fresh[0].v)}) in ${fmtLong(fresh[0].off - now)}.</div>`);
     }
+    // What a cast made: the fish's value (a fish logged without one counts at its kind's average; junk or nothing $0)
+    // minus the bait it used. Groups are sorted by average profit per cast, best first.
+    const fv = fishValues();
+    const castValue = (c) => (Number.isFinite(c.v) ? c.v : c.f && fv[c.f] ? fv[c.f].v / fv[c.f].n : 0);
+    const pm = (n) => (n < 0 ? '−$' : '$') + n0(Math.abs(n));
     const group = (key, name) => {
       const by = {};
-      casts.forEach((c) => { const g = by[c[key]] || (by[c[key]] = { n: 0, kinds: {} }); g.n++; const f = c.f || 'nothing'; g.kinds[f] = (g.kinds[f] || 0) + 1; });
-      return Object.entries(by).sort((a, b) => b[1].n - a[1].n).map(([k, g]) => `<div><b>${escHtml(name(k))}</b> (${g.n} cast${g.n > 1 ? 's' : ''}): ` +
+      casts.forEach((c) => {
+        const g = by[c[key]] || (by[c[key]] = { n: 0, kinds: {}, made: 0, bait: 0 });
+        g.n++; g.made += castValue(c); g.bait += c.cost || 0;
+        const f = c.f || 'nothing'; g.kinds[f] = (g.kinds[f] || 0) + 1;
+      });
+      return Object.entries(by).sort((a, b) => (b[1].made - b[1].bait) / b[1].n - (a[1].made - a[1].bait) / a[1].n).map(([k, g]) =>
+        `<div><b>${escHtml(name(k))}</b> avg ${pm((g.made - g.bait) / g.n)} a cast (${pm(g.made / g.n)} fish − ${pm(g.bait / g.n)} bait, ${g.n} cast${g.n > 1 ? 's' : ''}): ` +
         Object.entries(g.kinds).sort((a, b) => b[1] - a[1]).map(([f, n]) => `${escHtml(f === 'nothing' ? 'nothing' : fishName(f))} ${n}`).join(', ') + '</div>').join('');
     };
     if (casts.length) {
@@ -3034,7 +3084,7 @@
       rows.push(`<div class="msx-pierlog-h">By tide</div>${group('tide', (k) => k)}`);
       rows.push(`<div class="msx-pierlog-h">Day or night</div>${group('hour', fishName)}`);
     } else rows.push('<div>No casts logged yet. Each cast you make from now on is logged with its spot, bait, tide and time of day.</div>');
-    if (values) rows.push(`<div class="msx-pierlog-h">Fish values (best per kg first; from every fish seen in your bucket)</div>${values}`);
+    if (values) rows.push(`<div class="msx-pierlog-h">Fish values (best average catch first; from every fish seen in your bucket)</div>${values}`);
     const html = `<div class="msx-pierlog-t">🎣 Your catch log (${casts.length} cast${casts.length === 1 ? '' : 's'}, kept on this computer)</div>${rows.join('')}`;
     if (box.innerHTML !== html) box.innerHTML = html;
   }
