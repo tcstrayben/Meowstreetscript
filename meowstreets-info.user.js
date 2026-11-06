@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.43.0
+// @version      0.43.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1013,6 +1013,7 @@
       #msx-pierlog { margin:10px 0; padding:8px 12px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.55; }
       #msx-pierlog .msx-pierlog-t { font-weight:600; margin-bottom:4px; }
       #msx-pierlog .msx-pierlog-h { margin-top:6px; opacity:.75; text-transform:uppercase; font-size:10px; letter-spacing:.05em; }
+      #msx-pierlog .msx-pierlog-where { opacity:.7; font-size:11px; padding-left:10px; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
@@ -2887,9 +2888,13 @@
       bait: Object.fromEntries(Object.entries(p.bait && typeof p.bait === 'object' ? p.bait : {}).filter(([, n]) => Number.isFinite(n))),
       bucket: (Array.isArray(p.bucket) ? p.bucket : []).filter((f) => f && f.f && Number(f.at) > 0)
         .map((f) => ({ f: f.f, g: Number(f.g) || 0, v: Number(f.v) || 0, at: Number(f.at), off: Number(f.off) || 0 })),
+      // The game's own notes on where each fish bites: { kind: [spot, ...] } (only kinds it has notes for).
+      notes: Object.fromEntries(Object.entries(p.notes && typeof p.notes === 'object' ? p.notes : {})
+        .map(([k, n]) => [k, ((n && Array.isArray(n.at)) ? n.at : []).map((a) => a && a.spot).filter(Boolean)]).filter(([, s]) => s.length)),
     };
   }
-  const PIER_SPOTS = { boards: 'Under the boards', outflow: 'The outflow', end: 'The end of the pier', fence: 'By the fence' };
+  // The game's own names (Fish book, 2026-11-06). Over the fence is marked Risky in the game.
+  const PIER_SPOTS = { boards: 'Under the boards', outflow: 'The outflow', end: 'The end', fence: 'Over the fence' };
   const spotName = (s) => PIER_SPOTS[s] || (s ? s.charAt(0).toUpperCase() + s.slice(1) : '?');
   const fishName = (f) => (f ? f.charAt(0).toUpperCase() + f.slice(1) : '?');
   const kg = (g) => (g / 1000).toFixed(1) + ' kg';
@@ -2918,19 +2923,24 @@
     const fresh = p.bucket.filter((f) => f.off > now).sort((a, b) => a.off - b.off);
     const worth = fresh.reduce((s, f) => s + f.v, 0);
     const reset = Date.parse(utcDay(now) + 'T00:00:00Z') + 86400000;
-    const casts = left > 0 ? `<b>${left}</b> cast${left > 1 ? 's' : ''} left` : `Casts back in ${fmtClock(reset - now)}`;
+    // The 10 a day are fish KEPT, not casts: a fish that gets away doesn't count or use bait, and past 10 the game
+    // says "the rest go back" (2026-11-06 log).
+    const casts = left > 0 ? `<b>${left}</b> to keep` : `New day in ${fmtClock(reset - now)}`;
     const next = fresh[0];
     const soonOff = next && next.off - now < 24 * 3600000 ? ` · 1st off ${fmtClock(next.off - now)}` : '';
-    const html = `${PIER_ICON}${casts}${fresh.length ? ` · ${fmtMoney(worth)}` : ''}${soonOff}`;
+    const td = tideNow();
+    const tideTag = td && td.at && td.at > now ? ` · ${td.next} ${fmtClock(td.at - now)}` : '';
+    const html = `${PIER_ICON}${casts}${fresh.length ? ` · ${fmtMoney(worth)}` : ''}${soonOff}${tideTag}`;
     if (el.innerHTML !== html) el.innerHTML = html;
     el.classList.toggle('soon', left > 0);
-    const lines = [`Pier Nine. ${left} of ${p.limit} casts left today (all back at 00:00 UTC, ${fmtTime(reset)} your time).`];
+    const lines = [`Pier Nine. ${left} of ${p.limit} fish left to keep today; after that they go back (new day at 00:00 UTC, ${fmtTime(reset)} your time).`];
     if (fresh.length) {
       lines.push(`Bucket: ${fresh.length} fish worth ${fmtMoney(worth)}.`);
       lines.push(`Next to go off: ${fishName(next.f)} ${kg(next.g)} (${fmtMoney(next.v)}), goes off at ${seenAt(next.off)}`);
     }
     const mine = pierBoard ? pierBoard.findIndex((b) => b.me) : -1;
     if (mine >= 0) lines.push(`This week's biggest: you are #${mine + 1} (${fishName(pierBoard[mine].fish)} ${kg(pierBoard[mine].grams)}).`);
+    if (td) lines.push(`Tide: ${tideLine(now)}.`);
     lines.push('Figures as of your last page load.');
     setTitle(el, lines.join('\n'));
   }
@@ -3001,6 +3011,59 @@
     noteBaitPrices(apiState.events);
     notePierCasts(apiState.pier, apiState.at);
     noteFish(apiState.pier);
+    noteTide(apiState.pier.tide, apiState.at);
+  }
+
+  // Tide clock (0.43.1, user request): the tide goes Low tide → Coming in → High tide → Going out. Each time a reading
+  // shows a new tide less than 30 min after the last one, the change is logged at the midpoint. A stage's length is
+  // measured when both its start and its end were seen that way with no gap over 2 h in between. The next change is
+  // then: this stage's start + its average length; or, once all four lengths are known, a past change into this
+  // tide moved forward by whole cycles. Nothing is guessed before there is data.
+  const TIDE_KEY = 'ms_pier_tide_v1'; // { run: { tide, lastAt, start }, changes: [{ from, to, at }], stages: [{ tide, ms }] }
+  const TIDES = ['Low tide', 'Coming in', 'High tide', 'Going out'];
+  const TIDE_GAP = 30 * 60000, TIDE_BREAK = 2 * 3600000, TIDE_MAX = 200;
+  function noteTide(tide, at) {
+    if (!tide || !at) return;
+    const t = GM_getValue(TIDE_KEY, null) || { run: null, changes: [], stages: [] };
+    const cur = t.run;
+    if (cur && cur.tide === tide && at - cur.lastAt < TIDE_BREAK) {
+      if (at <= cur.lastAt) return;
+      cur.lastAt = at;
+    } else {
+      let start = null;
+      if (cur && cur.tide !== tide && at > cur.lastAt && at - cur.lastAt <= TIDE_GAP) {
+        start = Math.round((cur.lastAt + at) / 2);
+        t.changes.push({ from: cur.tide, to: tide, at: start });
+        if (cur.start) t.stages.push({ tide: cur.tide, ms: start - cur.start });
+        ['changes', 'stages'].forEach((k) => { if (t[k].length > TIDE_MAX) t[k].splice(0, t[k].length - TIDE_MAX); });
+      }
+      t.run = { tide, lastAt: at, start };
+    }
+    GM_setValue(TIDE_KEY, t);
+  }
+  // { tide, next, at (expected change time or null), start, lens: { tide: [avg ms, count] }, changes }
+  function tideNow() {
+    const t = GM_getValue(TIDE_KEY, null);
+    if (!t || !t.run) return null;
+    const lens = {};
+    t.stages.forEach((s) => { const l = lens[s.tide] || (lens[s.tide] = [0, 0]); l[0] += s.ms; l[1]++; });
+    Object.values(lens).forEach((l) => { l[0] /= l[1]; });
+    const tide = t.run.tide, i = TIDES.indexOf(tide);
+    const next = i >= 0 ? TIDES[(i + 1) % 4] : null;
+    let start = t.run.start, at = null;
+    if (start && lens[tide]) at = start + lens[tide][0];
+    else if (next && TIDES.every((x) => lens[x])) {
+      const cycle = TIDES.reduce((s, x) => s + lens[x][0], 0);
+      const into = t.changes.filter((c) => c.to === tide).pop();
+      if (into) { start = into.at + Math.floor((t.run.lastAt - into.at) / cycle) * cycle; at = start + lens[tide][0]; }
+    }
+    return { tide, next, at, start, lens, changes: t.changes.length };
+  }
+  function tideLine(now) {
+    const td = tideNow();
+    if (!td) return '';
+    if (!td.at) return `${td.tide} (tide clock: ${td.changes} change${td.changes === 1 ? '' : 's'} seen, needs more)`;
+    return `${td.tide}, ${td.next} ${td.at > now ? `expected ~${fmtTime(td.at)} (in ~${fmtClock(td.at - now)})` : 'any time now'}`;
   }
 
   // Fish values (0.42.0, user request): every fish seen in your bucket, once each (kind + catch time), with its weight
@@ -3028,7 +3091,22 @@
     Object.values(by).forEach((k) => { k.perKg = k.g > 0 ? (k.v / k.g) * 1000 : 0; });
     return by;
   }
-  function fishValueRows(p) {
+  // Where and on what tide: the game's notes (spots it has unlocked for that fish), then your own logged catches of it
+  // counted by spot and by tide.
+  function fishWhere(p, f, casts) {
+    const count = (key, name) => {
+      const by = {};
+      casts.forEach((c) => { if (c.f === f && c[key]) by[c[key]] = (by[c[key]] || 0) + 1; });
+      return Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${escHtml(name(k))} ${n}`).join(', ');
+    };
+    const out = [];
+    if (p.notes[f]) out.push(`bites ${p.notes[f].map((s) => escHtml(spotName(s))).join(', ')} (game notes)`);
+    const spots = count('spot', spotName), tides = count('tide', (k) => k);
+    if (spots) out.push(`you caught it ${spots}`);
+    if (tides) out.push(`tide ${tides}`);
+    return out.length ? `<div class="msx-pierlog-where">${out.join(' · ')}</div>` : '';
+  }
+  function fishValueRows(p, casts) {
     const vals = fishValues();
     const usd = (n) => '$' + n0(n);
     const range = (a, b, f) => (a === b ? f(a) : `${f(a)}–${f(b)}`);
@@ -3042,7 +3120,7 @@
       if (k) parts.push(`avg ${usd(k.v / k.n)} a catch`, `${k.n} seen, ${kgRange(k.minG, k.maxG)}, ${range(k.minV, k.maxV, usd)}`);
       if (caught) parts.push(`caught ${caught}` + (best > 0 ? `, best ${kg(best)}${k ? ` (~${usd(Math.round((best * k.perKg) / 10000) * 10)})` : ''}` : ', no weight'));
       if (!k && best > 0) parts.push('value not seen yet');
-      return `<div><b>${escHtml(fishName(f))}</b> ${parts.join(' · ')}</div>`;
+      return `<div><b>${escHtml(fishName(f))}</b> ${parts.join(' · ')}${fishWhere(p, f, casts)}</div>`;
     }).join('');
   }
   // Pier page: the bucket and what bites where, from your own logged casts, under the game's dock.
@@ -3057,10 +3135,15 @@
     const fresh = p.bucket.filter((f) => f.off > now).sort((a, b) => a.off - b.off);
     const casts = (GM_getValue(PIER_LOG_KEY, null) || { casts: [] }).casts;
     const rows = [];
-    const values = fishValueRows(p);
+    const values = fishValueRows(p, casts);
     if (fresh.length) {
       rows.push(`<div><b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))}. Next to go off: ${escHtml(fishName(fresh[0].f))} ${kg(fresh[0].g)} ` +
         `(${fmtMoney(fresh[0].v)}) in ${fmtLong(fresh[0].off - now)}.</div>`);
+    }
+    const td = tideNow();
+    if (td) {
+      const lens = TIDES.filter((x) => td.lens[x]).map((x) => `${x} ${fmtLong(td.lens[x][0])} (${td.lens[x][1]})`).join(', ');
+      rows.push(`<div><b>Tide:</b> ${escHtml(tideLine(now))}.${lens ? `<div class="msx-pierlog-where">Stage lengths seen: ${escHtml(lens)}</div>` : ''}</div>`);
     }
     // What a cast made: the fish's value (a fish logged without one counts at its kind's average; junk or nothing $0)
     // minus the bait it used. Groups are sorted by average profit per cast, best first.
@@ -3084,7 +3167,7 @@
       rows.push(`<div class="msx-pierlog-h">By tide</div>${group('tide', (k) => k)}`);
       rows.push(`<div class="msx-pierlog-h">Day or night</div>${group('hour', fishName)}`);
     } else rows.push('<div>No casts logged yet. Each cast you make from now on is logged with its spot, bait, tide and time of day.</div>');
-    if (values) rows.push(`<div class="msx-pierlog-h">Fish values (best average catch first; from every fish seen in your bucket)</div>${values}`);
+    if (values) rows.push(`<div class="msx-pierlog-h">Fish values and where they bite (best average catch first)</div>${values}`);
     const html = `<div class="msx-pierlog-t">🎣 Your catch log (${casts.length} cast${casts.length === 1 ? '' : 's'}, kept on this computer)</div>${rows.join('')}`;
     if (box.innerHTML !== html) box.innerHTML = html;
   }
