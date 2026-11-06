@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.44.0
+// @version      0.44.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1464,6 +1464,13 @@
       body.heistsDone = apiState.heistsDone;
       if (apiState.heistRoles) body.heistRoles = apiState.heistRoles;
     }
+    // The highest cat id seen on the Players page (0.44.1, user request): the game's API can't say how many cats
+    // there are, so the crew bot's 🧲 Recruits list reads up to this id instead of guessing.
+    const newest = newestCatSeen();
+    if (newest > 0) body.newestCat = newest;
+    // This week's contract rewards from Crew → Contracts (0.44.1, user request), for the bot's 💰 Contract pay.
+    const pay = contractPayForBot();
+    if (pay) body.contractPay = pay;
     return body;
   }
 
@@ -2134,6 +2141,7 @@
   // No links or whisper buttons: opening a whisper means clicking the game's own chat for you.
   const players = { api: new Map(), rows: new Map(), total: null, seenBefore: undefined };
   const PLAYERS_SEEN_KEY = 'ms_players_seen_v1'; // highest cat id seen on an earlier visit
+  function newestCatSeen() { return Number(GM_getValue(PLAYERS_SEEN_KEY, 0)) || 0; }
   const NEW_CAT_MS = 24 * 3600000;
   const playerListOpen = { 'msx-nocrew': false, 'msx-newcats': false };
   const isPlayersPage = () => location.pathname.replace(/\/+$/, '') === '/players';
@@ -2773,6 +2781,14 @@
   // Shown in the sidebar crew box, on the crime it counts (blue), and as a line on the pages an attack or heist
   // contract is about. Crew things are light blue.
   const CONTRACTS_KEY = 'ms_crew_contracts_v1';
+  // For the crew bot (sharing on): each contract's id, name, what it counts and the crew's cash reward for it
+  // (`reward`); nothing else, nothing of yours.
+  function contractPayForBot() {
+    const saved = GM_getValue(CONTRACTS_KEY, null);
+    if (!saved || !(saved.ends > Date.now()) || !Array.isArray(saved.list)) return null;
+    const list = saved.list.filter((c) => c.pay && Number.isFinite(Number(c.pay.cash))).map((c) => ({ id: c.id, name: c.name, counts: c.counts, reward: Number(c.pay.cash) }));
+    return list.length ? { ends: saved.ends, list } : null;
+  }
   function onCrewContractsResponse(json) {
     if (!json || !Array.isArray(json.contracts)) return;
     GM_setValue(CONTRACTS_KEY, {
@@ -4984,7 +5000,7 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned and other cats\' gear and stats from your fights (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats and the crew\'s ⚔️ last-seen gear; nothing else, never sent to MeowStreets)</label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page and the crew contracts\' cash rewards (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list and contract payouts; nothing else, never sent to MeowStreets)</label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
