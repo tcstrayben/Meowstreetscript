@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.44.2
+// @version      0.44.3
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -531,7 +531,7 @@
     // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
     // /api/crew/contracts (0.34.0) is the Crew > Contracts tab's own reply: what each crew contract counts.
     // /api/crew/attacks (0.35.0) is the Crew > Crew attacks log: mugs by the crew, for the 💰 muggable mark.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse, '/api/crew/attack': onCrewAttackResponse, '/api/pier': onPierResponse };
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew': onCrewResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse, '/api/crew/attack': onCrewAttackResponse, '/api/pier': onPierResponse };
     // /api/fight/<code> (0.42.0) is a fight page's own reply: both cats' gear, for the ⚔️ record. /api/pier and anything
     // under it (0.42.0): the Pier page's weekly board, and the pier itself if a cast's reply carries it.
     const handlerFor = (path) => HANDLERS[path] || (/^\/api\/fight\/[\w-]+$/.test(path) ? onFightResponse : /^\/api\/pier\//.test(path) ? onPierResponse : null);
@@ -1478,6 +1478,9 @@
     // This week's contract rewards from Crew → Contracts (0.44.1, user request), for the bot's 💰 Contract pay.
     const pay = contractPayForBot();
     if (pay) body.contractPay = pay;
+    // Treasury payments to members from the Crew page (0.44.3), so the bot can tick contract pay off by itself.
+    const tp = treasuryPaysForBot();
+    if (tp) body.treasuryPays = tp;
     return body;
   }
 
@@ -2800,6 +2803,24 @@
     if (!saved || !(saved.ends > Date.now()) || !Array.isArray(saved.list)) return null;
     const list = saved.list.filter((c) => c.pay && Number.isFinite(Number(c.pay.cash))).map((c) => ({ id: c.id, name: c.name, counts: c.counts, reward: Number(c.pay.cash) }));
     return list.length ? { ends: saved.ends, list } : null;
+  }
+
+  // Treasury payments to members (0.44.3, user request: tick contract pay off by itself). The Crew page's own reply
+  // (/api/crew) carries the crew's treasury ledger; payments to a member are reason crew_pay, actor = who got it
+  // (crew job cuts too; the bot only uses ones that match what's owed). Kept: the last 60 of those, nothing else.
+  const TREASURY_PAYS_KEY = 'ms_treasury_pays_v1';
+  function onCrewResponse(json) {
+    if (!json || !Array.isArray(json.ledger)) return;
+    const list = json.ledger.filter((l) => l && l.reason === 'crew_pay' && typeof l.actor === 'string' && Number(l.amount) > 0 && Number(l.at) > 0)
+      .slice(0, 60).map((l) => ({ name: l.actor, amount: Number(l.amount), at: Number(l.at) }));
+    GM_setValue(TREASURY_PAYS_KEY, { at: Date.now(), list });
+    shareCrew();
+  }
+  // For the crew bot (sharing on): the last week of them.
+  function treasuryPaysForBot() {
+    const saved = GM_getValue(TREASURY_PAYS_KEY, null);
+    const list = saved && Array.isArray(saved.list) ? saved.list.filter((p) => p.at > Date.now() - 8 * 86400000) : [];
+    return list.length ? list : null;
   }
 
   // 💰 Each member's share of a crime contract's cash reward, right in the contract on Crew → Contracts (0.44.2, user
@@ -5046,7 +5067,7 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page and the crew contracts\' cash rewards (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list and contract payouts; nothing else, never sent to MeowStreets)</label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list and contract payouts; nothing else, never sent to MeowStreets)</label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
