@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.44.1
+// @version      0.44.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1020,6 +1020,12 @@
       .msx-cafe b, .msx-pier b { font-weight:600; }
       #msx-pierlog { margin:10px 0; padding:8px 12px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.55; }
       #msx-pierlog .msx-pierlog-t { font-weight:600; margin-bottom:4px; }
+      .msx-kpay { margin-top:8px; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); font-size:12px; }
+      .msx-kpay-h b, .msx-kpay-me b { color:var(--ms-gold, #e9c46a); }
+      .msx-kpay-me { margin-top:2px; }
+      .msx-kpay-all summary { cursor:pointer; opacity:.8; margin-top:2px; }
+      .msx-kpay-all div { padding-left:10px; }
+      .msx-kpay-all span { opacity:.6; font-size:11px; }
       #msx-pierlog .msx-pierlog-h { margin-top:6px; opacity:.75; text-transform:uppercase; font-size:10px; letter-spacing:.05em; }
       #msx-pierlog .msx-pierlog-where { opacity:.7; font-size:11px; padding-left:10px; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
@@ -1412,6 +1418,7 @@
   // page and the "Copy for Discord" message already show. Never your account, cash, email or messages. Nothing is
   // ever sent to MeowStreets itself. The bot ignores every crew but its own.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
+  const CONTRACT_CUT_KEY = 'ms_contract_cut_v1'; // { cut, ends, paid: { contractId: [catId] }, at } from the crew bot's replies
   const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
   const CREW_BOT_CHAIN_URL = 'http://168.138.79.225:3001/v1/chain'; // the ⛓️ button on the Crew page
   const CREW_BOT_FEATS_URL = 'http://168.138.79.225:3001/v1/feats'; // hidden feats found by the crew (Merits page)
@@ -1481,6 +1488,11 @@
       headers: { 'Content-Type': 'application/json' },
       onload: (r) => {
         let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
+        // The crew's cut of contract rewards and who's been paid, set by the leaders on the bot (0.44.2).
+        if (j && j.contractPay && typeof j.contractPay === 'object' && Number.isFinite(Number(j.contractPay.cut))) {
+          GM_setValue(CONTRACT_CUT_KEY, { cut: Number(j.contractPay.cut), ends: Number(j.contractPay.ends) || null, paid: j.contractPay.paid && typeof j.contractPay.paid === 'object' ? j.contractPay.paid : {}, at: Date.now() });
+          schedule();
+        }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
       onerror: () => { if (done) done({ ok: false, error: 'could not reach the crew bot' }); },
@@ -2789,6 +2801,38 @@
     const list = saved.list.filter((c) => c.pay && Number.isFinite(Number(c.pay.cash))).map((c) => ({ id: c.id, name: c.name, counts: c.counts, reward: Number(c.pay.cash) }));
     return list.length ? { ends: saved.ends, list } : null;
   }
+
+  // 💰 Each member's share of a crime contract's cash reward, right in the contract on Crew → Contracts (0.44.2, user
+  // request). The leaders set the crew's cut on the crew bot (it comes back in the bot's replies while sharing is
+  // on); the rest is split by everyone's count toward it: floor((reward − cut) × count ÷ all counts), the same sum
+  // the bot's 💰 Contract pay uses. ✅ = a leader marked it paid. Counts as of the last time this tab loaded.
+  function drawContractPay() {
+    const cards = location.pathname.replace(/\/+$/, '') === '/crew' ? document.querySelectorAll('li.tf-kc') : [];
+    const saved = GM_getValue(CONTRACTS_KEY, null);
+    const cfg = GM_getValue(CONTRACT_CUT_KEY, null);
+    const usd = (n) => '$' + n0(n);
+    cards.forEach((li) => {
+      const name = ((li.querySelector('h4') || {}).textContent || '').trim();
+      const c = saved && saved.ends > Date.now() && Array.isArray(saved.list) ? saved.list.find((x) => x.name === name) : null;
+      const cash = c && c.pay ? Number(c.pay.cash) : NaN;
+      let box = li.querySelector(':scope > .msx-kpay');
+      if (!c || c.counts !== 'crime' || !Number.isFinite(cash) || !cfg || !Array.isArray(c.shares) || !c.shares.length) { if (box) box.remove(); return; }
+      const pool = Math.floor((cash * (100 - cfg.cut)) / 100);
+      const total = c.shares.reduce((a, s) => a + s.got, 0);
+      const paid = new Set(cfg.ends === saved.ends && Array.isArray(cfg.paid[c.id]) ? cfg.paid[c.id] : []);
+      const word = (id) => (paid.has(id) ? 'paid' : c.done ? 'owed' : 'so far');
+      const rows = c.shares.filter((s) => s.got > 0).sort((a, b) => b.got - a.got).map((s) => ({ ...s, owed: total ? Math.floor((pool * s.got) / total) : 0 }));
+      const me = rows.find((s) => apiState && s.id === apiState.myId);
+      const html = `<div class="msx-kpay-h">💰 Crew keeps ${cfg.cut}% (${usd(cash - pool)}) · <b>${usd(pool)}</b> split by contribution</div>` +
+        (me ? `<div class="msx-kpay-me">You: ${n0(me.got)} → <b>${usd(me.owed)}</b> ${paid.has(me.id) ? '✅ paid' : word(me.id)}</div>` : '') +
+        `<details class="msx-kpay-all"><summary>Everyone's share (${rows.length})</summary>` +
+        rows.map((s) => `<div>${paid.has(s.id) ? '✅ ' : ''}${escHtml(s.name)} ${n0(s.got)} → ${usd(s.owed)} <span>${word(s.id)}</span></div>`).join('') + '</details>';
+      if (!box) { box = document.createElement('div'); box.className = 'msx-kpay'; }
+      const after = li.querySelector(':scope > .tf-kwho') || li.lastElementChild;
+      if (after && after.nextElementSibling !== box && after !== box) after.after(box);
+      if (box.__msxHtml !== html) { const open = box.querySelector('details') && box.querySelector('details').open; box.innerHTML = html; box.__msxHtml = html; if (open) box.querySelector('details').open = true; }
+    });
+  }
   function onCrewContractsResponse(json) {
     if (!json || !Array.isArray(json.contracts)) return;
     GM_setValue(CONTRACTS_KEY, {
@@ -2797,6 +2841,8 @@
         id: String(c.id), name: c.name || String(c.id), counts: typeof c.counts === 'string' ? c.counts : null, task: c.task || '', rule: c.rule || '',
         level: Number.isFinite(c.level) ? c.level : null, goal: Number(c.goal) || 0, got: Number(c.got) || 0, done: !!c.done,
         mine: Number.isFinite(c.mine) ? c.mine : null, pay: c.pay && typeof c.pay === 'object' ? c.pay : null,
+        // Everyone's count toward it (0.44.2): for each member's share of the reward on this tab.
+        shares: Array.isArray(c.shares) ? c.shares.filter((s) => s && Number.isFinite(Number(s.id))).map((s) => ({ id: Number(s.id), name: String(s.name || '?'), got: Number(s.got) || 0 })) : [],
       })),
     });
     schedule();
@@ -5109,6 +5155,7 @@
       updateCafePill();
       updatePierPill();
       drawPierLog();
+      drawContractPay();
       ensureChainPostButton();
       ensureMyCrewJobPanel();
       ensureMyHeistPanel();
@@ -5141,7 +5188,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
