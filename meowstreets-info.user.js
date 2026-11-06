@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.43.1
+// @version      0.44.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -16,6 +16,7 @@
 // @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @connect      168.138.79.225
+// @connect      meowstreets.com
 // ==/UserScript==
 
 (function () {
@@ -812,7 +813,11 @@
       .msx-stock small.msx-mtrend.rising b { color:var(--ms-lime, #b4df87); }
       .msx-stock small.msx-mtrend.stalled b { color:var(--ms-gold, #e9c46a); }
       .msx-stock small.msx-mtrend.falling b { color:var(--ms-red, #eb6561); }
-      .msx-stock .msx-moves, .msx-stock .msx-range, .msx-stock .msx-perk-status { flex-basis:100%; }
+      .msx-stock .msx-moves, .msx-stock .msx-range, .msx-stock .msx-perk-status, .msx-stock .msx-rangeset { flex-basis:100%; }
+      .msx-stock.msx-stock-card > * { text-align:center; }
+      /* A stock you hold none of: the game's purchases area is just "Nothing bought yet"; stack the box under it. */
+      .xr-blocks.is-empty:has(> .msx-stock-card) { display:block; text-align:center; }
+      .msx-stock .msx-rangeset input { width:4.5em; padding:1px 4px; font:inherit; color:var(--ms-bone, #e7ede1); background:transparent; border:1px solid var(--ms-line, rgba(231,237,225,.25)); border-radius:4px; text-align:center; }
       .msx-stock .msx-perk-status b { color:var(--ms-lime, #b4df87); }
       .msx-stock .msx-moves b { font-weight:700; color:var(--ms-bone, #e7ede1); }
       .msx-stock .msx-moves b.up { color:var(--ms-lime, #b4df87); }
@@ -946,6 +951,9 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
       #msx-account h2 { margin:0 0 2px; font-size:17px; }
       #msx-account h3 { margin:16px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
+      #msx-account .msx-acc-key { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
+      #msx-account .msx-acc-key input { flex:1 1 220px; min-width:0; padding:4px 6px; font:inherit; color:inherit; background:transparent; border:1px solid var(--ms-line, rgba(231,237,225,.25)); border-radius:4px; }
+      #msx-account .msx-acc-key .msx-bad { color:var(--ms-red, #eb6561); }
       #msx-account p { margin:4px 0; }
       #msx-account .msx-acc-sub { color:var(--ms-smoke, #8d9289); }
       #msx-account .msx-acc-row { display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:10px 0 4px; }
@@ -1744,7 +1752,67 @@
     const until = x ? x.at + mugSafeMs() : 0;
     return until > Date.now() ? { until, at: x.at, by: x.by } : null;
   }
-  const safeTitle = (s) => `Lying low: mugged${s.by ? ' by ' + s.by : ''} at ${clockAt(s.at)}, safe from muggers for an hour, so it can be mugged again at ${clockAt(s.until)} (your time).`;
+  const safeTitle = (s) => (s.api
+    ? `Lying low: safe from muggers until ${clockAt(s.until)} (your time), from the game's own shield time (game API, your key).`
+    : `Lying low: mugged${s.by ? ' by ' + s.by : ''} at ${clockAt(s.at)}, safe from muggers for an hour, so it can be mugged again at ${clockAt(s.until)} (your time).`);
+
+  // ─── Game API key (0.44.0, user request): the game's official read-only API, opt-in ─────────
+  // The game invites tools to read through https://meowstreets.com/api/v1/ with a key the player makes (Account in
+  // the game; see api-v1-reference.md). With a key saved on the Account page, the script reads one thing: a lying-low
+  // cat's `status.shield_until` from /v1/cat/<id>, so "🛡️ ready" also shows for cats nobody in the crew mugged. At most
+  // one read every 3 s (the game allows 60 a minute), each cat remembered 5 min, in memory only. The key is kept in
+  // this browser and sent only to meowstreets.com, never to the crew bot. No key: nothing is read, as before.
+  const API_KEY_KEY = 'ms_api_key_v1';
+  const apiKey = () => String(GM_getValue(API_KEY_KEY, '') || '').trim();
+  const CAT_API_TTL = 5 * 60000, CAT_API_GAP = 3000, CAT_API_QUEUE = 20;
+  const catApi = new Map(); // id -> { at, shieldUntil, jailUntil, lyingLow }
+  const catApiQueue = [];
+  let catApiBusy = false, catApiWaitUntil = 0, apiKeyState = null; // apiKeyState: { ok, text } for the Account page
+  function apiGet(route, cb) {
+    GM_xmlhttpRequest({
+      method: 'GET', url: 'https://meowstreets.com/api/v1/' + route, headers: { Authorization: 'Bearer ' + apiKey() }, timeout: 15000,
+      onload: (r) => {
+        let j = null;
+        try { j = JSON.parse(r.responseText); } catch (e) { /* not JSON */ }
+        const ra = Number(((r.responseHeaders || '').match(/retry-after:\s*(\d+)/i) || [])[1]);
+        cb(j, r.status, ra);
+      },
+      onerror: () => cb(null, 0, 0), ontimeout: () => cb(null, 0, 0),
+    });
+  }
+  function wantCat(id) {
+    if (!apiKey()) return;
+    const c = catApi.get(String(id));
+    if ((c && Date.now() - c.at < CAT_API_TTL) || catApiQueue.includes(String(id)) || catApiQueue.length >= CAT_API_QUEUE) return;
+    catApiQueue.push(String(id));
+    pumpCatApi();
+  }
+  function pumpCatApi() {
+    if (catApiBusy || !catApiQueue.length) return;
+    const wait = catApiWaitUntil - Date.now();
+    if (wait > 0) { setTimeout(pumpCatApi, wait); return; }
+    const id = catApiQueue.shift();
+    catApiBusy = true;
+    apiGet('cat/' + id, (j, status, ra) => {
+      catApiBusy = false;
+      if (j && j.ok && j.data && j.data.status) {
+        const s = j.data.status;
+        catApi.set(id, { at: Date.now(), shieldUntil: Number(s.shield_until) || null, jailUntil: Number(s.jail_until) || null, lyingLow: s.lying_low === true });
+        schedule();
+      } else if (status === 429) catApiWaitUntil = Date.now() + (ra > 0 ? ra * 1000 : 60000);
+      else if (status === 401 || status === 403) {
+        catApiWaitUntil = Date.now() + 10 * 60000;
+        catApiQueue.length = 0;
+        apiKeyState = { ok: false, text: `The game refused the key (${(j && j.error && j.error.code) || status}).` };
+      }
+      setTimeout(pumpCatApi, CAT_API_GAP);
+    });
+  }
+  // A lying-low cat's shield time from the API, when there is one: { until, api: true }.
+  function apiSafeUntil(id) {
+    const c = catApi.get(String(id));
+    return c && c.shieldUntil > Date.now() ? { until: c.shieldUntil, api: true } : null;
+  }
   const safeTag = (id, lyingLow) => {
     const s = safeUntil(id, lyingLow);
     return s ? ` <span class="msx-lowtag" title="${escHtml(safeTitle(s))}">🛡️ ready ${clockAt(s.until)}</span>` : '';
@@ -2007,7 +2075,9 @@
     document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
       const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
       const info = m && playerInfo(m[1]);
-      const s = m ? safeUntil(m[1], info ? info.lyingLow : undefined) : null;
+      // With an API key, a lying-low cat gets the game's own shield time (0.44.0); otherwise our mug time + 1 h.
+      if (m && info && info.lyingLow) wantCat(m[1]);
+      const s = m ? (info && info.lyingLow && apiSafeUntil(m[1])) || safeUntil(m[1], info ? info.lyingLow : undefined) : null;
       const host = b.parentElement;
       let tag = host && host.querySelector(':scope > .msx-lowtag');
       if (!s) { if (tag) tag.remove(); return; }
@@ -2296,11 +2366,28 @@
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
   }
 
+  // Which history counts (0.43.2, user request): the market climbed 7–19 Oct and has gone up and down in a new, higher
+  // range since ~20 Oct, so the lowest price ever seen is from before the climb. `days` keeps only the last N days (all
+  // stocks); a stock's `floors[id]` is your own floor: it counts as the lowest, and prices under it are left out.
+  const STOCK_RANGE_KEY = 'ms_stock_range_v1'; // { days: number|null, floors: { id: $ } }
+  function stockRange() {
+    const r = GM_getValue(STOCK_RANGE_KEY, null) || {};
+    return { days: Number(r.days) > 0 ? Number(r.days) : null, floors: r.floors && typeof r.floors === 'object' ? r.floors : {} };
+  }
+  function setStockRange(change) {
+    const r = { ...stockRange(), ...change };
+    GM_setValue(STOCK_RANGE_KEY, r);
+    schedule();
+  }
+
   function stockStats(id, currentPrice) {
     const obs = (loadDb().stocks[id]?.obs) || [];
+    const { days, floors } = stockRange();
+    const floor = Number(floors[id]) > 0 ? Number(floors[id]) : null;
+    const from = days ? Math.floor((Date.now() - days * 86400000) / PERIOD_MS) : -Infinity;
     // One price per price-period: keep the latest reading in each period.
     const bySlot = new Map();
-    obs.forEach((o) => { const k = periodOf(o); if (k != null) bySlot.set(k, o.price); });
+    obs.forEach((o) => { const k = periodOf(o); if (k != null && k >= from && (!floor || o.price >= floor)) bySlot.set(k, o.price); });
     const entries = [...bySlot.entries()].sort((a, b) => a[0] - b[0]);
     const prices = entries.map((e) => e[1]);
     // Each move between two neighbouring 15-minute periods: +1 up, -1 down, 0 unchanged. A gap (a period the script
@@ -2311,7 +2398,7 @@
     }
     const n = prices.length;
     if (!n) return null;
-    const min = Math.min(...prices), max = Math.max(...prices);
+    const min = floor || Math.min(...prices), max = Math.max(...prices);
     const avg = prices.reduce((a, b) => a + b, 0) / n;
     const below = prices.filter((p) => p < currentPrice).length;
     const equal = prices.filter((p) => p === currentPrice).length;
@@ -2326,12 +2413,12 @@
     // Two views of "how high is it": the percentile counts how many recorded periods were lower (a price that sat at its
     // top for a long time can rank mid even one dollar below it), and the range position is how far up between the lowest
     // and highest price seen. Either one near an end counts.
-    const pos = max > min ? (currentPrice - min) / (max - min) : 0.5;
+    const pos = max > min ? Math.max(0, (currentPrice - min) / (max - min)) : 0.5;
     let verdict = 'learn';
     if (n >= MIN_TICKS_FOR_VERDICT) {
       verdict = flat ? 'flat' : (pct >= HIGH_PCT || pos >= HIGH_PCT) ? 'high' : (pct <= LOW_PCT || pos <= LOW_PCT) ? 'low' : 'mid';
     }
-    return { prices, n, min, max, avg, pct, pos, trend, verdict, moves, mw: windowsOf(moves) };
+    return { prices, n, min, max, avg, pct, pos, trend, verdict, moves, mw: windowsOf(moves), days, floor };
   }
 
   const ordinal = (n) => { const r = n % 100; const sfx = r >= 11 && r <= 13 ? 'th' : ({ 1: 'st', 2: 'nd', 3: 'rd' }[n % 10] || 'th'); return n + sfx; };
@@ -2483,7 +2570,13 @@
     const blocks = s.card.querySelector('.xr-blocks');
     const fine = blocks && blocks.querySelector('.sx-fine');
     let box = old && s.card.contains(old) ? old : null;
-    if (!box) { old?.remove(); box = document.createElement('div'); box.className = 'msx-stock msx-stock-card'; }
+    if (!box) {
+      old?.remove(); box = document.createElement('div'); box.className = 'msx-stock msx-stock-card';
+      box.addEventListener('change', onStockRangeChange);
+      box.addEventListener('keydown', (e) => { if (e.key === 'Enter' && e.target.tagName === 'INPUT') e.target.blur(); });
+    }
+    // While typing in its own inputs, the box is left alone (a redraw would drop what's typed).
+    if (box.contains(document.activeElement) && document.activeElement.tagName === 'INPUT') return;
     if (fine) { if (fine.nextElementSibling !== box) fine.after(box); }
     else if (blocks) { if (box.parentElement !== blocks) blocks.appendChild(box); }
     else { const body = s.card.querySelector('.xr-bigbody'); if (!body) { box.remove(); return; } if (body.nextElementSibling !== box) body.after(box); }
@@ -2511,7 +2604,7 @@
         el.classList.toggle('msx-price-high', isPrice && v === 'high');
         el.classList.toggle('msx-price-mid', isPrice && !!verdictKnown && !v);
       });
-      setTitle(a, v ? `MeowStreets Extra Info: looks ${v.toUpperCase()} (${Math.round(st.pos * 100)}% of range, lowest seen $${st.min}, highest $${st.max})` : '');
+      setTitle(a, v ? `MeowStreets Extra Info: looks ${v.toUpperCase()} (${Math.round(st.pos * 100)}% of range, ${st.floor ? 'your floor' : 'lowest seen'} $${st.min}, highest $${st.max})` : '');
     });
   }
 
@@ -2526,8 +2619,25 @@
       `<span class="msx-trend" title="Average of the last 3 price moves vs the 3 before">${st.n >= 6 ? arrow : ''}</span>` +
       `<small class="msx-moves" title="How many of the last 10 and last 25 price moves went up (↑), down (↓) or stayed the same (=). Only counts moves the script saw one after another, so a gap in the record is skipped.">${movesHtml(st.mw)}</small>` +
       `<small class="msx-range" title="Lowest / highest price this script has recorded, over ${st.n} price moves (avg $${st.avg.toFixed(1)})">` +
-      `Lowest seen <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${perkCost}</small>` +
-      perkTimingHtml(s.name);
+      `${st.floor ? 'Your floor' : 'Lowest seen'} <b>$${st.min}</b> · Highest seen <b>$${st.max}</b> · Avg $${st.avg.toFixed(0)}${st.days ? ` (last ${st.days} days)` : ''}${perkCost}</small>` +
+      stockRangeHtml(s.id, st) + perkTimingHtml(s.name);
+  }
+  // The box's own settings line: how many days of history count, and this stock's floor. Blank = all / none.
+  function stockRangeHtml(id, st) {
+    return `<small class="msx-rangeset" title="Which recorded prices the verdict uses. Days: only the last N days, for every stock (blank = all). Floor: your own lowest price for this stock; prices under it are left out (blank = none). Press Enter or click away to save.">` +
+      `Count the last <input class="msx-rs-days" inputmode="numeric" size="3" placeholder="all" value="${st.days || ''}"> days · ` +
+      `Floor $<input class="msx-rs-floor" data-co="${escHtml(id)}" inputmode="numeric" size="5" placeholder="none" value="${st.floor || ''}"></small>`;
+  }
+  function onStockRangeChange(e) {
+    const t = e.target;
+    if (!t.classList) return;
+    const v = Math.floor(Number(String(t.value).replace(/[$,\s]/g, '')));
+    if (t.classList.contains('msx-rs-days')) setStockRange({ days: v > 0 ? v : null });
+    else if (t.classList.contains('msx-rs-floor') && t.dataset.co) {
+      const floors = { ...stockRange().floors };
+      if (v > 0) floors[t.dataset.co] = v; else delete floors[t.dataset.co];
+      setStockRange({ floors });
+    }
   }
 
   // ─── Stock tick countdown (sidebar, every page) ───────────────────────────
@@ -4870,12 +4980,37 @@
     box.id = 'msx-account';
     box.innerHTML =
       '<h2>MeowStreets Extra Info</h2>' +
-      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer; it sends nothing anywhere.</p>' +
+      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. It only sends or asks for anything if you turn on crew sharing or save a game API key below.</p>' +
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned and other cats\' gear and stats from your fights (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats and the crew\'s ⚔️ last-seen gear; nothing else, never sent to MeowStreets)</label></div>';
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned and other cats\' gear and stats from your fights (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats and the crew\'s ⚔️ last-seen gear; nothing else, never sent to MeowStreets)</label></div>' +
+      '<h3>Game API key (optional)</h3>' +
+      '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
+      '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
     host.appendChild(box);
+    box.querySelector('#msx-acc-keysave').addEventListener('click', () => {
+      const v = box.querySelector('#msx-acc-key').value.trim();
+      if (!/^ms_[\w-]{20,}$/.test(v)) { apiKeyState = { ok: false, text: 'That doesn\'t look like a key (they start with ms_).' }; updateAccountPanel(); return; }
+      GM_setValue(API_KEY_KEY, v);
+      box.querySelector('#msx-acc-key').value = '';
+      catApiWaitUntil = 0; catApi.clear();
+      apiKeyState = { ok: true, text: 'Checking…' };
+      updateAccountPanel();
+      apiGet('key', (j, status) => {
+        const d = j && j.ok && j.data;
+        apiKeyState = d
+          ? { ok: true, text: `✅ Works: "${d.label}", ${d.level} level, ${d.owner && d.owner.name}'s key.${d.level !== 'public' ? ' (A Public key is all this script needs.)' : ''}` }
+          : { ok: false, text: `The game refused it (${(j && j.error && j.error.code) || status || 'no answer'}).` };
+        updateAccountPanel();
+      });
+    });
+    box.querySelector('#msx-acc-keydel').addEventListener('click', () => {
+      GM_setValue(API_KEY_KEY, '');
+      catApi.clear(); catApiQueue.length = 0;
+      apiKeyState = { ok: true, text: 'Removed. Revoke it in the game too.' };
+      updateAccountPanel();
+    });
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
     box.querySelector('#msx-acc-share').addEventListener('change', (e) => { settings.shareCrew = e.target.checked; saveSettings(); if (settings.shareCrew) { shareCrew(); syncStocks(true); } });
@@ -4891,6 +5026,13 @@
     if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // only shown to the crew the bot serves
     if (sh.checked !== settings.shareCrew) sh.checked = settings.shareCrew;
     if (ev.checked !== settings.events) ev.checked = settings.events;
+    // The key itself is never shown again once saved.
+    const ki = box.querySelector('#msx-acc-key');
+    const ph = apiKey() ? 'Key saved (hidden). Paste a new one to replace it.' : 'ms_…';
+    if (ki && ki.placeholder !== ph) ki.placeholder = ph;
+    const ks = box.querySelector('#msx-acc-keystate');
+    const kt = apiKeyState ? apiKeyState.text : '';
+    if (ks && ks.textContent !== kt) { ks.textContent = kt; ks.className = apiKeyState && !apiKeyState.ok ? 'msx-bad' : ''; }
   }
 
   // ─── Wiring ───────────────────────────────────────────────────────────────
