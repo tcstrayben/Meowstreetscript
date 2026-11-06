@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.44.3
+// @version      0.45.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1015,6 +1015,7 @@
       .msx-halfxp { margin-left:4px; font-size:11px; color:var(--ms-gold, #e9c46a); white-space:nowrap; cursor:help; vertical-align:middle; }
       .cp-chips > .msx-halfxp { margin-left:0; }
       .msx-geartag { margin-left:4px; font-size:12px; cursor:help; vertical-align:middle; }
+      .msx-geartag.msx-hasstats { font-size:11px; color:var(--ms-smoke, #8d9289); white-space:nowrap; font-variant-numeric:tabular-nums; }
       #msx-catgear { margin:8px 0; padding:6px 10px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.5; }
       #msx-catgear .msx-catgear-stats { opacity:.85; }
       .msx-cafe b, .msx-pier b { font-weight:600; }
@@ -1999,7 +2000,18 @@
     return { gear, stats };
   }
   const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + '\nWhat they had then; they may have changed gear or trained since.'; };
-  const gearTag = (id) => { const g = catGear(id); return g ? ` <span class="msx-geartag" title="${escHtml(gearTitle(g))}">⚔️</span>` : ''; };
+  // Beside a name: "⚔️ 1,234 · DEX/DEF" (total, then the two biggest stats) once stats are known, else just ⚔️.
+  const STAT_ABBR = ['STR', 'DEF', 'SPD', 'DEX'];
+  function gearTagText(g) {
+    const st = g.st;
+    if (!st) return '⚔️';
+    const top = [0, 1, 2, 3].sort((a, b) => st[b] - st[a]).slice(0, 2).map((i) => STAT_ABBR[i]).join('/');
+    return `⚔️ ${n0(st[0] + st[1] + st[2] + st[3])} · ${top}`;
+  }
+  const gearTag = (id) => {
+    const g = catGear(id);
+    return g ? ` <span class="msx-geartag${g.st ? ' msx-hasstats' : ''}" title="${escHtml(gearTitle(g))}">${escHtml(gearTagText(g))}</span>` : '';
+  };
   // Profile pages: two lines under the Attack button's reason.
   function drawProfileGear() {
     const m = location.pathname.replace(/\/+$/, '').match(/^\/cat\/(\d+)$/);
@@ -2124,17 +2136,20 @@
       if (tag.textContent !== halfXpText(h)) tag.textContent = halfXpText(h);
       setTitle(tag, halfXpTitle(h));
     });
-    // ⚔️ last seen gear and stats (hover), last of all.
+    // ⚔️ last seen stats (total + top two) and gear (hover), last of all.
     document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
       const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
       const g = m ? catGear(m[1]) : null;
       const host = b.parentElement;
       let tag = host && host.querySelector(':scope > .msx-geartag');
       if (!g) { if (tag) tag.remove(); return; }
-      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-geartag'; tag.textContent = '⚔️'; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-geartag'; }
       const sibs = [...host.children].filter((x) => x === b || x.classList.contains('msx-muggable') || x.classList.contains('msx-lowtag') || x.classList.contains('msx-halfxp'));
       const after = sibs[sibs.length - 1];
       if (after.nextElementSibling !== tag) after.after(tag);
+      const text = gearTagText(g);
+      if (tag.textContent !== text) tag.textContent = text;
+      tag.classList.toggle('msx-hasstats', !!g.st);
       setTitle(tag, gearTitle(g));
     });
   }
