@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.45.1
+// @version      0.45.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1997,13 +1997,16 @@
       [g.lv != null ? 'Level ' + g.lv : null, 'Primary ' + gearName(g.p), 'Secondary ' + gearName(g.s), 'Thrown ' + gearName(g.t), 'Armour ' + gearName(g.a),
         g.hp != null ? n0(g.hp) + ' HP' : null].filter(Boolean).join(' · ');
     const st = g.st;
-    const stats = st ? `Str ${n0(st[0])} · Def ${n0(st[1])} · Spd ${n0(st[2])} · Dex ${n0(st[3])} (total ${n0(st[0] + st[1] + st[2] + st[3])})` +
+    const stats = st ? `STR ${n0(st[0])} · DEF ${n0(st[1])} · SPD ${n0(st[2])} · DEX ${n0(st[3])} (total ${n0(st[0] + st[1] + st[2] + st[3])})` +
       (Math.abs(g.stAt - g.at) > 60000 ? `, as of ${seenAt(g.stAt)}` : '') : 'Stats not seen yet (only your own fights show them).';
     return { gear, stats };
   }
   const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + '\nWhat they had then; they may have changed gear or trained since.'; };
   // Beside a name: "⚔️ 1,234 · DEX/DEF" (total, then the two biggest stats) once stats are known, else just ⚔️.
   const STAT_ABBR = ['STR', 'DEF', 'SPD', 'DEX'];
+  // Stats are always shown as STR/DEF/SPD/DEX (user request 2026-11-07), wherever the game spells them out.
+  const STAT_SHORT = { strength: 'STR', defense: 'DEF', defence: 'DEF', speed: 'SPD', dexterity: 'DEX' };
+  const statAbbr = (s) => STAT_SHORT[String(s).toLowerCase()] || s;
   function gearTagText(g) {
     const st = g.st;
     if (!st) return '⚔️';
@@ -3918,7 +3921,6 @@
   function loadGymLocks() { try { return JSON.parse(GM_getValue(GYM_LOCK_KEY, '{}')) || {}; } catch (e) { return {}; } }
   function saveGymLocks(locks) { GM_setValue(GYM_LOCK_KEY, JSON.stringify(locks)); }
   const gymAutoOn = () => GM_getValue(GYM_AUTO_KEY, '1') !== '0';
-  const capWord = (w) => w.charAt(0).toUpperCase() + w.slice(1);
   const onCatTree = () => location.pathname.replace(/\/+$/, '') === '/cat-tree';
 
   // For each stat: 'you' (your own lock), 'auto' (slower here than this gym's best) or null.
@@ -3989,18 +3991,18 @@
     const picked = pickedStat();
     const blocked = picked && why[picked];
     const chips = GYM_STATS.map((k) => `<button type="button" data-stat="${k}" class="msx-gl-chip${why[k] ? ' locked' : ''}" title="${
-      why[k] === 'auto' ? `Locked: this gym trains ${capWord(k)} slower than its best. Click to allow it here.`
+      why[k] === 'auto' ? `Locked: this gym trains ${statAbbr(k)} slower than its best. Click to allow it here.`
         : why[k] === 'you' ? 'Locked by you. Click to unlock.' : 'Click to lock: the Train button is blocked while this stat is picked.'
-    }">${why[k] ? '🔒' : '🔓'} ${capWord(k)}${x(k)}</button>`).join('');
+    }">${why[k] ? '🔒' : '🔓'} ${statAbbr(k)}${x(k)}</button>`).join('');
     const auto = `<label title="Lock every stat this gym trains slower than its best (the game's own multipliers). Never trains or clicks anything.">` +
       `<input type="checkbox" class="msx-gymauto"${gymAutoOn() ? ' checked' : ''}> Auto-lock slower stats${best ? ` (best here ×${best.toFixed(1)})` : ''}</label>`;
-    const note = blocked ? `<span class="msx-gl-note">Train is blocked: ${capWord(picked)} is locked${
+    const note = blocked ? `<span class="msx-gl-note">Train is blocked: ${statAbbr(picked)} is locked${
       blocked === 'auto' && gains ? ` (×${Number(gains[picked]).toFixed(1)} here, best ×${best.toFixed(1)})` : ''}. Click its chip to unlock.</span>` : '';
     const html = `<span>Locks:</span>${chips}${auto}${note}`;
     if (bar.dataset.html !== html) { bar.innerHTML = html; bar.dataset.html = html; }
     if (go.disabled !== !!blocked) go.disabled = !!blocked;
     go.classList.toggle('msx-train-locked', !!blocked);
-    setTitle(go, blocked ? `${capWord(picked)} is locked by MeowStreets Extra Info. Unlock it in the Locks row above.` : '');
+    setTitle(go, blocked ? `${statAbbr(picked)} is locked by MeowStreets Extra Info. Unlock it in the Locks row above.` : '');
   }
 
   // Backup for the moment between picking a stat and the next redraw: a click on Train while the picked stat is
@@ -4011,7 +4013,7 @@
     const stat = pickedStat();
     if (stat && gymLockReasons()[stat]) {
       e.preventDefault(); e.stopImmediatePropagation();
-      toast(`${capWord(stat)} is locked (MeowStreets Extra Info). Unlock it in the Locks row above Train.`);
+      toast(`${statAbbr(stat)} is locked (MeowStreets Extra Info). Unlock it in the Locks row above Train.`);
       applyGymLocks();
     }
   }, true);
@@ -4647,7 +4649,7 @@
       lines.push('', '🟡 Open:');
       if (openRoles.length) {
         openRoles.forEach((rk) => {
-          const stat = roles && roles[rk] && roles[rk].stat;
+          const stat = roles && roles[rk] && roles[rk].stat && statAbbr(roles[rk].stat);
           lines.push(`• ${roleTitle(rk)}${stat ? ` — needs ${stat}` : ''}`);
         });
       } else {
@@ -4681,7 +4683,7 @@
     const title = heist.name || 'Heist';
     const roles = (apiState && apiState.heistRoles) || {};
     const roleName = (r) => (roles[r] && roles[r].title) || r || 'someone';
-    const roleStat = (r) => (roles[r] && roles[r].stat) || null;
+    const roleStat = (r) => (roles[r] && roles[r].stat && statAbbr(roles[r].stat)) || null;
     const filled = heist.members || [];
     const seatsTotal = heist.maxMembers || filled.length;
     const openCount = Math.max(0, seatsTotal - filled.length);
