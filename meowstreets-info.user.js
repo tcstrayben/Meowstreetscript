@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.45.0
+// @version      0.45.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1492,9 +1492,11 @@
       headers: { 'Content-Type': 'application/json' },
       onload: (r) => {
         let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
-        // The crew's cut of contract rewards and who's been paid, set by the leaders on the bot (0.44.2).
+        // The crew's cut of contract rewards and who's been paid, set by the leaders on the bot (0.44.2), and who skips
+        // their pay (0.45.1, 🙅 on the bot).
         if (j && j.contractPay && typeof j.contractPay === 'object' && Number.isFinite(Number(j.contractPay.cut))) {
-          GM_setValue(CONTRACT_CUT_KEY, { cut: Number(j.contractPay.cut), ends: Number(j.contractPay.ends) || null, paid: j.contractPay.paid && typeof j.contractPay.paid === 'object' ? j.contractPay.paid : {}, at: Date.now() });
+          GM_setValue(CONTRACT_CUT_KEY, { cut: Number(j.contractPay.cut), ends: Number(j.contractPay.ends) || null, paid: j.contractPay.paid && typeof j.contractPay.paid === 'object' ? j.contractPay.paid : {},
+            skip: Array.isArray(j.contractPay.skip) ? j.contractPay.skip.map(Number).filter(Number.isFinite) : [], at: Date.now() });
           schedule();
         }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
@@ -2854,15 +2856,19 @@
       let box = li.querySelector(':scope > .msx-kpay');
       if (!c || c.counts !== 'crime' || !Number.isFinite(cash) || !cfg || !Array.isArray(c.shares) || !c.shares.length) { if (box) box.remove(); return; }
       const pool = Math.floor((cash * (100 - cfg.cut)) / 100);
-      const total = c.shares.reduce((a, s) => a + s.got, 0);
       const paid = new Set(cfg.ends === saved.ends && Array.isArray(cfg.paid[c.id]) ? cfg.paid[c.id] : []);
+      // 🙅 Skipped (and not already paid): their crimes count for nobody, as on the bot.
+      const skip = new Set(Array.isArray(cfg.skip) ? cfg.skip : []);
+      const out = (s) => skip.has(s.id) && !paid.has(s.id);
+      const total = c.shares.reduce((a, s) => a + (out(s) ? 0 : s.got), 0);
       const word = (id) => (paid.has(id) ? 'paid' : c.done ? 'owed' : 'so far');
-      const rows = c.shares.filter((s) => s.got > 0).sort((a, b) => b.got - a.got).map((s) => ({ ...s, owed: total ? Math.floor((pool * s.got) / total) : 0 }));
+      const rows = c.shares.filter((s) => s.got > 0).sort((a, b) => b.got - a.got).map((s) => ({ ...s, skip: out(s), owed: out(s) || !total ? 0 : Math.floor((pool * s.got) / total) }));
       const me = rows.find((s) => apiState && s.id === apiState.myId);
+      const line = (s) => (s.skip ? `🙅 ${escHtml(s.name)} ${n0(s.got)} <span>skipped</span>` : `${paid.has(s.id) ? '✅ ' : ''}${escHtml(s.name)} ${n0(s.got)} → ${usd(s.owed)} <span>${word(s.id)}</span>`);
       const html = `<div class="msx-kpay-h">💰 Crew keeps ${cfg.cut}% (${usd(cash - pool)}) · <b>${usd(pool)}</b> split by contribution</div>` +
-        (me ? `<div class="msx-kpay-me">You: ${n0(me.got)} → <b>${usd(me.owed)}</b> ${paid.has(me.id) ? '✅ paid' : word(me.id)}</div>` : '') +
+        (me ? `<div class="msx-kpay-me">${me.skip ? `You: ${n0(me.got)} · 🙅 skipped (your share goes to the others)` : `You: ${n0(me.got)} → <b>${usd(me.owed)}</b> ${paid.has(me.id) ? '✅ paid' : word(me.id)}`}</div>` : '') +
         `<details class="msx-kpay-all"><summary>Everyone's share (${rows.length})</summary>` +
-        rows.map((s) => `<div>${paid.has(s.id) ? '✅ ' : ''}${escHtml(s.name)} ${n0(s.got)} → ${usd(s.owed)} <span>${word(s.id)}</span></div>`).join('') + '</details>';
+        rows.map((s) => `<div>${line(s)}</div>`).join('') + '</details>';
       if (!box) { box = document.createElement('div'); box.className = 'msx-kpay'; }
       const after = li.querySelector(':scope > .tf-kwho') || li.lastElementChild;
       if (after && after.nextElementSibling !== box && after !== box) after.after(box);
