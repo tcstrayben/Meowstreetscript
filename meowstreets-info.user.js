@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.45.2
+// @version      0.46.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -483,7 +483,7 @@
 
   function onApiStateResponse(json) {
     const ex = extractApiState(json);
-    if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); schedule(); shareCrew(); syncGear(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+    if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); schedule(); shareCrew(); syncGear(); syncFish(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
 
   // ─── Tuna / catnip uses today (0.30.0, user request) ──────────────────────
@@ -1027,8 +1027,11 @@
       .msx-kpay-all summary { cursor:pointer; opacity:.8; margin-top:2px; }
       .msx-kpay-all div { padding-left:10px; }
       .msx-kpay-all span { opacity:.6; font-size:11px; }
-      #msx-pierlog .msx-pierlog-h { margin-top:6px; opacity:.75; text-transform:uppercase; font-size:10px; letter-spacing:.05em; }
-      #msx-pierlog .msx-pierlog-where { opacity:.7; font-size:11px; padding-left:10px; }
+      #msx-pierlog .msx-pf { width:100%; border-collapse:collapse; margin-top:6px; font-variant-numeric:tabular-nums; }
+      #msx-pierlog .msx-pf th { text-align:left; font-weight:600; font-size:10px; text-transform:uppercase; letter-spacing:.05em; opacity:.7; padding:2px 8px 2px 0; }
+      #msx-pierlog .msx-pf td { padding:3px 8px 3px 0; vertical-align:top; border-top:1px solid rgba(141,146,137,.2); }
+      #msx-pierlog .msx-pf td:nth-child(4), #msx-pierlog .msx-pf td:nth-child(5) { white-space:nowrap; }
+      #msx-pierlog .msx-pf-dim { opacity:.7; font-size:11px; }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
@@ -2164,6 +2167,7 @@
     if (path === '/players') markMuggableRows();
     if (/^\/cat\/\d+$/.test(path)) drawProfileHalfXp();
     syncGear(); // the crew's gear records, every 5 minutes while sharing is on
+    syncFish(); // your new catches, and the crew's fish table every 10 minutes on the Pier page
   }, 20000);
 
   // ─── "No crew" and "New cats" lists (Players page, 0.25.0; fixed + new cats 0.27.0) ─────
@@ -3105,15 +3109,20 @@
       bait: Object.fromEntries(Object.entries(p.bait && typeof p.bait === 'object' ? p.bait : {}).filter(([, n]) => Number.isFinite(n))),
       bucket: (Array.isArray(p.bucket) ? p.bucket : []).filter((f) => f && f.f && Number(f.at) > 0)
         .map((f) => ({ f: f.f, g: Number(f.g) || 0, v: Number(f.v) || 0, at: Number(f.at), off: Number(f.off) || 0 })),
-      // The game's own notes on where each fish bites: { kind: [spot, ...] } (only kinds it has notes for).
+      // The game's own notes on where each fish bites: { kind: [{ spot, tide: [...] }] } (only kinds it has notes for).
+      // Since 2026-11-07 a spot can name tides: bass at The end on "high" and "mid" (the game's words, not `tide`'s).
       notes: Object.fromEntries(Object.entries(p.notes && typeof p.notes === 'object' ? p.notes : {})
-        .map(([k, n]) => [k, ((n && Array.isArray(n.at)) ? n.at : []).map((a) => a && a.spot).filter(Boolean)]).filter(([, s]) => s.length)),
+        .map(([k, n]) => [k, ((n && Array.isArray(n.at)) ? n.at : []).filter((a) => a && a.spot)
+          .map((a) => ({ spot: a.spot, tide: Array.isArray(a.tide) ? a.tide.filter((t) => typeof t === 'string') : [] }))]).filter(([, s]) => s.length)),
+      rawNotes: p.notes && typeof p.notes === 'object' ? p.notes : null,
     };
   }
   // The game's own names (Fish book, 2026-11-06). Over the fence is marked Risky in the game.
   const PIER_SPOTS = { boards: 'Under the boards', outflow: 'The outflow', end: 'The end', fence: 'Over the fence' };
   const spotName = (s) => PIER_SPOTS[s] || (s ? s.charAt(0).toUpperCase() + s.slice(1) : '?');
-  const fishName = (f) => (f ? f.charAt(0).toUpperCase() + f.slice(1) : '?');
+  // The game's own names (Fish book, 2026-11-06); a kind not listed is its id, capitalised.
+  const FISH_NAMES = { bass: 'Sea bass', mullet: 'Grey mullet', goldfish: 'Flushed goldfish', crab: 'Shore crab', carp: 'Three-eyed carp', conger: 'Conger eel', boot: 'Old boot', can: 'Tin can', cone: 'Traffic cone' };
+  const fishName = (f) => FISH_NAMES[f] || (f ? f.charAt(0).toUpperCase() + f.slice(1) : '?');
   const kg = (g) => (g / 1000).toFixed(1) + ' kg';
   // Over a day: "2d 10h"; under: the usual h:mm:ss.
   const fmtLong = (ms) => (ms >= 86400000 ? `${Math.floor(ms / 86400000)}d ${Math.floor((ms % 86400000) / 3600000)}h` : fmtClock(ms));
@@ -3285,7 +3294,7 @@
 
   // Fish values (0.42.0, user request): every fish seen in your bucket, once each (kind + catch time), with its weight
   // and value. From your 14 fish on 2026-11-04 the value is weight x a fixed price per kind, rounded to $10 (carp
-  // ~$100/kg, mullet ~$90/kg, conger ~$55/kg), so the price per kg is worked out from all of a kind's weights together.
+  // ~$100/kg, mullet ~$90/kg, conger ~$55/kg).
   const FISH_KEY = 'ms_fish_seen_v1'; // { 'kind:at': { f, g, v, at } }
   const FISH_MAX = 5000;
   function noteFish(p) {
@@ -3297,50 +3306,111 @@
     if (keys.length > FISH_MAX) keys.sort((a, b) => m[a].at - m[b].at).slice(0, keys.length - FISH_MAX).forEach((k) => delete m[k]);
     GM_setValue(FISH_KEY, m);
   }
-  // { kind: { n, minG, maxG, minV, maxV, perKg } } from every fish recorded.
-  function fishValues() {
-    const by = {};
-    Object.values(GM_getValue(FISH_KEY, null) || {}).forEach((x) => {
-      const k = by[x.f] || (by[x.f] = { n: 0, minG: Infinity, maxG: 0, minV: Infinity, maxV: 0, g: 0, v: 0 });
-      k.n++; k.g += x.g; k.v += x.v;
-      k.minG = Math.min(k.minG, x.g); k.maxG = Math.max(k.maxG, x.g); k.minV = Math.min(k.minV, x.v); k.maxV = Math.max(k.maxV, x.v);
+  // Your catches (0.46.0): each bucket fish once (kind, grams, value, catch time), with the spot, tide and day/night of
+  // the logged cast that landed it (same kind and weight), plus logged casts that brought up junk (no weight).
+  function fishRecords() {
+    const casts = (GM_getValue(PIER_LOG_KEY, null) || { casts: [] }).casts;
+    const where = {};
+    casts.forEach((c) => { if (c.f && c.g > 0) where[c.f + ':' + c.g] = c; });
+    const out = Object.values(GM_getValue(FISH_KEY, null) || {}).map((x) => {
+      const c = where[x.f + ':' + x.g];
+      const r = { f: x.f, at: x.at, g: x.g, v: x.v };
+      if (c) { if (c.spot) r.spot = c.spot; if (c.tide) r.tide = c.tide; if (c.hour) r.hour = c.hour; }
+      return r;
     });
-    Object.values(by).forEach((k) => { k.perKg = k.g > 0 ? (k.v / k.g) * 1000 : 0; });
+    casts.forEach((c) => { if (c.f && !(c.g > 0)) out.push({ f: c.f, at: c.at, spot: c.spot || undefined, tide: c.tide || undefined, hour: c.hour || undefined }); });
+    return out.sort((a, b) => a.at - b.at);
+  }
+  // { kind: { n, w, minG, maxG, sumV, spots, tides, hours } }, the same as the crew bot's summary (bot/lib/fish.js).
+  function fishSummary(rows) {
+    const by = {};
+    rows.forEach((c) => {
+      const k = by[c.f] || (by[c.f] = { n: 0, w: 0, minG: 0, maxG: 0, sumV: 0, spots: {}, tides: {}, hours: {} });
+      k.n++;
+      if (c.g > 0 && Number.isFinite(c.v)) { k.minG = k.w ? Math.min(k.minG, c.g) : c.g; k.maxG = Math.max(k.maxG, c.g); k.sumV += c.v; k.w++; }
+      if (c.spot) k.spots[c.spot] = (k.spots[c.spot] || 0) + 1;
+      if (c.tide) k.tides[c.tide] = (k.tides[c.tide] || 0) + 1;
+      if (c.hour) k.hours[c.hour] = (k.hours[c.hour] || 0) + 1;
+    });
     return by;
   }
-  // Where and on what tide: the game's notes (spots it has unlocked for that fish), then your own logged catches of it
-  // counted by spot and by tide.
-  function fishWhere(p, f, casts) {
-    const count = (key, name) => {
-      const by = {};
-      casts.forEach((c) => { if (c.f === f && c[key]) by[c[key]] = (by[c[key]] || 0) + 1; });
-      return Object.entries(by).sort((a, b) => b[1] - a[1]).map(([k, n]) => `${escHtml(name(k))} ${n}`).join(', ');
+  // The game's notes as { kind: { spot: [tide, ...] } } (the bot's shape), from `pier.notes`.
+  const notesOf = (p) => {
+    const m = {};
+    Object.entries(p.notes || {}).forEach(([k, at]) => at.forEach((a) => { const t = ((m[k] = m[k] || {})[a.spot] = m[k][a.spot] || []); a.tide.forEach((x) => { if (!t.includes(x)) t.push(x); }); }));
+    return m;
+  };
+
+  // Crew pool (0.46.0, user request "make sure we are sharing fishing info"; sharing on): send your new catches and the
+  // game's notes, get back the crew's summary per kind. The bot keeps each catch once and never who sent it.
+  const FISH_POOL_URL = 'http://168.138.79.225:3001/v1/fish';
+  const FISH_SYNC_KEY = 'ms_fish_sync_v1'; // { sentTo: newest catch time sent }
+  const FISH_CREW_KEY = 'ms_fish_crew_v1'; // { at, n, kinds, notes } the bot's last reply
+  const FISH_SEND_GAP_MS = 65000, FISH_REFRESH_MS = 10 * 60000, FISH_SEND_MAX = 500;
+  let fishSyncAt = 0, fishSyncBusy = false;
+  function syncFish() {
+    if (!sharingOn() || fishSyncBusy || typeof GM_xmlhttpRequest !== 'function' || !apiState.pier) return;
+    const sync = GM_getValue(FISH_SYNC_KEY, null) || {};
+    const sentTo = Number(sync.sentTo) || 0;
+    const fresh = fishRecords().filter((r) => r.at > sentTo);
+    const gap = Date.now() - fishSyncAt;
+    const onPier = location.pathname.replace(/\/+$/, '') === '/pier-nine';
+    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !(onPier && gap >= FISH_REFRESH_MS))) return;
+    const send = fresh.slice(0, FISH_SEND_MAX);
+    fishSyncAt = Date.now(); fishSyncBusy = true;
+    GM_xmlhttpRequest({
+      method: 'POST', url: FISH_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, catches: send, notes: apiState.pier.rawNotes || null }),
+      onload: (r) => {
+        fishSyncBusy = false;
+        let j = null;
+        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        if (!j || !j.ok) return;
+        if (send.length) GM_setValue(FISH_SYNC_KEY, { sentTo: send[send.length - 1].at });
+        GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {} });
+        schedule();
+        if (fresh.length > FISH_SEND_MAX) setTimeout(syncFish, FISH_SEND_GAP_MS + 1000);
+      },
+      onerror: () => { fishSyncBusy = false; },
+      ontimeout: () => { fishSyncBusy = false; },
+    });
+  }
+
+  // Pier page (0.46.0, user request: "more organized ... types of fishes that can be caught in what areas and what
+  // times, and avg price/weight range"): one line for the bucket and the tide, then one table row per fish. With
+  // sharing on it is the crew's catches; otherwise yours. Where = spots it was caught at, most first, plus the spots
+  // in the game's notes (with their tides). When = tides it was caught on, most first, and day or night when only one.
+  const TIDE_SHORT = { 'Low tide': 'Low', 'High tide': 'High' };
+  function pierFishTable(p) {
+    const crew = sharingOn() ? GM_getValue(FISH_CREW_KEY, null) : null;
+    const kinds = crew ? crew.kinds : fishSummary(fishRecords());
+    const notes = notesOf(p);
+    if (crew) Object.entries(crew.notes || {}).forEach(([k, s]) => Object.entries(s).forEach(([spot, t]) => { const m = (notes[k] = notes[k] || {}); m[spot] = [...new Set([...(m[spot] || []), ...t])]; }));
+    const all = [...new Set([...Object.keys(kinds), ...Object.keys(p.book), ...Object.keys(notes)])];
+    const isJunk = (f) => !(kinds[f] && kinds[f].w) && !(p.best[f] > 0) && (kinds[f] || p.book[f]);
+    const most = (o) => Object.entries(o || {}).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+    const gOrKg = (g) => (g < 1000 ? `${n0(g)} g` : kg(g));
+    const weight = (k) => (k.minG === k.maxG ? gOrKg(k.maxG) : k.maxG < 1000 ? `${n0(k.minG)}–${n0(k.maxG)} g` : `${(k.minG / 1000).toFixed(1)}–${kg(k.maxG)}`);
+    const avg = (f) => (kinds[f] && kinds[f].w ? kinds[f].sumV / kinds[f].w : -1);
+    const rows = all.filter((f) => !isJunk(f)).sort((a, b) => avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0)).map((f) => {
+      const k = kinds[f] || { spots: {}, tides: {}, hours: {} };
+      const nt = notes[f] || {};
+      const spots = [...new Set([...most(k.spots), ...Object.keys(nt)])]
+        .map((s) => escHtml(spotName(s)) + (nt[s] && nt[s].length ? ` <span class="msx-pf-dim">(${escHtml(nt[s].join('/'))})</span>` : ''));
+      const tides = most(k.tides);
+      const hours = Object.keys(k.hours);
+      const when = [tides.length >= 4 ? 'any tide' : tides.map((t) => TIDE_SHORT[t] || t).join(', '), hours.length === 1 ? hours[0] : ''].filter(Boolean).join(' · ');
+      return `<tr><td><b>${escHtml(fishName(f))}</b></td><td>${spots.join(', ') || '?'}</td><td>${escHtml(when) || '?'}</td>` +
+        `<td>${avg(f) >= 0 ? '$' + n0(Math.round(avg(f))) : '?'}</td><td>${k.w ? weight(k) : p.best[f] > 0 ? 'best ' + gOrKg(p.best[f]) : '?'}</td></tr>`;
+    });
+    const junk = all.filter(isJunk).map(fishName);
+    const n = crew ? crew.n : Object.values(kinds).reduce((s, k) => s + k.n, 0);
+    return {
+      title: crew ? `🎣 Pier fish · the crew's ${n0(n)} catches` : `🎣 Pier fish · your ${n0(n)} catches${inShareCrew() ? ' (turn on crew sharing to see the crew\'s)' : ''}`,
+      html: (rows.length ? `<table class="msx-pf"><thead><tr><th>Fish</th><th>Where</th><th>When</th><th>Avg</th><th>Weight</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div>No fish yet.</div>') +
+        (junk.length ? `<div class="msx-pf-dim">Junk: ${junk.map(escHtml).join(', ')}</div>` : ''),
     };
-    const out = [];
-    if (p.notes[f]) out.push(`bites ${p.notes[f].map((s) => escHtml(spotName(s))).join(', ')} (game notes)`);
-    const spots = count('spot', spotName), tides = count('tide', (k) => k);
-    if (spots) out.push(`you caught it ${spots}`);
-    if (tides) out.push(`tide ${tides}`);
-    return out.length ? `<div class="msx-pierlog-where">${out.join(' · ')}</div>` : '';
   }
-  function fishValueRows(p, casts) {
-    const vals = fishValues();
-    const usd = (n) => '$' + n0(n);
-    const range = (a, b, f) => (a === b ? f(a) : `${f(a)}–${f(b)}`);
-    const kgRange = (a, b) => (a === b ? kg(a) : `${(a / 1000).toFixed(1)}–${kg(b)}`);
-    const avg = (f) => (vals[f] ? vals[f].v / vals[f].n : -1);
-    const kinds = [...new Set([...Object.keys(vals), ...Object.keys(p.book)])]
-      .sort((a, b) => avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0));
-    return kinds.map((f) => {
-      const k = vals[f], caught = p.book[f], best = p.best[f];
-      const parts = [];
-      if (k) parts.push(`avg ${usd(k.v / k.n)} a catch`, `${k.n} seen, ${kgRange(k.minG, k.maxG)}, ${range(k.minV, k.maxV, usd)}`);
-      if (caught) parts.push(`caught ${caught}` + (best > 0 ? `, best ${kg(best)}${k ? ` (~${usd(Math.round((best * k.perKg) / 10000) * 10)})` : ''}` : ', no weight'));
-      if (!k && best > 0) parts.push('value not seen yet');
-      return `<div><b>${escHtml(fishName(f))}</b> ${parts.join(' · ')}${fishWhere(p, f, casts)}</div>`;
-    }).join('');
-  }
-  // Pier page: the bucket and what bites where, from your own logged casts, under the game's dock.
   function drawPierLog() {
     const host = location.pathname.replace(/\/+$/, '') === '/pier-nine' && document.querySelector('section.pl');
     let box = document.getElementById('msx-pierlog');
@@ -3348,44 +3418,14 @@
     if (!host || !p) { if (box) box.remove(); return; }
     if (!box) { box = document.createElement('div'); box.id = 'msx-pierlog'; }
     if (host.nextElementSibling !== box) host.after(box);
+    syncFish();
     const now = Date.now();
     const fresh = p.bucket.filter((f) => f.off > now).sort((a, b) => a.off - b.off);
-    const casts = (GM_getValue(PIER_LOG_KEY, null) || { casts: [] }).casts;
-    const rows = [];
-    const values = fishValueRows(p, casts);
-    if (fresh.length) {
-      rows.push(`<div><b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))}. Next to go off: ${escHtml(fishName(fresh[0].f))} ${kg(fresh[0].g)} ` +
-        `(${fmtMoney(fresh[0].v)}) in ${fmtLong(fresh[0].off - now)}.</div>`);
-    }
-    const td = tideNow();
-    if (td) {
-      const lens = TIDES.filter((x) => td.lens[x]).map((x) => `${x} ${fmtLong(td.lens[x][0])} (${td.lens[x][1]})`).join(', ');
-      rows.push(`<div><b>Tide:</b> ${escHtml(tideLine(now))}.${lens ? `<div class="msx-pierlog-where">Stage lengths seen: ${escHtml(lens)}</div>` : ''}</div>`);
-    }
-    // What a cast made: the fish's value (a fish logged without one counts at its kind's average; junk or nothing $0)
-    // minus the bait it used. Groups are sorted by average profit per cast, best first.
-    const fv = fishValues();
-    const castValue = (c) => (Number.isFinite(c.v) ? c.v : c.f && fv[c.f] ? fv[c.f].v / fv[c.f].n : 0);
-    const pm = (n) => (n < 0 ? '−$' : '$') + n0(Math.abs(n));
-    const group = (key, name) => {
-      const by = {};
-      casts.forEach((c) => {
-        const g = by[c[key]] || (by[c[key]] = { n: 0, kinds: {}, made: 0, bait: 0 });
-        g.n++; g.made += castValue(c); g.bait += c.cost || 0;
-        const f = c.f || 'nothing'; g.kinds[f] = (g.kinds[f] || 0) + 1;
-      });
-      return Object.entries(by).sort((a, b) => (b[1].made - b[1].bait) / b[1].n - (a[1].made - a[1].bait) / a[1].n).map(([k, g]) =>
-        `<div><b>${escHtml(name(k))}</b> avg ${pm((g.made - g.bait) / g.n)} a cast (${pm(g.made / g.n)} fish − ${pm(g.bait / g.n)} bait, ${g.n} cast${g.n > 1 ? 's' : ''}): ` +
-        Object.entries(g.kinds).sort((a, b) => b[1] - a[1]).map(([f, n]) => `${escHtml(f === 'nothing' ? 'nothing' : fishName(f))} ${n}`).join(', ') + '</div>').join('');
-    };
-    if (casts.length) {
-      rows.push(`<div class="msx-pierlog-h">By spot</div>${group('spot', spotName)}`);
-      rows.push(`<div class="msx-pierlog-h">By bait</div>${group('hook', (k) => fishName(k === 'null' ? 'no bait' : k))}`);
-      rows.push(`<div class="msx-pierlog-h">By tide</div>${group('tide', (k) => k)}`);
-      rows.push(`<div class="msx-pierlog-h">Day or night</div>${group('hour', fishName)}`);
-    } else rows.push('<div>No casts logged yet. Each cast you make from now on is logged with its spot, bait, tide and time of day.</div>');
-    if (values) rows.push(`<div class="msx-pierlog-h">Fish values and where they bite (best average catch first)</div>${values}`);
-    const html = `<div class="msx-pierlog-t">🎣 Your catch log (${casts.length} cast${casts.length === 1 ? '' : 's'}, kept on this computer)</div>${rows.join('')}`;
+    const top = [];
+    if (fresh.length) top.push(`<b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))} · next goes off in ${fmtLong(fresh[0].off - now)}`);
+    if (tideNow()) top.push(`<b>Tide:</b> ${escHtml(tideLine(now))}`);
+    const t = pierFishTable(p);
+    const html = `<div class="msx-pierlog-t">${escHtml(t.title)}</div>${top.length ? `<div>${top.join(' · ')}</div>` : ''}${t.html}`;
     if (box.innerHTML !== html) box.innerHTML = html;
   }
 
@@ -5090,7 +5130,7 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list and contract payouts; nothing else, never sent to MeowStreets)</label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
