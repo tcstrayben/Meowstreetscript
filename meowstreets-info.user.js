@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.1
+// @version      0.46.2
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -104,6 +104,8 @@
           id: c.id, chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
           heat: c.heat, hot: !!c.hot, bonus: c.bonus, criticalChance: c.criticalChance,
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
+          // The most this job's % can be (game build 2026-11-08: 96–99 by job, was 95 for all).
+          ceiling: Number.isFinite(c.ceiling) ? c.ceiling : 95,
         };
       });
       // The rebuilt crimes (game build 2026-10-10, API log "newupdate"): `street` has each crime's places and their
@@ -111,7 +113,9 @@
       if (raw.street && Array.isArray(raw.street.crimes)) {
         const chanceById = {};
         (raw.crimes || []).forEach((c) => { if (c && c.id) chanceById[c.id] = c.chance; });
-        const act = (a) => ({ key: a.key, verb: a.verb, cost: a.cost, heat: a.heat, xp: a.xp, payMin: a.payMin, payMax: a.payMax, odds: a.odds && a.odds.word, main: !!a.main });
+        const act = (a) => ({ key: a.key, verb: a.verb, cost: a.cost, heat: a.heat, xp: a.xp, payMin: a.payMin, payMax: a.payMax, main: !!a.main,
+          // Each button's odds: a % since build 2026-11-08 (`odds.pct`), a word (Safe / Good / Fair) before.
+          odds: a.odds ? (Number.isFinite(a.odds.pct) ? a.odds.pct : a.odds.word || null) : null });
         out.street = {
           districts: {},
           crimes: raw.street.crimes.filter((c) => c && c.id).map((c) => ({
@@ -1148,13 +1152,14 @@
     }
     if (heatPts) bits.push(`${fmt(-heatPts)} heat`);
     const sum = a.baseChance + (a.masteryBonus || 0) + (a.bonus || 0) - heatPts;
-    const capped = a.chance === 95 && sum > 95;
-    const end = capped ? `= ${sum} → capped at 95%` : `= ${a.chance}%`;
+    const cap = Number.isFinite(a.ceiling) ? a.ceiling : 95;
+    const capped = a.chance === cap && sum > cap;
+    const end = capped ? `= ${sum} → capped at ${cap}%` : `= ${a.chance}%`;
     const crew = apiState && apiState.crew;
     const crewNote = crew && crew.buffActive && crew.buffUntil > Date.now()
       ? ` The crew +5% window ends in ${Math.max(1, Math.round((crew.buffUntil - Date.now()) / 60000))} min (${new Date(crew.buffUntil).toUTCString().slice(17, 22)} UTC).` : '';
     const critNote = a.criticalChance != null ? ` Clean-job chance: ${a.criticalChance}%.` : '';
-    const title = ('Exact numbers from the game\'s own data: base success + mastery bonus + bonus (merits, education, crew and perks, already combined by the game) − 1 per 4 heat, capped at 95%.' + crewNote + critNote).replace(/"/g, '&quot;');
+    const title = ('Exact numbers from the game\'s own data: base success + mastery bonus + bonus (merits, education, crew and perks, already combined by the game) − 1 per 4 heat, capped at the most the job allows (96–99% since 2026-11-08).' + crewNote + critNote).replace(/"/g, '&quot;');
     return oddsDetails(c.key, title, `${bits.join(' ')} ${end}`);
   }
 
@@ -1202,7 +1207,7 @@
   // article.rung > div.rung-main > div.tool-line > span (class "missing" when you own none).
   const toolName = (chip) => chip.textContent.replace(/\s*(none|×\s*\d+|x\s*\d+)\s*$/i, '').trim();
   document.addEventListener('click', (e) => {
-    const chip = e.target.closest && e.target.closest('.rung .tool-line > span, .cs-dock .cs-risk > span');
+    const chip = e.target.closest && e.target.closest('.rung .tool-line > span, .cs-dock .cs-risk > span, .cs-dock .cs-gear > span');
     if (!chip) return;
     const name = toolName(chip);
     location.assign('/whiskers' + (name ? '#msx-item=' + encodeURIComponent(name) : ''));
@@ -2300,14 +2305,15 @@
     place.acts.forEach((a) => {
       if (!(a.cost > 0) || !Number.isFinite(a.payMin) || !Number.isFinite(a.payMax)) return;
       const cash = (a.payMin + a.payMax) / 2 / (a.cost * crime.steps);
-      if (!best || cash > best.cash) best = { act: a, cash, xp: Number.isFinite(a.xp) ? a.xp / a.cost : null };
+      if (!best || cash > best.cash) best = { act: a, cash, xp: Number.isFinite(a.xp) ? a.xp / a.cost : null, odds: Number.isFinite(a.odds) ? a.odds : null };
     });
     return best;
   }
 
   // Overview: one line per job you can do, its best open place, pay and XP per nerve; ★ on the best of each.
   function drawCrimeTable() {
-    const ladder = isCrimesPage() && document.querySelector('section.cs-ladder');
+    // Under the job list (section.cs-ladder) before build 2026-11-08, under the street (section.cs-street) since.
+    const ladder = isCrimesPage() && document.querySelector('section.cs-ladder, section.cs-street');
     const street = apiState && apiState.street;
     let box = document.getElementById('msx-crimetable');
     if (!ladder || !street) { if (box) box.remove(); return; }
@@ -2322,13 +2328,13 @@
       const v = r.best && r.best.v;
       const ct = contractForCrime(r.c.id);
       const chip = ct ? `<span class="msx-ct-chip" title="Crew contract ${escHtml(ct.name)}">Crew ${fmtInt(ct.got)}/${fmtInt(ct.goal)}</span>` : '';
-      return `<tr${ct ? ' class="msx-crew-row"' : ''}><td>${escHtml(r.c.name)}${chip}</td><td>${Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
+      return `<tr${ct ? ' class="msx-crew-row"' : ''}><td>${escHtml(r.c.name)}${chip}</td><td>${v && v.odds != null ? v.odds + '%' : Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
         `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
         `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td></tr>`;
     }).join('');
-    const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th title="Success % for the job from the game data, with your bonuses and heat. The Safe / Good / Fair on each place can move it.">Success</th><th>Best place now</th>' +
+    const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th title="The odds the game shows at the best place, with your bonuses and heat.">Success</th><th>Best place now</th>' +
       '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th></tr></thead>' +
-      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the job's own %; a place's Safe / Good / Fair can move it.</small>`;
+      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the game's odds at that place.</small>`;
     if (!box) { box = document.createElement('section'); box.id = 'msx-crimetable'; }
     if (ladder.nextElementSibling !== box) ladder.after(box);
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
@@ -2342,7 +2348,7 @@
     const crime = streetCrime(id);
     const quote = dock.querySelector('dl.cs-quote');
     let line = dock.querySelector('.msx-pernerve');
-    const payM = quote && (quote.querySelector('.cs-pay')?.textContent || '').match(/\$([\d,]+)\s*[–-]\s*\$([\d,]+)/);
+    const payM = quote && (quote.querySelector('.cs-pay, .is-pay dd')?.textContent || '').match(/\$([\d,]+)\s*[–-]\s*\$([\d,]+)/);
     const xpDd = quote && [...quote.querySelectorAll('div')].find((d) => /^XP$/i.test(d.querySelector('dt')?.textContent.trim() || ''));
     const xp = xpDd ? num(xpDd.querySelector('dd')?.textContent) : NaN;
     const costM = (dock.querySelector('button.cs-go.is-main .cs-go-cost')?.textContent || '').match(/(\d+)\s*nerve/);
@@ -2362,11 +2368,12 @@
     if (crime) applyCrimeLocks(crime, dock);
   }
 
-  // The job's tools: the game lists them in the dock (p.cs-risk > span, "Bolt cutters ×9", class is-missing at ×0).
+  // The job's tools: the game lists them in the dock (p.cs-risk > span, "Bolt cutters ×9", class is-missing at ×0;
+  // p.cs-gear > span since build 2026-11-08).
   // Each becomes a plain link to that item on Whiskers & Co. (user request 2026-10-10, like the old chips in 0.18.1);
   // the click itself is handled with the old chips' click handler below.
   function decorateCrimeTools(dock) {
-    dock.querySelectorAll('.cs-risk > span').forEach((chip) => {
+    dock.querySelectorAll('.cs-risk > span, .cs-gear > span').forEach((chip) => {
       if (!chip.classList.contains('msx-tool-link')) chip.classList.add('msx-tool-link');
       setTitle(chip, 'Open Whiskers & Co. at ' + toolName(chip));
     });
@@ -2380,7 +2387,8 @@
     const api = crime && apiState.crimes[norm(crime.name)];
     let box = dock.querySelector('.msx-chance');
     if (!quote || !api || !Number.isFinite(api.chance)) { if (box) box.remove(); return; }
-    const html = `<b>Success ${api.chance}%</b> <small>for this job with your bonuses and heat; the place's word above can move it up or down</small>` +
+    // Since build 2026-11-08 the page shows each place's % itself, so this is only where the job's % comes from.
+    const html = `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
       oddsHtmlFromApi({ api, key: norm(crime.name) });
     if (!box) { box = document.createElement('div'); box.className = 'msx-chance'; }
     const after = dock.querySelector('.msx-pernerve') || quote;
@@ -2953,7 +2961,7 @@
     const cc = crewContracts();
     const byCrime = new Map();
     ((cc && cc.list) || []).forEach((c) => { if (c.crimeId && !c.done) byCrime.set(c.crimeId, c); });
-    document.querySelectorAll('a.cs-step, a.cs-spot, a.cs-li, a.msx-crew-ct').forEach((a) => {
+    document.querySelectorAll('a.cs-step, a.cs-spot, a.cs-li, a.cs-door, a.cs-place, a.cs-jobtab, a.msx-crew-ct').forEach((a) => {
       const m = (a.getAttribute('href') || '').match(/^\/crimes\/([a-z]+)\/?$/);
       const c = m ? byCrime.get(m[1]) : null;
       if (a.classList.contains('msx-crew-ct') !== !!c) a.classList.toggle('msx-crew-ct', !!c);
