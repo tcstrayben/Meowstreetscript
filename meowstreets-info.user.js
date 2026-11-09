@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.2
+// @version      0.46.3
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -401,8 +401,10 @@
       });
       (raw.perks || []).forEach((p) => {
         if (!p || !p.owned) return;
-        const m = String(p.description || '').match(/\+(\d+)\s*(?:points?\s+)?on\s+(.+?)\.?$/i);
+        // "+3 points on Crate-jacking." or "+1 point to every crime’s success chance." (Master key, seen 2026-11-08).
+        const m = String(p.description || '').match(/\+(\d+)\s*(?:points?\s+)?(?:on\s+(.+?)|to\s+(every crime.*?))\.?$/i);
         if (!m) return;
+        if (m[3]) { addPart(p.name, +m[1]); return; }
         addPart(p.name, +m[1], /every crime/i.test(m[2]) ? null : [norm(m[2].replace(/^the\s+/i, '').replace(/['’]s success chance$/i, ''))]);
       });
       if (raw.crew && raw.crew.buffActive) addPart('crew chain', 5);
