@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.4
+// @version      0.46.5
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -392,6 +392,12 @@
         // Only a course's success-chance adds: its other `add` mods (heat per crime, say) are left out by checking
         // that it is either tied to named crimes or its perk text talks about success chance.
         (c.mods || []).forEach((m) => {
+          // A district's crimes (Tide tables: "+4 points on every Dockside crime", mods { key: crimeChance, district:
+          // 'docks' }): the ids of the crimes in that district.
+          if (m && Number.isFinite(m.add) && m.key === 'crimeChance' && m.district) {
+            addPart(c.name, m.add, (raw.crimes || []).filter((x) => x && x.district === m.district).map((x) => x.id));
+            return;
+          }
           if (m && Number.isFinite(m.add) && (Array.isArray(m.crimes) || /success chance/i.test(c.perk || ''))) addPart(c.name, m.add, Array.isArray(m.crimes) ? m.crimes : null);
         });
       });
@@ -3144,6 +3150,8 @@
         .map(([k, n]) => [k, ((n && Array.isArray(n.at)) ? n.at : []).filter((a) => a && a.spot)
           .map((a) => ({ spot: a.spot, tide: Array.isArray(a.tide) ? a.tide.filter((t) => typeof t === 'string') : [] }))]).filter(([, s]) => s.length)),
       rawNotes: p.notes && typeof p.notes === 'object' ? p.notes : null,
+      // Harbour sense, the fishing level: { level, done, toGo (fish to keep for the next), percent, reads ("junk" at 3+) }.
+      sense: p.sense && Number.isFinite(p.sense.level) ? { level: p.sense.level, done: !!p.sense.done, toGo: Number(p.sense.toGo) || 0, percent: Number(p.sense.percent) || 0, reads: p.sense.reads || null } : null,
     };
   }
   // The game's own names (Fish book, 2026-11-06). Over the fence is marked Risky in the game.
@@ -3196,6 +3204,7 @@
     const mine = pierBoard ? pierBoard.findIndex((b) => b.me) : -1;
     if (mine >= 0) lines.push(`This week's biggest: you are #${mine + 1} (${fishName(pierBoard[mine].fish)} ${kg(pierBoard[mine].grams)}).`);
     if (td) lines.push(`Tide: ${tideLine(now)}.`);
+    if (p.sense) lines.push(`Harbour sense ${p.sense.level}${p.sense.done ? '' : `: ${p.sense.toGo} more fish to keep for level ${p.sense.level + 1} (${p.sense.percent}%)`}.`);
     lines.push('Figures as of your last page load.');
     setTitle(el, lines.join('\n'));
   }
@@ -3379,24 +3388,27 @@
   let fishSyncAt = 0, fishSyncBusy = false;
   function syncFish() {
     if (!sharingOn() || fishSyncBusy || typeof GM_xmlhttpRequest !== 'function' || !apiState.pier) return;
+    noteSenseText(); // the Fish book's line, if it's open, goes with this send
     const sync = GM_getValue(FISH_SYNC_KEY, null) || {};
     const sentTo = Number(sync.sentTo) || 0;
     const fresh = fishRecords().filter((r) => r.at > sentTo);
     const gap = Date.now() - fishSyncAt;
     const onPier = location.pathname.replace(/\/+$/, '') === '/pier-nine';
-    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !(onPier && gap >= FISH_REFRESH_MS))) return;
+    const sense = senseOut();
+    const senseNew = JSON.stringify(sense) !== (sync.sense || 'null');
+    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
     const send = fresh.slice(0, FISH_SEND_MAX);
     fishSyncAt = Date.now(); fishSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: FISH_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, catches: send, notes: apiState.pier.rawNotes || null }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, catches: send, notes: apiState.pier.rawNotes || null, sense }),
       onload: (r) => {
         fishSyncBusy = false;
         let j = null;
         try { j = JSON.parse(r.responseText); } catch (e) { return; }
         if (!j || !j.ok) return;
-        if (send.length) GM_setValue(FISH_SYNC_KEY, { sentTo: send[send.length - 1].at });
-        GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {} });
+        GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense) });
+        GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
         schedule();
         if (fresh.length > FISH_SEND_MAX) setTimeout(syncFish, FISH_SEND_GAP_MS + 1000);
       },
@@ -3459,6 +3471,73 @@
         (junk.length ? `<div class="msx-pf-dim">Junk: ${junk.map(escHtml).join(', ')}</div>` : ''),
     };
   }
+  // Harbour sense, the fishing level (user request 2026-11-08: "display our fishing level, and look into if it effects
+  // anything"). From `pier.sense`: each fish KEPT counts toward the next level (a crew member checked: nothing past the
+  // 10 a day). Levels seen: 2 took 25 fish, 3 takes 35. What it does, as far as the game says: at level 3 "Junk gives
+  // itself away in the water" (`reads: "junk"`). The Feats page has a ladder for it: Wet paws 5, Regular 10, Old salt
+  // 15, Harbourmaster's nightmare 20.
+  const SENSE_FEATS = [[5, 'Wet paws'], [10, 'Regular'], [15, 'Old salt'], [20, 'Harbourmaster\'s nightmare']];
+  const SENSE_READS = { junk: 'junk shows itself in the water' };
+  const SENSE_TITLE = 'Harbour sense is your fishing level. Every fish you keep counts toward the next (fish past the 10 a day don\'t). ' +
+    'Level 3: "Junk gives itself away in the water." What later levels do isn\'t known yet. Feats at levels 5, 10, 15 and 20.';
+  // What the crew bot is told about your Harbour sense (sharing on): level, what it reads, toGo/percent (so the bot can
+  // work out how many fish each level takes), and the game's line under it on the Fish book, if you opened it at this
+  // level. The bot keeps it per level, never who sent it, and sends every level back.
+  const SENSE_TEXT_KEY = 'ms_sense_text_v1'; // { level, text } the Fish book's line, last seen
+  function senseOut() {
+    const s = apiState.pier && apiState.pier.sense;
+    if (!s) return null;
+    const t = GM_getValue(SENSE_TEXT_KEY, null);
+    const out = { level: s.level, reads: s.reads, toGo: s.toGo, percent: s.percent };
+    if (t && t.level === s.level && t.text) out.text = t.text;
+    return out;
+  }
+  // The Fish book tab (div.pl-sense: "Harbour sense 3" and its line), read when it is open on the page you're on.
+  function noteSenseText() {
+    const box = document.querySelector('.pl-sense');
+    const m = box && (box.querySelector('.pl-sense-top b')?.textContent || '').match(/Harbour sense (\d+)/i);
+    const text = box && (box.querySelector('p')?.textContent || '').replace(/\s+/g, ' ').trim();
+    if (!m || !text) return;
+    const old = GM_getValue(SENSE_TEXT_KEY, null);
+    if (!old || old.level !== Number(m[1]) || old.text !== text) GM_setValue(SENSE_TEXT_KEY, { level: Number(m[1]), text });
+  }
+  // The next levels as the crew has seen them (sharing on): what each does and how many fish it took.
+  function senseNextHtml(p) {
+    const s = p.sense;
+    if (!s || s.done) return '';
+    if (!sharingOn()) return inShareCrew() ? '<div class="msx-pf-dim">Turn on crew sharing to see what the next levels do, from crewmates who reached them.</div>' : '';
+    const crew = (GM_getValue(FISH_CREW_KEY, null) || {}).sense || {};
+    const what = (l) => {
+      const c = crew[l];
+      if (!c) return null;
+      const said = (c.text && c.text[0]) || (c.reads && c.reads.length ? c.reads.map((r) => SENSE_READS[r] || 'reads ' + r).join(', ') : '');
+      return said || null;
+    };
+    const lines = [];
+    for (let l = s.level + 1; l <= s.level + 5; l++) {
+      const c = crew[l];
+      if (!c) { if (l === s.level + 1) lines.push(`<b>Level ${l}:</b> nobody in the crew has reached it yet`); break; }
+      const takes = c.fish ? `; then ${c.fish} fish to level ${l + 1}` : '';
+      const w = what(l);
+      lines.push(`<b>Level ${l}:</b> ${w ? escHtml(w) : 'reached in the crew; what it does isn\'t known yet (open the Fish book at that level to share it)'}${takes}`);
+    }
+    return lines.length ? `<div class="msx-pf-dim">Next (from the crew): ${lines.join(' · ')}</div>` : '';
+  }
+  function senseLine(p) {
+    const s = p.sense;
+    if (!s) return '';
+    const bits = [`<b>🎯 Harbour sense ${s.level}</b>`];
+    if (s.done) bits.push('top level');
+    else {
+      const left = pierCastsLeft(p, apiState.at);
+      const days = Math.max(0, Math.ceil((s.toGo - left) / p.limit)); // today's fish left to keep, then 10 a day
+      bits.push(`${s.percent}% to level ${s.level + 1}: ${s.toGo} more fish to keep` + (s.toGo > left ? ` (~${days} more day${days === 1 ? '' : 's'} at ${p.limit} a day)` : ''));
+    }
+    if (s.reads) bits.push(escHtml(SENSE_READS[s.reads] || 'reads ' + s.reads));
+    const feat = SENSE_FEATS.find(([at]) => at > s.level);
+    if (feat) bits.push(`feat "${escHtml(feat[1])}" at ${feat[0]}`);
+    return bits.join(' · ');
+  }
   function drawPierLog() {
     const host = location.pathname.replace(/\/+$/, '') === '/pier-nine' && document.querySelector('section.pl');
     let box = document.getElementById('msx-pierlog');
@@ -3473,7 +3552,8 @@
     if (fresh.length) top.push(`<b>Bucket:</b> ${fresh.length} fish, ${fmtMoney(fresh.reduce((s, f) => s + f.v, 0))} · next goes off in ${fmtLong(fresh[0].off - now)}`);
     if (tideNow()) top.push(`<b>Tide:</b> ${escHtml(tideLine(now))}`);
     const t = pierFishTable(p);
-    const html = `<div class="msx-pierlog-t">${escHtml(t.title)}</div>${top.length ? `<div>${top.join(' · ')}</div>` : ''}${t.html}`;
+    const sense = senseLine(p);
+    const html = `<div class="msx-pierlog-t">${escHtml(t.title)}</div>${top.length ? `<div>${top.join(' · ')}</div>` : ''}${sense ? `<div title="${escHtml(SENSE_TITLE)}">${sense}</div>${senseNextHtml(p)}` : ''}${t.html}`;
     if (box.innerHTML !== html) box.innerHTML = html;
   }
 
