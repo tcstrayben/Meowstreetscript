@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.3
+// @version      0.46.4
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -102,7 +102,7 @@
         if (!c || !c.name) return;
         out.crimes[norm(c.name)] = {
           id: c.id, chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
-          heat: c.heat, hot: !!c.hot, bonus: c.bonus, criticalChance: c.criticalChance,
+          heat: c.heat, hot: !!c.hot, heatZeroAt: Number(c.heatZeroAt) || 0, bonus: c.bonus, criticalChance: c.criticalChance,
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
           // The most this job's % can be (game build 2026-11-08: 96–99 by job, was 95 for all).
           ceiling: Number.isFinite(c.ceiling) ? c.ceiling : 95,
@@ -126,7 +126,7 @@
             places: (c.targets || []).filter((t) => t && !t.empty).map((t) => ({ id: t.id, name: t.name, open: !t.shut, acts: (t.acts || []).map(act) })),
           })),
         };
-        (raw.street.districts || []).forEach((d) => { if (d && d.id) out.street.districts[d.id] = { name: d.name, heat: d.heat, hot: !!d.hot }; });
+        (raw.street.districts || []).forEach((d) => { if (d && d.id) out.street.districts[d.id] = { name: d.name, heat: d.heat, hot: !!d.hot, line: d.line || '' }; });
       }
       if (raw.merits && typeof raw.merits === 'object') {
         out.merits = { available: raw.merits.available, earned: raw.merits.earned, spent: raw.merits.spent };
@@ -951,6 +951,9 @@
       .msx-tag.stk.mid, .msx-tag.stk.flat, .msx-tag.stk.risehigh { background:var(--ms-slate, #2e342d); color:var(--ms-bone, #e7ede1); }
       .msx-tag.stk.learn { background:transparent; color:var(--ms-smoke, #8d9289); border:1px dashed var(--ms-smoke, #8d9289); }
       .msx-tag.hot { background:var(--ms-red, #eb6561); color:var(--ms-ink, #182316); }
+      .msx-crimeheat { font-size:12px; margin:2px 0 4px; color:var(--ms-smoke, #8d9289); }
+      .msx-crimeheat b { color:var(--ms-ink, #e7ede1); }
+      .msx-crimeheat.hot, .msx-crimeheat.hot b { color:var(--ms-red, #eb6561); }
       .msx-heat { margin-left:8px; font-size:11px; color:var(--ms-smoke, #8d9289); white-space:nowrap; }
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:12px; color:var(--ms-bone, #e7ede1); }
       #msx-account { margin:18px 0; padding:16px 18px; border-radius:12px; background:rgba(0,0,0,.28);
@@ -1038,6 +1041,8 @@
       #msx-pierlog .msx-pf td { padding:3px 8px 3px 0; vertical-align:top; border-top:1px solid rgba(141,146,137,.2); }
       #msx-pierlog .msx-pf td:nth-child(4), #msx-pierlog .msx-pf td:nth-child(5) { white-space:nowrap; }
       #msx-pierlog .msx-pf-dim { opacity:.7; font-size:11px; }
+      #msx-pierlog .msx-pf-now { color:var(--ms-lime, #b4df87); font-weight:700; cursor:help; }
+      #msx-pierlog .msx-pf tr.now td { background:rgba(180,223,135,.06); }
       .msx-lowtag { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; white-space:nowrap; cursor:help;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-toast { position:fixed; right:12px; bottom:calc(56px + env(safe-area-inset-bottom, 0px)); z-index:9999; max-width:min(360px, calc(100vw - 24px));
@@ -2390,7 +2395,21 @@
     let box = dock.querySelector('.msx-chance');
     if (!quote || !api || !Number.isFinite(api.chance)) { if (box) box.remove(); return; }
     // Since build 2026-11-08 the page shows each place's % itself, so this is only where the job's % comes from.
-    const html = `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
+    // The district's heat right here (user request 2026-11-08: "show the heat on each crime when you view it"): the
+    // game's own heat, what it costs in odds, its words for it, and when it is back to 0 (`heatZeroAt`).
+    const dist = apiState.street && apiState.street.districts[crime.district];
+    const heat = Number.isFinite(api.heat) ? api.heat : dist ? dist.heat : null;
+    let heatHtml = '';
+    if (Number.isFinite(heat)) {
+      const left = api.heatZeroAt - Date.now();
+      const bits = [`🔥 <b>${escHtml(dist ? dist.name : 'District')} heat ${heat}</b>`];
+      if (heat >= 4) bits.push(`−${Math.floor(heat / 4)} odds`);
+      if (api.hot || heat >= HOT_HEAT) bits.push('80+: half XP, no clean jobs');
+      if (dist && dist.line) bits.push(escHtml(dist.line));
+      bits.push(heat <= 0 ? 'cool' : left > 0 ? `0 in ~${fmtClock(left)}` : 'cooling');
+      heatHtml = `<div class="msx-crimeheat${api.hot || heat >= HOT_HEAT ? ' hot' : ''}">${bits.join(' · ')}</div>`;
+    }
+    const html = heatHtml + `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
       oddsHtmlFromApi({ api, key: norm(crime.name) });
     if (!box) { box = document.createElement('div'); box.className = 'msx-chance'; }
     const after = dock.querySelector('.msx-pernerve') || quote;
@@ -3402,15 +3421,33 @@
     const gOrKg = (g) => (g < 1000 ? `${n0(g)} g` : kg(g));
     const weight = (k) => (k.minG === k.maxG ? gOrKg(k.maxG) : k.maxG < 1000 ? `${n0(k.minG)}–${n0(k.maxG)} g` : `${(k.minG / 1000).toFixed(1)}–${kg(k.maxG)}`);
     const avg = (f) => (kinds[f] && kinds[f].w ? kinds[f].sumV / kinds[f].w : -1);
-    const rows = all.filter((f) => !isJunk(f)).sort((a, b) => avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0)).map((f) => {
+    // ✓ Probably biting now (user request 2026-11-08), from what we know: the game's notes name a spot with no tide, or
+    // with this tide (its words: high, low, mid = Coming in / Going out); or catches at this tide, or on all 4. Then
+    // day/night: left out only if 3+ catches all came at the other one. Ticked fish go first, best paying first.
+    const tide = p.tide, hour = p.hour;
+    const word = tide === 'High tide' ? 'high' : tide === 'Low tide' ? 'low' : tide ? 'mid' : null;
+    const biting = (f) => {
+      if (!tide) return null;
+      const k = kinds[f] || { tides: {}, hours: {} };
+      const nt = notes[f] || {};
+      const noted = Object.entries(nt).filter(([, t]) => !t.length || t.includes(word)).map(([s]) => s);
+      const caught = Object.keys(k.tides || {});
+      if (!noted.length && !(k.tides && k.tides[tide]) && caught.length < 4) return null;
+      const hrs = k.hours || {}, other = Object.keys(hrs).filter((h) => h !== hour);
+      if (hour && !hrs[hour] && other.reduce((s, h) => s + hrs[h], 0) >= 3) return null;
+      return noted;
+    };
+    const bite = Object.fromEntries(all.map((f) => [f, biting(f)]));
+    const rows = all.filter((f) => !isJunk(f)).sort((a, b) => !!bite[b] - !!bite[a] || avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0)).map((f) => {
       const k = kinds[f] || { spots: {}, tides: {}, hours: {} };
       const nt = notes[f] || {};
+      const tick = bite[f] ? ` <span class="msx-pf-now" title="Probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''})${bite[f].length ? ': the game\'s notes say ' + escHtml(bite[f].map(spotName).join(', ')) : ': caught at this tide before'}">✓</span>` : '';
       const spots = [...new Set([...most(k.spots), ...Object.keys(nt)])]
         .map((s) => escHtml(spotName(s)) + (nt[s] && nt[s].length ? ` <span class="msx-pf-dim">(${escHtml(nt[s].join('/'))})</span>` : ''));
       const tides = most(k.tides);
       const hours = Object.keys(k.hours);
       const when = [tides.length >= 4 ? 'any tide' : tides.map((t) => TIDE_SHORT[t] || t).join(', '), hours.length === 1 ? hours[0] : ''].filter(Boolean).join(' · ');
-      return `<tr><td><b>${escHtml(fishName(f))}</b></td><td>${spots.join(', ') || '?'}</td><td>${escHtml(when) || '?'}</td>` +
+      return `<tr${bite[f] ? ' class="now"' : ''}><td><b>${escHtml(fishName(f))}</b>${tick}</td><td>${spots.join(', ') || '?'}</td><td>${escHtml(when) || '?'}</td>` +
         `<td>${avg(f) >= 0 ? '$' + n0(Math.round(avg(f))) : '?'}</td><td>${k.w ? weight(k) : p.best[f] > 0 ? 'best ' + gOrKg(p.best[f]) : '?'}</td></tr>`;
     });
     const junk = all.filter(isJunk).map(fishName);
@@ -3418,6 +3455,7 @@
     return {
       title: crew ? `🎣 Pier fish · the crew's ${n0(n)} catches` : `🎣 Pier fish · your ${n0(n)} catches${inShareCrew() ? ' (turn on crew sharing to see the crew\'s)' : ''}`,
       html: (rows.length ? `<table class="msx-pf"><thead><tr><th>Fish</th><th>Where</th><th>When</th><th>Avg</th><th>Weight</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div>No fish yet.</div>') +
+        (rows.length && tide ? `<div class="msx-pf-dim">✓ = probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''}), from the game's notes and past catches. Ticked fish are listed first, best paying first.</div>` : '') +
         (junk.length ? `<div class="msx-pf-dim">Junk: ${junk.map(escHtml).join(', ')}</div>` : ''),
     };
   }
