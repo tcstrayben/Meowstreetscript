@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.5
+// @version      0.46.6
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -206,7 +206,8 @@
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
       if (Array.isArray(raw.deposits)) {
         out.deposits = raw.deposits.filter((d) => d && d.status === 'open' && Number.isFinite(d.ends_at))
-          .map((d) => ({ amount: Number(d.amount) || 0, endsAt: d.ends_at }));
+          .map((d) => ({ amount: Number(d.amount) || 0, rate: Number(d.rate) || 0, endsAt: d.ends_at }));
+        out.depositsSeen = true; // this reply had the list (an empty one means none open)
       }
       if (raw.chain && typeof raw.chain === 'object') {
         out.chain ={ count: raw.chain.count, multiplier: raw.chain.multiplier, next: raw.chain.next, expiresAt: raw.chain.expiresAt };
@@ -1441,6 +1442,7 @@
   // ever sent to MeowStreets itself. The bot ignores every crew but its own.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
   const CONTRACT_CUT_KEY = 'ms_contract_cut_v1'; // { cut, ends, paid: { contractId: [catId] }, at } from the crew bot's replies
+  const LOAN_CATS_KEY = 'ms_loan_cats_v1'; // [catId] with an open 💳 bank loan, from the crew bot's replies
   const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
   const CREW_BOT_CHAIN_URL = 'http://168.138.79.225:3001/v1/chain'; // the ⛓️ button on the Crew page
   const CREW_BOT_FEATS_URL = 'http://168.138.79.225:3001/v1/feats'; // hidden feats found by the crew (Merits page)
@@ -1503,6 +1505,13 @@
     // Treasury payments to members from the Crew page (0.44.3), so the bot can tick contract pay off by itself.
     const tp = treasuryPaysForBot();
     if (tp) body.treasuryPays = tp;
+    // Your open bank deposits (0.46.6, user request: a 💳 bank loan's interest share, how much and when), only when
+    // the bot's last reply named your cat id as having one (`loanCats`), so nobody else's deposits are ever sent.
+    const lc = GM_getValue(LOAN_CATS_KEY, []);
+    if (apiState.myId && Array.isArray(lc) && lc.includes(apiState.myId) && apiState.depositsSeen) {
+      body.me = apiState.myId;
+      body.deposits = apiState.deposits.map((d) => ({ amount: d.amount, rate: d.rate, endsAt: d.endsAt }));
+    }
     return body;
   }
 
@@ -1519,6 +1528,10 @@
           GM_setValue(CONTRACT_CUT_KEY, { cut: Number(j.contractPay.cut), ends: Number(j.contractPay.ends) || null, paid: j.contractPay.paid && typeof j.contractPay.paid === 'object' ? j.contractPay.paid : {},
             skip: Array.isArray(j.contractPay.skip) ? j.contractPay.skip.map(Number).filter(Number.isFinite) : [], at: Date.now() });
           schedule();
+        }
+        if (j && Array.isArray(j.loanCats)) {
+          const ids = j.loanCats.map(Number).filter(Number.isInteger);
+          if (JSON.stringify(ids) !== JSON.stringify(GM_getValue(LOAN_CATS_KEY, []))) GM_setValue(LOAN_CATS_KEY, ids);
         }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
@@ -5034,20 +5047,36 @@
     if (!panel) {
       panel = document.createElement('section');
       panel.id = 'msx-crewjobs';
-      panel.innerHTML = '<h2>Crew job XP/nerve and $/nerve</h2><div class="msx-calc-body"></div>';
+      panel.innerHTML = '<h2>Crew jobs: respect, XP/nerve and $/nerve</h2><div class="msx-calc-body"></div>';
       host.appendChild(panel);
     }
     const body = panel.querySelector('.msx-calc-body');
     const tiers = apiState?.crewJobTiers || [];
     if (!tiers.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own crew job data (open this page once it has loaded).</p>'; return; }
     let h = '<p class="msx-inv-note">The $ you personally get ("cut") is fixed per member, the same for every role. This assumes a bust pays nothing personally, only the crew’s treasury ("take") and respect are separate from your own cut.</p>';
-    h += '<table class="msx-inv-table"><thead><tr><th>Job</th><th>Chance</th><th>Nerve</th><th>Your cut</th><th>To treasury</th><th>Respect</th><th>XP/nerve</th><th>$/nerve</th><th>Run</th></tr></thead><tbody>';
+    // Respect for the crew (user request 2026-11-10, "the best way to farm respect"): per cat-hour = respect ÷ (run
+    // hours × cats in it), with the fewest cats the job takes (the most it can be) and, smaller, with a full team.
+    // Per 100 nerve = respect ÷ (nerve × cats), if every cat in it spends the nerve. Both are for a job that comes off;
+    // the chance is the game's base chance, and the team's stats raise it, so it isn't multiplied in.
+    const perHour = (t, n) => (t.duration > 0 && n > 0 ? t.respect / ((t.duration / 3600000) * n) : null);
+    const perNerve = (t, n) => (t.nerve > 0 && n > 0 ? (100 * t.respect) / (t.nerve * n) : null);
+    const bestHour = Math.max(...tiers.map((t) => perHour(t, t.minMembers) || 0));
+    const bestNerve = Math.max(...tiers.map((t) => perNerve(t, t.minMembers) || 0));
+    const fmtR = (v, best) => (v == null ? '—' : (v >= best - 1e-9 && best > 0 ? `<b>${v.toFixed(2)} ★</b>` : v.toFixed(2)));
+    h += '<p class="msx-inv-note"><b>Respect / cat-hour</b>: the crew\'s respect for each hour each cat spends in the job, with the fewest cats it takes (with a full team below it). <b>Respect / 100 nerve</b>: for every 100 nerve the team spends, if each cat in it spends the job\'s nerve. Both count a job that comes off; ★ = best.</p>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Job</th><th>Chance</th><th>Nerve</th><th>Your cut</th><th>To treasury</th><th>Respect</th><th>Cats</th><th>Respect / cat-hour</th><th>Respect / 100 nerve</th><th>XP/nerve</th><th>$/nerve</th><th>Run</th></tr></thead><tbody>';
     tiers.forEach((t) => {
       const c = t.chance / 100;
       const xpEv = c * t.xp + (1 - c) * t.xpFail;
       const dollarEv = c * t.cut;
+      const full = t.maxMembers > t.minMembers;
+      const hourFull = full ? perHour(t, t.maxMembers) : null;
+      const nerveFull = full ? perNerve(t, t.maxMembers) : null;
       h += `<tr><td>${escHtml(t.name)}<br><small>tier ${t.tier} · level ${t.level}+</small></td><td>${t.chance}%</td><td>${t.nerve}</td>` +
         `<td>${money0(t.cut)}</td><td>${money0(t.take)}</td><td>${t.respect}</td>` +
+        `<td>${t.minMembers}${full ? '–' + t.maxMembers : ''}</td>` +
+        `<td>${fmtR(perHour(t, t.minMembers), bestHour)}${hourFull != null ? `<br><small>${hourFull.toFixed(2)} with ${t.maxMembers}</small>` : ''}</td>` +
+        `<td>${fmtR(perNerve(t, t.minMembers), bestNerve)}${nerveFull != null ? `<br><small>${nerveFull.toFixed(2)} with ${t.maxMembers}</small>` : ''}</td>` +
         `<td>${(xpEv / t.nerve).toFixed(2)}</td><td>${signed0(dollarEv / t.nerve)}</td><td>${fmtDuration(t.duration)}</td></tr>`;
     });
     h += '</tbody></table>';
@@ -5258,7 +5287,7 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
