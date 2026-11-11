@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.9
+// @version      0.47.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -104,6 +104,7 @@
           id: c.id, chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
           heat: c.heat, hot: !!c.hot, heatZeroAt: Number(c.heatZeroAt) || 0, bonus: c.bonus, criticalChance: c.criticalChance,
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
+          masteryPercent: Number.isFinite(c.masteryPercent) ? c.masteryPercent : null,
           // The most this job's % can be (game build 2026-11-08: 96–99 by job, was 95 for all).
           ceiling: Number.isFinite(c.ceiling) ? c.ceiling : 95,
         };
@@ -2409,6 +2410,26 @@
     return best;
   }
 
+  // Successes to the next mastery level (0.47.0, user request). The game sends the level and the % of the way to the
+  // next one, not the count (masteryNext/toGo went in build 2026-11-08). Every older reading fits one rule for every
+  // job: level N is reached at 5 × N² successes (5, 20, 45, 80, 125, 180, 245, 320 ... 2,000 at 20), and the game's %
+  // is floor(100 × (successes − 5L²) ÷ (5(L+1)² − 5L²)). When the job's successes and % agree with that, the count is
+  // exact; otherwise (say mastery fell back) it's worked out from the % and marked "about".
+  const MASTERY_MAX = 20;
+  const masteryAt = (n) => 5 * n * n;
+  function masteryNext(api) {
+    const L = api && api.masteryLevel;
+    if (!Number.isInteger(L) || L < 0) return null;
+    if (L >= MASTERY_MAX) return { level: L, max: true };
+    const from = masteryAt(L), to = masteryAt(L + 1), s = api.successes, pct = api.masteryPercent;
+    if (Number.isFinite(s) && s >= from && s < to && (pct == null || Math.floor((100 * (s - from)) / (to - from)) === pct)) {
+      return { level: L, toGo: to - s, got: s, need: to, exact: true };
+    }
+    if (!Number.isFinite(pct)) return null;
+    return { level: L, toGo: Math.max(1, Math.ceil(((100 - pct) / 100) * (to - from))), pct, exact: false };
+  }
+  const masteryShort = (m) => (!m ? '' : m.max ? `M${m.level} (max)` : `M${m.level} · ${m.exact ? '' : '~'}${fmtInt(m.toGo)} to go`);
+
   // Overview: one line per job you can do, its best open place, pay and XP per nerve; ★ on the best of each.
   function drawCrimeTable() {
     // Under the job list (section.cs-ladder) before build 2026-11-08, under the street (section.cs-street) since.
@@ -2427,12 +2448,13 @@
       const v = r.best && r.best.v;
       const ct = contractForCrime(r.c.id);
       const chip = ct ? `<span class="msx-ct-chip" title="Crew contract ${escHtml(ct.name)}">Crew ${fmtInt(ct.got)}/${fmtInt(ct.goal)}</span>` : '';
+      const ms = masteryShort(masteryNext(apiState.crimes[norm(r.c.name)]));
       return `<tr${ct ? ' class="msx-crew-row"' : ''}><td>${escHtml(r.c.name)}${chip}</td><td>${v && v.odds != null ? v.odds + '%' : Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
         `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
-        `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td></tr>`;
+        `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td><td>${ms || '—'}</td></tr>`;
     }).join('');
     const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th title="The odds the game shows at the best place, with your bonuses and heat.">Success</th><th>Best place now</th>' +
-      '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th></tr></thead>' +
+      '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th><th title="Mastery level, and successes to the next level (each level is +1 odds)">Mastery</th></tr></thead>' +
       `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the game's odds at that place.</small>`;
     if (!box) { box = document.createElement('section'); box.id = 'msx-crimetable'; }
     if (ladder.nextElementSibling !== box) ladder.after(box);
@@ -2501,7 +2523,10 @@
       bits.push(heat <= 0 ? 'cool' : left > 0 ? `0 in ~${fmtClock(left)}` : 'cooling');
       heatHtml = `<div class="msx-crimeheat${api.hot || heat >= HOT_HEAT ? ' hot' : ''}">${bits.join(' · ')}</div>`;
     }
-    const html = heatHtml + `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
+    const mn = masteryNext(api);
+    const mastHtml = !mn ? '' : `<div class="msx-crimeheat">⭐ <b>Mastery ${mn.level}</b>` + (mn.max ? ' · the top level' : ` · ${mn.exact ? '' : 'about '}${fmtInt(mn.toGo)} more success${mn.toGo === 1 ? '' : 'es'} to level ${mn.level + 1}` +
+      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`) + ' · each level is +1 odds') + '</div>';
+    const html = heatHtml + mastHtml + `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
       oddsHtmlFromApi({ api, key: norm(crime.name) });
     if (!box) { box = document.createElement('div'); box.className = 'msx-chance'; }
     const after = dock.querySelector('.msx-pernerve') || quote;
