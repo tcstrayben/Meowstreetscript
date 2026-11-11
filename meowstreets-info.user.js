@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.6
+// @version      0.46.7
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1056,6 +1056,10 @@
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
       #msx-toast.show { opacity:1; }
+      #msx-sharepop { display:block; width:100%; box-sizing:border-box; margin:6px 0 0; padding:4px 8px; border-radius:6px; cursor:pointer;
+        font:inherit; font-size:11px; font-weight:700; color:var(--ms-lime, #b4df87); background:rgba(180,223,135,.08);
+        border:1px dashed var(--ms-lime, #b4df87); text-align:center; }
+      #msx-sharepop:hover { background:rgba(180,223,135,.18); }
     `;
     document.head.appendChild(s);
   }
@@ -5271,6 +5275,31 @@
     });
   }
 
+  // The Account page switch and the card below both turn sharing on or off this way.
+  function setSharing(on) {
+    settings.shareCrew = !!on;
+    saveSettings();
+    if (settings.shareCrew) { shareCrew(); syncStocks(true); }
+  }
+
+  // ─── "Turn on crew sharing" button (0.46.7, user request) ─────────────────
+  // A little button right under the sidebar's crew chain box (.sidebar-bottom .cn-fuses), on every page, for our
+  // crew's members with sharing off. One click turns it on (the same as the Account page switch) and it's gone.
+  function ensureSharePrompt() {
+    const old = document.getElementById('msx-sharepop');
+    const fuses = document.querySelector('.sidebar-bottom .cn-fuses');
+    if (!inShareCrew() || settings.shareCrew || !fuses) { if (old) old.remove(); return; }
+    if (old && old.previousElementSibling === fuses) return;
+    if (old) old.remove();
+    const btn = document.createElement('button');
+    btn.type = 'button';
+    btn.id = 'msx-sharepop';
+    btn.textContent = '🐾 Turn on crew sharing';
+    btn.title = 'Shares crew jobs, the chain, stock prices, fish and fight gear with our crew\'s Discord bot. The full list is on the Account page.';
+    btn.addEventListener('click', () => { setSharing(true); btn.remove(); });
+    fuses.insertAdjacentElement('afterend', btn);
+  }
+
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   function ensureAccountPanel() {
@@ -5316,7 +5345,7 @@
     });
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
-    box.querySelector('#msx-acc-share').addEventListener('change', (e) => { settings.shareCrew = e.target.checked; saveSettings(); if (settings.shareCrew) { shareCrew(); syncStocks(true); } });
+    box.querySelector('#msx-acc-share').addEventListener('change', (e) => setSharing(e.target.checked));
     updateAccountPanel();
   }
 
@@ -5403,6 +5432,7 @@
       ensureHeistsPanel();
       ensureCrewJobsPanel();
       ensureTradingPanel();
+      ensureSharePrompt();
       logShopPricesFromApi();
       drawWhiskers();
       if (isStockPage() && document.querySelector('.watch-table')) {
@@ -5429,7 +5459,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
