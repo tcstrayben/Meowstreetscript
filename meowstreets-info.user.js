@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.48.0
+// @version      0.49.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -125,6 +125,9 @@
             steps: c.kind === 'crack' ? ((c.targets || [])[0]?.wheels?.of || 1) : c.kind === 'steps' ? (c.targets || []).length || 1 : 1,
             tools: (c.tools || []).filter((t) => t && t.name).map((t) => ({ name: t.name, held: Number(t.held) || 0 })),
             places: (c.targets || []).filter((t) => t && !t.empty).map((t) => ({ id: t.id, name: t.name, open: !t.shut, acts: (t.acts || []).map(act) })),
+            // Mastery unlocks ("rungs", at mastery 3/6/10/15/20). The game only sends `text` once you have reached one.
+            rungs: (Array.isArray(c.rungs) ? c.rungs : []).filter((r) => r && r.name && Number.isInteger(r.at))
+              .map((r) => ({ at: r.at, name: r.name, text: typeof r.text === 'string' ? r.text : '', got: !!r.got })),
           })),
         };
         (raw.street.districts || []).forEach((d) => { if (d && d.id) out.street.districts[d.id] = { name: d.name, heat: d.heat, hot: !!d.hot, line: d.line || '' }; });
@@ -191,7 +194,19 @@
       if (raw.combat && Number(raw.combat.repeatWindow) > 0) out.repeatWindow = Number(raw.combat.repeatWindow);
       // Other cats' gear and stats, last seen in a fight (0.42.0). Each of your last 10 fights carries `state` (JSON
       // text) with both cats' level, exact stats, max health and gear ids at the time. Your own side is skipped.
-      if (raw.player && raw.player.id != null) out.myId = raw.player.id; // only the id, never the rest of `player`
+      if (raw.player && raw.player.id != null) out.myId = raw.player.id;
+      // Your own base stats, level and worn gear (0.49.0, user request: see the alliance's stats like fight records).
+      // Only these few fields of `player`; they leave this browser only with sharing on (noteSelfGear).
+      const pl = raw.player;
+      if (pl && pl.id != null && [pl.strength, pl.defense, pl.speed, pl.dexterity].every(Number.isFinite)) {
+        const self = { id: pl.id, n: pl.name || '', st: [pl.strength, pl.defense, pl.speed, pl.dexterity] };
+        if (Number.isFinite(pl.level)) self.lv = pl.level;
+        if (Array.isArray(raw.loadout)) {
+          const slot = (k) => { const x = raw.loadout.find((l) => l && l.slot === k); return x && x.item ? String(x.item) : null; };
+          Object.assign(self, { p: slot('primary'), s: slot('secondary'), t: slot('thrown'), a: slot('armor') });
+        }
+        out.selfCat = self;
+      }
       out.gearNames = {};
       [...(Array.isArray(raw.gear) ? raw.gear : []), ...(Array.isArray(raw.throwables) ? raw.throwables : [])]
         .forEach((g) => { if (g && g.id && g.name) out.gearNames[g.id] = g.name; });
@@ -1061,6 +1076,7 @@
         font:inherit; font-size:11px; font-weight:700; color:var(--ms-lime, #b4df87); background:rgba(180,223,135,.08);
         border:1px dashed var(--ms-lime, #b4df87); text-align:center; }
       #msx-sharepop:hover { background:rgba(180,223,135,.18); }
+      .msx-rungtip { margin:4px 0 0; font-size:12px; color:var(--ms-lime, #b4df87); }
     `;
     document.head.appendChild(s);
   }
@@ -1965,7 +1981,8 @@
     GEAR_FIELDS.forEach((k) => { if (nw[k] !== undefined && (newer || r[k] === undefined)) r[k] = nw[k]; });
     if (newer) { r.at = nw.at; r.src = nw.src; }
     if (Array.isArray(nw.st) && !(r.stAt >= nw.stAt)) { r.st = nw.st; r.stAt = nw.stAt; }
-    const strip = (x) => JSON.stringify(x ? { ...x, d: 0 } : null);
+    if (Number.isFinite(nw.me) && !(r.me >= nw.me)) r.me = nw.me; // when the cat itself last shared this (0.49.0)
+    const strip =(x) => JSON.stringify(x ? { ...x, d: 0 } : null);
     return strip(r) === strip(old) ? null : r;
   }
   function noteGear(list, src) {
@@ -1991,6 +2008,21 @@
     if (!apiState || !apiState.fightCats || apiState.at === fightCatsAt) return;
     fightCatsAt = apiState.at;
     noteGear(apiState.fightCats, 'you');
+    noteSelfGear();
+  }
+  // Your own stats, level and gear into the shared ⚔️ pool (0.49.0, user request), sharing on only: when they change,
+  // else at most every 6 hours. `me` marks it as the cat's own numbers (the bot only takes that from the cat itself).
+  const SELF_GEAR_KEY = 'ms_self_gear_v1';
+  const SELF_GEAR_EVERY_MS = 6 * 3600000;
+  function noteSelfGear() {
+    const s = apiState && apiState.selfCat;
+    if (!s || !sharingOn()) return;
+    const sig = JSON.stringify(s);
+    const last = GM_getValue(SELF_GEAR_KEY, null) || {};
+    if (last.sig === sig && Date.now() - (last.at || 0) < SELF_GEAR_EVERY_MS) return;
+    const at = Date.now();
+    GM_setValue(SELF_GEAR_KEY, { sig, at });
+    noteGear([{ ...s, at, stAt: at, me: at }], 'you');
   }
   // The Crew attacks list: each row has the other cat's level. Kept for cats that already have a ⚔️ record (a level
   // alone starts none), only if newer than what's known. Only the level changes: the gear's "seen" time stays, so old
@@ -2040,7 +2072,8 @@
   const gearName = (id) => (id === undefined ? '?' : id === null ? 'none' : ((apiState && apiState.gearNames) || {})[id] || id);
   // { gear, stats } as two lines of plain text.
   function gearLines(g) {
-    const gear = `Seen in a fight ${seenAt(g.at)}${g.src === 'crew' ? ' (crew)' : ''}: ` +
+    const own = g.me >= g.at; // the newest record is the cat's own share, not a fight
+    const gear = (own ? `Shared by this cat ${seenAt(g.at)}: ` : `Seen in a fight ${seenAt(g.at)}${g.src === 'crew' ? ' (crew)' : ''}: `) +
       [g.lv != null ? 'Level ' + g.lv : null, 'Primary ' + gearName(g.p), 'Secondary ' + gearName(g.s), 'Thrown ' + gearName(g.t), 'Armour ' + gearName(g.a),
         g.hp != null ? n0(g.hp) + ' HP' : null].filter(Boolean).join(' · ');
     const st = g.st;
@@ -2048,7 +2081,7 @@
       (Math.abs(g.stAt - g.at) > 60000 ? `, as of ${seenAt(g.stAt)}` : '') : 'Stats not seen yet (only your own fights show them).';
     return { gear, stats };
   }
-  const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + '\nWhat they had then; they may have changed gear or trained since.'; };
+  const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + (g.me >= g.at ? '\nTheir own base stats and gear, shared by their script (no temporary boosts).' : '\nWhat they had then; they may have changed gear or trained since.'); };
   // Beside a name: "⚔️ 1,234 · DEX/DEF" (total, then the two biggest stats) once stats are known, else just ⚔️.
   const STAT_ABBR = ['STR', 'DEF', 'SPD', 'DEX'];
   // Stats are always shown as STR/DEF/SPD/DEX (user request 2026-11-07), wherever the game spells them out.
@@ -2077,7 +2110,8 @@
     const l = gearLines(g);
     const html = `<div>⚔️ ${escHtml(l.gear)}</div><div class="msx-catgear-stats">${escHtml(l.stats)}</div>`;
     if (box.innerHTML !== html) box.innerHTML = html;
-    setTitle(box, 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear or trained since.');
+    setTitle(box, g.me >= g.at ? 'This cat\'s own base stats and gear, shared by their script (alliance sharing). No temporary boosts.'
+      : 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear or trained since.');
   }
 
   // Crew pool (sharing on): send what you saw, get back what the crew saw. The bot keeps the newest per cat too.
@@ -2096,6 +2130,7 @@
       const o = { id: Number(k), n: r.n, at: r.at };
       GEAR_FIELDS.forEach((f) => { if (r[f] !== undefined) o[f] = r[f]; });
       if (r.st) { o.st = r.st; o.stAt = r.stAt; }
+      if (r.me) o.me = r.me; // the bot keeps it only from the cat itself
       return o;
     });
     const sync = GM_getValue(GEAR_SYNC_KEY, null) || {};
@@ -5384,6 +5419,60 @@
     if (settings.shareCrew) { shareCrew(); syncStocks(true); }
   }
 
+  // ─── Crime mastery unlocks shared across the alliance (0.49.0, user request) ───
+  // The game only says what a mastery unlock ("rung", at mastery 3/6/10/15/20) does once you reach it. With sharing on,
+  // the ones you have reached (name and text, from the game's own data) go to the bot, and every one the alliance has
+  // reached comes back: shown on a job's page under a rung you haven't reached yet, and on its peg's tooltip.
+  const RUNGS_URL = 'http://168.138.79.225:3001/v1/rungs';
+  const RUNG_POOL_KEY = 'ms_rung_pool_v1'; // { crimeId: { at: { name, text } } }
+  const RUNG_SYNC_KEY = 'ms_rung_sync_v1'; // { sig, at } of the last send
+  const RUNG_SYNC_GAP_MS = 30 * 60000;
+  let rungBusy = false;
+  function syncRungs() {
+    if (!sharingOn() || rungBusy || typeof GM_xmlhttpRequest !== 'function' || !apiState || !apiState.street) return;
+    const mine = [];
+    apiState.street.crimes.forEach((c) => (c.rungs || []).forEach((r) => { if (r.got && r.text) mine.push([c.id, r.at, r.name, r.text]); }));
+    const sig = JSON.stringify(mine);
+    const last = GM_getValue(RUNG_SYNC_KEY, null) || {};
+    if (last.sig === sig && Date.now() - (last.at || 0) < RUNG_SYNC_GAP_MS) return;
+    GM_setValue(RUNG_SYNC_KEY, { sig, at: Date.now() });
+    rungBusy = true;
+    const done = () => { rungBusy = false; };
+    GM_xmlhttpRequest({
+      method: 'POST', url: RUNGS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), rungs: mine }),
+      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
+      onerror: done, ontimeout: done,
+    });
+  }
+  // A job's page: "🔓 Found by the alliance: …" under the rung line while it shows one you haven't reached, and the same
+  // text on each such peg's tooltip.
+  function drawRungTips() {
+    const id = crimePageId();
+    const climb = id && document.querySelector('.cs-climb');
+    let tip = document.querySelector('.msx-rungtip');
+    const pool = (climb && sharingOn() && (GM_getValue(RUNG_POOL_KEY, null) || {})[id]) || null;
+    if (!pool) { if (tip) tip.remove(); return; }
+    const c = streetCrime(id);
+    const got = new Set(((c && c.rungs) || []).filter((r) => r.got).map((r) => r.at));
+    const atOf = (peg) => { const m = (peg.getAttribute('aria-label') || '').match(/^Mastery (\d+):/); return m ? Number(m[1]) : null; };
+    let shownAt = null;
+    climb.querySelectorAll('.cs-peg').forEach((peg) => {
+      const at = atOf(peg);
+      const known = at != null && !peg.classList.contains('is-got') && !got.has(at) && pool[at];
+      if (known) setTitle(peg, `🔓 Found by the alliance: ${known.text}`);
+      if (peg.getAttribute('aria-pressed') === 'true') shownAt = at;
+    });
+    const line = climb.querySelector('.cs-rung');
+    const known = line && shownAt != null && !got.has(shownAt) && pool[shownAt];
+    if (!known) { if (tip) tip.remove(); return; }
+    if (!tip) { tip = document.createElement('p'); tip.className = 'msx-rungtip'; }
+    if (line.nextElementSibling !== tip) line.after(tip);
+    const txt = `🔓 Found by the alliance: ${known.text}`;
+    if (tip.textContent !== txt) tip.textContent = txt;
+    setTitle(tip, 'What this unlock does, from an alliance member who has reached it (crew sharing). The game only shows it once you get there.');
+  }
+
   // ─── "Turn on crew sharing" button (0.46.7, user request) ─────────────────
   // A little button right under the sidebar's crew chain box (.sidebar-bottom .cn-fuses), on every page, for our
   // crew's members with sharing off. One click turns it on (the same as the Account page switch) and it's gone.
@@ -5418,8 +5507,8 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</span></label></div>' +
+      '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear and stats from your fights, your own base stats, level and worn gear (so the alliance sees them on your profile), the crime mastery unlocks you have reached, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, your own base stats, level and worn gear, the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, the alliance\'s ⚔️ stats and gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</span></label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
@@ -5503,6 +5592,8 @@
       const onCrimes = isCrimesPage() || !!crimePageId();
       drawCrimeTable();
       if (onCrimes) drawCrimeDock();
+      syncRungs(); // mastery unlocks: at most every 30 minutes unless yours changed, sharing on only
+      drawRungTips();
       markContractCrimes();
       drawContractBanner();
       if (isStockPage()) syncNextMove();
@@ -5566,7 +5657,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, .msx-rungtip, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
