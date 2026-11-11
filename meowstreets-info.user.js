@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.47.0
+// @version      0.48.0
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1454,11 +1454,19 @@
   const CHAIN_FRESH_MS = 2 * 60000; // chain info older than this is never posted (the bot checks again)
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
-  // Sharing is only for one crew (user request, 0.22.0): the game's own crew id must be 2 (Pirate Cats). Anyone
-  // else never sees the sharing switch or the Discord buttons, and nothing is sent. The bot checks the id too.
+  // Who can share (0.48.0, user request 2026-11-11): the whole Cataclysm alliance shares the pooled city data (stock
+  // prices, fight stats and gear, pier fish, hidden feats, crewless cats' activity); crew 2 (ours) alone has the crew
+  // features (chain, jobs, heists, contracts, treasury, deposits, every Discord post). Anyone else never sees the
+  // sharing switch and nothing is sent. Each message carries your cat id from the game's own data: the bot checks it
+  // is on that crew's live member list.
   const SHARE_CREW_ID = 2;
-  const inShareCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
+  const ALLIANCE_CREW_IDS = [2, 3, 10, 11]; // The Purrfessionals, Cats With Attitude, The Meowfia Cat$, Night Watch
+  const inShareCrew = () => !!(apiState && apiState.crew && ALLIANCE_CREW_IDS.includes(apiState.crew.id));
+  const inOwnCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
   const sharingOn = () => !!settings.shareCrew && inShareCrew();
+  const crewSharingOn = () => sharingOn() && inOwnCrew();
+  const NOT_POSTED = 'Not posted: Discord posts are for The Purrfessionals members with sharing switched on.';
+  const shareCrewRef = () => ({ name: apiState.crew.name, id: apiState.crew.id, cat: apiState.myId || null });
   // Crew chain mode (0.23.0–0.33.x) was retired in 0.34.0: a failed crime no longer costs the crew chain anything
   // (API log "ubernew", 2026-10-20), so no crime can shrink it. Code kept in Archive/chain-mode/.
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
@@ -1478,7 +1486,7 @@
     const c = apiState.crew;
     // seenAt = when the game delivered this data. It changes on every game update, so the bot also hears "someone is
     // live" while nothing else changed -- the chain alert only fires on info the game confirmed in the last 2 minutes.
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
     if (apiState.crewJobsSeen) {
       body.jobs = (apiState.myCrewJobs || []).map((j) => ({
         id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
@@ -1547,7 +1555,7 @@
 
   // Sends only when something changed, and at most once per SHARE_MIN_GAP_MS (a late change waits for the gap).
   function shareCrew() {
-    if (!sharingOn()) return;
+    if (!crewSharingOn()) return;
     const body = crewSharePayload();
     if (!body) return;
     const sig = JSON.stringify(body);
@@ -1584,7 +1592,7 @@
     stockSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: STOCK_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
       onload: (r) => {
         stockSyncBusy = false;
         let j = null;
@@ -1622,7 +1630,7 @@
 
   // The "📣 Post to Discord" button: sends the current crew info plus which job to post.
   function postJobToDiscord(jobId) {
-    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
+    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
     const body = crewSharePayload();
     if (!body) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
     body.post = jobId;
@@ -1636,7 +1644,7 @@
 
   // The heist "📣 Post to Discord" button (0.32.0, user request): same as for crew jobs, into the bot's heist channel.
   function postHeistToDiscord(heistId) {
-    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
+    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
     const body = crewSharePayload();
     if (!body || !body.heists) { toast('No heist info yet. Open the Heists page once it has loaded.'); return; }
     body.postHeist = heistId;
@@ -1653,11 +1661,11 @@
   // itself (read-only rule), so stale info means "refresh the page".
   function postChainToDiscord() {
     const c = apiState && apiState.crew;
-    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
+    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
     const ageMs = Date.now() - apiState.at;
     if (ageMs > CHAIN_FRESH_MS) { toast('Not posted: the chain info is over 2 minutes old. Refresh the page, then try again.'); return; }
     if (!c.chainEndsAt || c.chainEndsAt <= Date.now()) { toast('Not posted: the chain has already ended.'); return; }
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
     if (typeof GM_xmlhttpRequest !== 'function') { toast('Not posted: Tampermonkey blocked the request.'); return; }
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_CHAIN_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
@@ -1671,7 +1679,7 @@
   // crew sharing is on.
   function ensureChainPostButton() {
     let box = document.getElementById('msx-chainpost');
-    const want = sharingOn() && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
+    const want = crewSharingOn() && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
     if (!want) { if (box) box.remove(); return; }
     const hood = document.querySelector('.right-column .neighborhood');
     const host = hood ? null : document.querySelector('.main-content') || document.querySelector('main');
@@ -1715,7 +1723,7 @@
     featSyncSig = sig; featSyncAt = Date.now();
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_FEATS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, feats: mine, hiddenTotal: meritFeats.filter((f) => f.hidden).length }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), feats: mine, hiddenTotal: meritFeats.filter((f) => f.hidden).length }),
       onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
     });
   }
@@ -2094,7 +2102,7 @@
     gearSyncAt = Date.now(); gearSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: GEAR_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, cats: send, since: Number.isFinite(sync.since) ? sync.since : null }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), cats: send, since: Number.isFinite(sync.since) ? sync.since : null }),
       onload: (r) => {
         gearSyncBusy = false;
         let j = null;
@@ -2241,7 +2249,7 @@
     const done = () => { crewlessBusy = false; };
     GM_xmlhttpRequest({
       method: 'POST', url: CREWLESS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id } }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef() }),
       onload: (r) => {
         done();
         let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
@@ -3512,7 +3520,7 @@
     fishSyncAt = Date.now(); fishSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: FISH_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, catches: send, notes: apiState.pier.rawNotes || null, sense }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), catches: send, notes: apiState.pier.rawNotes || null, sense }),
       onload: (r) => {
         fishSyncBusy = false;
         let j = null;
@@ -5088,7 +5096,7 @@
   // The 📣 button beside "Copy for Discord" (crew jobs 0.19.0, heists 0.32.0), only while crew sharing is on.
   function ensurePostButton(panel, title, send) {
     let post = panel && panel.querySelector('.msx-postbtn');
-    if (panel && sharingOn() && !post) {
+    if (panel && crewSharingOn() && !post) {
       post = document.createElement('button');
       post.type = 'button';
       post.className = 'msx-postbtn';
@@ -5096,7 +5104,7 @@
       post.title = title;
       post.addEventListener('click', () => send(panel.dataset.selectedId));
       panel.querySelector('.msx-copybtn').after(post);
-    } else if (post && !sharingOn()) post.remove();
+    } else if (post && !crewSharingOn()) post.remove();
   }
 
   function ensureMyHeistPanel() {
@@ -5320,8 +5328,8 @@
     const b = e.target.closest && e.target.closest('.msx-ws-deal');
     if (!b) return;
     e.preventDefault(); e.stopPropagation();
-    if (!sharingOn()) { toast('Not posted: sharing is only for crew members with sharing switched on.'); return; }
-    const body = { v: 1, sender: shareId(), crew: { name: apiState.crew.name, id: apiState.crew.id }, item: b.dataset.item, price: Number(b.dataset.price) };
+    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
+    const body = { v: 1, sender: shareId(), crew: shareCrewRef(), item: b.dataset.item, price: Number(b.dataset.price) };
     if (b.dataset.min) { body.min = Number(b.dataset.min); body.max = Number(b.dataset.max); }
     if (Number(b.dataset.until) > Date.now()) body.until = Number(b.dataset.until); // when this price ends (0.29.0: Discord countdown)
     GM_xmlhttpRequest({
@@ -5359,7 +5367,7 @@
       // 📣 while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co. for $Y" to the
       // crew bot's deals channel. Only on items whose price moves within a range (0.21.0) -- fixed prices are no news.
       // The Discord post gets the normal price and range, never your personal discount (user request, 0.22.0).
-      const deal = it && sharingOn() && it.baseMin != null && it.baseMax > it.baseMin
+      const deal = it && crewSharingOn() && it.baseMin != null && it.baseMax > it.baseMin
         ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.base}" data-min="${it.baseMin}" data-max="${it.baseMax}" data-until="${it.until || ''}" title="Post this price to the crew Discord">📣 Post to Discord</button>`
         : '';
       const html = it ? whiskersHtml(it) + deal : '';
@@ -5410,7 +5418,8 @@
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with our crew\'s Discord bot: crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</label></div>' +
+      '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, the crew\'s ⚔️ last-seen gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</span></label></div>' +
       '<h3>Game API key (optional)</h3>' +
       '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
@@ -5449,7 +5458,11 @@
     const ev = box.querySelector('#msx-acc-events');
     const sh = box.querySelector('#msx-acc-share');
     const shBox = box.querySelector('#msx-acc-sharebox');
-    if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // only shown to the crew the bot serves
+    if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // only shown to the alliance
+    const allyNote = box.querySelector('#msx-acc-allynote');
+    if (allyNote.hidden === !inOwnCrew()) allyNote.hidden = inOwnCrew(); // allies: what they share instead
+    const what = box.querySelector('#msx-acc-sharewhat');
+    if (what.hidden === inOwnCrew()) what.hidden = !inOwnCrew(); // the full list is crew 2's
     if (sh.checked !== settings.shareCrew) sh.checked = settings.shareCrew;
     if (ev.checked !== settings.events) ev.checked = settings.events;
     // The key itself is never shown again once saved.
