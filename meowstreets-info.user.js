@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.46.7
+// @version      0.46.8
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -2258,7 +2258,18 @@
   // tab so the list stays open. Profile pages live at /cat/<id> (the page then loads /api/cat?id=...).
   const catLink = (c) => `<a class="msx-cat-link" href="/cat/${encodeURIComponent(c.id)}" target="_blank" rel="noopener" title="Open ${escHtml(c.name)}'s profile"><b>${escHtml(c.name)}</b></a>${muggableBadge(c.id)}${safeTag(c.id, c.lyingLow)}${halfXpTag(c.id)}${gearTag(c.id)}`;
   const agoText = (ms) => { const h = Math.floor(ms / 3600000); return h >= 1 ? `${h}h ago` : `${Math.max(1, Math.floor(ms / 60000))}m ago`; };
-  const setHtml = (el, html) => { if (el.innerHTML !== html) el.innerHTML = html; };
+  // Redraws only when the html itself changed: compared with what was last written, not el.innerHTML (the browser
+  // writes some of it back differently, so that check redrew the No crew list on every page change and its scroll
+  // jumped back to the top; user report 2026-11-10). A redraw keeps the list's scroll position.
+  const setHtml = (el, html) => {
+    if (el.dataset.html === html) return;
+    const ul = el.querySelector('ul');
+    const top = ul ? ul.scrollTop : 0;
+    el.innerHTML = html;
+    el.dataset.html = html;
+    const ul2 = el.querySelector('ul');
+    if (ul2 && top) ul2.scrollTop = top;
+  };
 
   function playerList(id) {
     let el = document.getElementById(id);
