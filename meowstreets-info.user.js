@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.1
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
+// @version      0.49.2
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches and the gear and stats of cats seen in your fights, with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' battle stats and gear, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -13,7 +13,6 @@
 // @grant        GM_setValue
 // @grant        unsafeWindow
 // @grant        GM_addValueChangeListener
-// @grant        GM_setClipboard
 // @grant        GM_xmlhttpRequest
 // @connect      168.138.79.225
 // @connect      meowstreets.com
@@ -852,7 +851,7 @@
       .msx-stock .msx-moves b.up { color:var(--ms-lime, #b4df87); }
       .msx-stock .msx-moves b.down { color:var(--ms-red, #eb6561); }
       .msx-stock .msx-moves i { font-style:normal; opacity:.7; }
-      #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-myheist, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
+      #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading { margin:18px 0; padding:12px 16px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; }
       #msx-invest summary { cursor:pointer; font-size:16px; font-weight:700; }
       .msx-players { margin:0 0 12px; padding:8px 14px; border-radius:12px; background:rgba(0,0,0,.28);
@@ -864,23 +863,9 @@
       .msx-players a.msx-cat-link { color:inherit; text-decoration:none; }
       .msx-players a.msx-cat-link:hover b { text-decoration:underline; color:#9ecbff; }
       .msx-players .msx-nc-new { color:var(--ms-lime, #b4df87); }
-      #msx-heists h2, #msx-crewjobs h2, #msx-mycrewjob h2, #msx-myheist h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
+      #msx-heists h2, #msx-crewjobs h2, #msx-trading h2 { margin:0; font-size:16px; font-weight:700; }
       #msx-invest h4 { margin:14px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
-      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-mycrewjob .msx-inv-note, #msx-myheist .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
-      #msx-mycrewjob .msx-mycrewjob-seats { margin:8px 0; display:flex; flex-direction:column; gap:2px; }
-      #msx-mycrewjob .msx-mycrewjob-seats .open { color:var(--ms-gold, #e9c46a); }
-      #msx-mycrewjob .msx-jobtabs, #msx-myheist .msx-jobtabs { display:flex; flex-wrap:wrap; gap:6px; margin:8px 0; }
-      #msx-mycrewjob .msx-jobtab, #msx-myheist .msx-jobtab { padding:4px 10px; border-radius:999px; cursor:pointer; font-size:12.5px;
-        color:var(--ms-smoke, #8d9289); background:rgba(0,0,0,.2); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      #msx-mycrewjob .msx-jobtab.active, #msx-myheist .msx-jobtab.active { color:var(--ms-bone, #e7ede1); border-color:var(--ms-lime, #b4df87); background:rgba(180,223,135,.12); }
-      #msx-mycrewjob .msx-jobtab:hover, #msx-myheist .msx-jobtab:hover { border-color:var(--ms-lime, #b4df87); }
-      #msx-mycrewjob textarea, #msx-myheist textarea { width:100%; min-height:160px; margin:10px 0; padding:10px 12px; border-radius:8px; resize:vertical;
-        color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.35); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3));
-        font-family:inherit; font-size:12.5px; line-height:1.5; white-space:pre-wrap; }
-      #msx-mycrewjob button, #msx-myheist button { padding:6px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px;
-        background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      #msx-mycrewjob button:hover, #msx-myheist button:hover { border-color:var(--ms-lime, #b4df87); }
-      #msx-mycrewjob .msx-postbtn { margin-left:8px; }
+      #msx-invest .msx-inv-note, #msx-heists .msx-inv-note, #msx-crewjobs .msx-inv-note, #msx-trading .msx-inv-note { margin:8px 0; color:var(--ms-smoke, #8d9289); }
       #msx-gymlock { display:flex; flex-wrap:wrap; align-items:center; gap:6px; margin:8px 0 4px; font-size:12px; color:var(--ms-smoke, #8d9289); }
       #msx-gymlock .msx-gl-chip { padding:3px 9px; border-radius:999px; border:1px solid var(--ms-line, rgba(231,237,225,.2)); background:rgba(0,0,0,.25);
         color:var(--ms-bone, #e7ede1); font:inherit; cursor:pointer; }
@@ -925,23 +910,15 @@
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
-      .right-column #msx-mycrewjob { margin:16px 0 0; }
-      #msx-chainpost { margin:16px 0 0; }
       .msx-heatlock button.msx-heat-toggle { margin-left:2px; }
       .msx-feat-how { margin-top:3px; font-size:12px; color:var(--ms-lime, #b4df87); }
       .msx-feat-how b { color:var(--ms-bone, #e7ede1); font-weight:600; }
-      #msx-chainpost button { width:100%; padding:8px 12px; border-radius:8px; cursor:pointer; color:var(--ms-bone, #e7ede1); font-size:13px; font-family:inherit; font-weight:600;
-        background:rgba(0,0,0,.28); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      #msx-chainpost button:hover { border-color:var(--ms-lime, #b4df87); }
-      .right-column #msx-mycrewjob textarea { min-height:220px; }
       #msx-trading .msx-trade-key { padding-left:18px; font-size:12px; line-height:1.5; }
       #msx-trading .msx-trade-key b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws { display:flex; flex-direction:column; gap:2px; margin-top:6px; padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
-      .msx-ws .msx-ws-deal { align-self:flex-start; margin-top:4px; padding:2px 8px; border-radius:6px; cursor:pointer; font-size:11px; font-family:inherit; font-weight:600; width:auto; min-height:0; color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
-      .msx-ws .msx-ws-deal:hover { border-color:#9ecbff; }
       .rung .tool-line > span.msx-tool-link { cursor:pointer; }
       .rung .tool-line > span.msx-tool-link:hover { border-color:#9ecbff; text-decoration:underline; }
       .ws-row.msx-ws-focus { outline:2px solid var(--ms-lime, #b4df87); outline-offset:4px; border-radius:10px; transition:outline-color .4s; }
@@ -1040,7 +1017,7 @@
         background:rgba(143,203,255,.08); border:1px solid var(--msx-crew); }
       .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
       .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
-      #msx-crewjobs, #msx-mycrewjob, #msx-chainpost button { border-color:var(--msx-crew); }
+      #msx-crewjobs { border-color:var(--msx-crew); }
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
@@ -1072,10 +1049,6 @@
         padding:10px 12px; border-radius:10px; background:var(--ms-asphalt, #1c201c); color:var(--ms-bone, #e7ede1);
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
       #msx-toast.show { opacity:1; }
-      #msx-sharepop { display:block; width:100%; box-sizing:border-box; margin:6px 0 0; padding:4px 8px; border-radius:6px; cursor:pointer;
-        font:inherit; font-size:11px; font-weight:700; color:var(--ms-lime, #b4df87); background:rgba(180,223,135,.08);
-        border:1px dashed var(--ms-lime, #b4df87); text-align:center; }
-      #msx-sharepop:hover { background:rgba(180,223,135,.18); }
       .msx-rungtip { margin:4px 0 0; font-size:12px; color:var(--ms-lime, #b4df87); }
     `;
     document.head.appendChild(s);
@@ -1445,7 +1418,9 @@
 
   // ─── Settings (kept on this computer, edited on the Account page) ─────────
   const SETTINGS_KEY = 'ms_settings_v1';
-  const DEFAULT_SETTINGS = { events: true, shareCrew: false };
+  // shareOff (0.49.2, user request 2026-11-12): sharing is on unless switched off on the Account page. The old
+  // shareCrew switch (off by default until 0.49.1) is no longer read, so every install starts on.
+  const DEFAULT_SETTINGS = { events: true, shareOff: false };
   let settings = { ...DEFAULT_SETTINGS };
   try {
     const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
@@ -1455,34 +1430,31 @@
     try { GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
   }
 
-  // ─── Crew sharing with the crew's Discord bot (opt-in, 0.19.0) ────────────
-  // OFF unless you tick "Share crew info with our crew's Discord bot" on the Account page. When on, each time the
-  // game's own /api/state passes by, a small summary goes to the crew bot's server: crew name, crew chain count
-  // and end time, and the crew's active jobs (seats, members' names/levels, payout) -- the same things the Crew
-  // page and the "Copy for Discord" message already show. Never your account, cash, email or messages. Nothing is
-  // ever sent to MeowStreets itself. The bot ignores every crew but its own.
+  // ─── Sharing with The Purrfessionals' Discord bot (0.19.0; on by default since 0.49.2) ────────────
+  // ON unless switched off on the Account page (user request 2026-11-12). Crew 2's members also send their crew's
+  // summary each time the game's own /api/state passes by: crew name, chain count and end time, and the crew's
+  // active jobs (seats, members' names/levels, payout) -- the same things the Crew page already shows. Never your
+  // account, cash, email or messages. Nothing is ever sent to MeowStreets itself.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
   const CONTRACT_CUT_KEY = 'ms_contract_cut_v1'; // { cut, ends, paid: { contractId: [catId] }, at } from the crew bot's replies
   const LOAN_CATS_KEY = 'ms_loan_cats_v1'; // [catId] with an open 💳 bank loan, from the crew bot's replies
-  const CREW_BOT_DEAL_URL = 'http://168.138.79.225:3001/v1/deal'; // the 📣 beside Whiskers items
-  const CREW_BOT_CHAIN_URL = 'http://168.138.79.225:3001/v1/chain'; // the ⛓️ button on the Crew page
   const CREW_BOT_FEATS_URL = 'http://168.138.79.225:3001/v1/feats'; // hidden feats found by the crew (Merits page)
-  const CHAIN_FRESH_MS = 2 * 60000; // chain info older than this is never posted (the bot checks again)
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
-  // Who can share (0.48.0, user request 2026-11-11): the whole Cataclysm alliance shares the pooled city data (stock
-  // prices, fight stats and gear, pier fish, hidden feats, crewless cats' activity); crew 2 (ours) alone has the crew
-  // features (chain, jobs, heists, contracts, treasury, deposits, every Discord post). Anyone else never sees the
-  // sharing switch and nothing is sent. Each message carries your cat id from the game's own data: the bot checks it
-  // is on that crew's live member list.
+  // Who gets what (0.48.0; 0.49.2, user request 2026-11-12): everyone sends the pooled city data they see (stock
+  // prices, fight stats and gear, pier fish, hidden feats, mastery unlocks) and gets it back, except other cats'
+  // battle stats and gear: those come back to the alliance crews only (gearPoolOn), which the bot enforces from the
+  // cat id. Crew 2 (ours) alone has the crew features (chain, jobs, heists, contracts, treasury, deposits). Each message carries your
+  // cat id from the game's own data: the bot checks it is on that crew's live member list.
   const SHARE_CREW_ID = 2;
-  const ALLIANCE_CREW_IDS = [2, 3, 10, 11]; // The Purrfessionals, Cats With Attitude, The Meowfia Cat$, Night Watch
+  const ALLIANCE_CREW_IDS = [2, 3, 4, 10, 11]; // The Purrfessionals, Cats With Attitude, The Church of Meowology (joined 2026-11-12), The Meowfia Cat$, Night Watch
   const inShareCrew = () => !!(apiState && apiState.crew && ALLIANCE_CREW_IDS.includes(apiState.crew.id));
   const inOwnCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
-  const sharingOn = () => !!settings.shareCrew && inShareCrew();
-  const crewSharingOn = () => sharingOn() && inOwnCrew();
-  const NOT_POSTED = 'Not posted: Discord posts are for The Purrfessionals members with sharing switched on.';
-  const shareCrewRef = () => ({ name: apiState.crew.name, id: apiState.crew.id, cat: apiState.myId || null });
+  const sharingOn = () => !settings.shareOff && !!(apiState && apiState.myId); // sends what you see
+  const gearPoolOn = () => sharingOn() && inShareCrew(); // ...and gets other cats' battle stats and gear back
+  const crewSharingOn = () => gearPoolOn() && inOwnCrew();
+  // No crew: { name: null, id: null } (the bot checks the cat id alone).
+  const shareCrewRef = () => ({ name: (apiState.crew && apiState.crew.name) || null, id: (apiState.crew && apiState.crew.id) || null, cat: apiState.myId || null });
   // Crew chain mode (0.23.0–0.33.x) was retired in 0.34.0: a failed crime no longer costs the crew chain anything
   // (API log "ubernew", 2026-10-20), so no crime can shrink it. Code kept in Archive/chain-mode/.
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
@@ -1512,7 +1484,7 @@
       }));
       body.roleTitles = apiState.crewJobRoles || {};
     }
-    // Heists you are in (0.32.0), the same things the heist "Copy for Discord" message shows; only when the game sent
+    // Heists you are in (0.32.0), for the bot's heist posts; only when the game sent
     // its heist list. Member names and roles, never ids.
     if (Array.isArray(apiState.heistsDone)) {
       body.heists = (apiState.myHeists || []).map((h) => ({
@@ -1594,7 +1566,7 @@
   let stockSyncAt = 0, stockSyncBusy = false;
 
   function syncStocks(force) {
-    if (!sharingOn() || stockSyncBusy || !apiState.crew.name) return;
+    if (!sharingOn() || stockSyncBusy) return;
     if (typeof GM_xmlhttpRequest !== 'function') return;
     if (!force && Date.now() - stockSyncAt < STOCK_SYNC_GAP_MS) return;
     const out = [];
@@ -1628,7 +1600,7 @@
         Object.entries(db.stocks).forEach(([id, rec]) => (rec.obs || []).forEach((o) => { if (o.src !== 'crew' && sent.has(id + ':' + periodOf(o))) o.x = 1; }));
         // Merge the crew's prices: fill periods you don't have; never overwrite your own reading.
         const now = new Date().toISOString();
-        Object.entries(j.prices || {}).forEach(([id, list]) => {
+        Object.entries((sharingOn() && j.prices) || {}).forEach(([id, list]) => {
           if (!Array.isArray(list)) return;
           const rec = db.stocks[id] || (db.stocks[id] = { name: id, obs: [] });
           const byP = new Map(rec.obs.map((o) => [periodOf(o), o]));
@@ -1650,71 +1622,6 @@
       onerror: () => { stockSyncBusy = false; },
       ontimeout: () => { stockSyncBusy = false; },
     });
-  }
-
-  // The "📣 Post to Discord" button: sends the current crew info plus which job to post.
-  function postJobToDiscord(jobId) {
-    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
-    const body = crewSharePayload();
-    if (!body) { toast('No crew info yet. Open the Crew page once it has loaded.'); return; }
-    body.post = jobId;
-    shareLastSig = JSON.stringify({ ...body, post: undefined }); shareLastAt = Date.now();
-    sendToCrewBot(body, (r) => {
-      const p = r && r.post;
-      if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
-      else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
-    });
-  }
-
-  // The heist "📣 Post to Discord" button (0.32.0, user request): same as for crew jobs, into the bot's heist channel.
-  function postHeistToDiscord(heistId) {
-    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
-    const body = crewSharePayload();
-    if (!body || !body.heists) { toast('No heist info yet. Open the Heists page once it has loaded.'); return; }
-    body.postHeist = heistId;
-    shareLastSig = JSON.stringify({ ...body, postHeist: undefined }); shareLastAt = Date.now();
-    sendToCrewBot(body, (r) => {
-      const p = r && r.heistPost;
-      if (r && r.ok && p && p.ok) toast(p.already ? 'Already posted. The bot keeps that post up to date.' : 'Posted to Discord. It will update as people join.');
-      else toast('Not posted: ' + ((p && p.error) || (r && r.error) || 'unknown problem') + '.');
-    });
-  }
-
-  // ⛓️ Post chain (0.21.0, replaced the bot's automatic 1-minute ping): the bot posts "Crew chain ×N ends in …" as a
-  // Discord countdown. Only from game info under 2 minutes old -- the script never asks the game for fresh data
-  // itself (read-only rule), so stale info means "refresh the page".
-  function postChainToDiscord() {
-    const c = apiState && apiState.crew;
-    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
-    const ageMs = Date.now() - apiState.at;
-    if (ageMs > CHAIN_FRESH_MS) { toast('Not posted: the chain info is over 2 minutes old. Refresh the page, then try again.'); return; }
-    if (!c.chainEndsAt || c.chainEndsAt <= Date.now()) { toast('Not posted: the chain has already ended.'); return; }
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at }, ageMs };
-    if (typeof GM_xmlhttpRequest !== 'function') { toast('Not posted: Tampermonkey blocked the request.'); return; }
-    GM_xmlhttpRequest({
-      method: 'POST', url: CREW_BOT_CHAIN_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (err) { /* not json */ } toast(j && j.ok ? 'Chain posted to Discord.' : 'Not posted: ' + ((j && j.error) || 'unknown problem') + '.'); },
-      onerror: () => toast('Not posted: could not reach the crew bot.'),
-      ontimeout: () => toast('Not posted: the crew bot did not answer.'),
-    });
-  }
-
-  // The button lives on the Crew page, right column, under "Your neighborhood" (above the crew job box), while
-  // crew sharing is on.
-  function ensureChainPostButton() {
-    let box = document.getElementById('msx-chainpost');
-    const want = crewSharingOn() && location.pathname.replace(/\/+$/, '') === '/crew' && apiState && apiState.crew && apiState.crew.name;
-    if (!want) { if (box) box.remove(); return; }
-    const hood = document.querySelector('.right-column .neighborhood');
-    const host = hood ? null : document.querySelector('.main-content') || document.querySelector('main');
-    if (!hood && !host) return;
-    if (!box) {
-      box = document.createElement('div');
-      box.id = 'msx-chainpost';
-      box.innerHTML = '<button type="button" title="Post the crew chain and its countdown in the crew Discord">⛓️ Post chain to Discord</button>';
-      box.querySelector('button').addEventListener('click', postChainToDiscord);
-    }
-    if (hood) { if (hood.nextElementSibling !== box) hood.after(box); } else if (host.firstElementChild !== box) host.prepend(box);
   }
 
   // ─── Hidden feats (Merits page, 0.22.0) ───────────────────────────────────
@@ -1748,7 +1655,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_FEATS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), feats: mine, hiddenTotal: meritFeats.filter((f) => f.hidden).length }),
-      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
+      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
     });
   }
 
@@ -2155,7 +2062,7 @@
         const now = GM_getValue(GEAR_KEY, null) || {};
         send.forEach((o) => { const x = now[String(o.id)]; if (x && x.d && x.at === o.at && x.stAt === o.stAt) delete x.d; });
         GM_setValue(GEAR_KEY, now);
-        noteGear(Object.entries(j.cats || {}).map(([id, c]) => ({ ...c, id: Number(id) })), 'crew');
+        if (gearPoolOn()) noteGear(Object.entries(j.cats || {}).map(([id, c]) => ({ ...c, id: Number(id) })), 'crew');
         if (Number.isFinite(j.upTo)) GM_setValue(GEAR_SYNC_KEY, { since: j.upTo });
         if (dirty.length > GEAR_SEND_MAX || j.more) setTimeout(syncGear, GEAR_SEND_GAP_MS + 1000);
       },
@@ -2284,7 +2191,7 @@
   const CREWLESS_ACTIVE_MS = 48 * 3600000;
   let crewlessBusy = false, crewlessAskedAt = 0;
   function syncCrewless() {
-    if (!sharingOn() || crewlessBusy || typeof GM_xmlhttpRequest !== 'function' || !apiState || !apiState.crew) return;
+    if (!sharingOn() || crewlessBusy || typeof GM_xmlhttpRequest !== 'function') return;
     const last = GM_getValue(CREWLESS_KEY, null);
     if (Date.now() - Math.max(crewlessAskedAt, (last && last.at) || 0) < CREWLESS_GAP_MS) return;
     crewlessBusy = true;
@@ -3570,7 +3477,7 @@
         try { j = JSON.parse(r.responseText); } catch (e) { return; }
         if (!j || !j.ok) return;
         GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense) });
-        GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
+        if (sharingOn()) GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
         schedule();
         if (fresh.length > FISH_SEND_MAX) setTimeout(syncFish, FISH_SEND_GAP_MS + 1000);
       },
@@ -4041,7 +3948,7 @@
     const root = document.querySelector('.main-content') || document.querySelector('main');
     if (!root) return '';
     const clone = root.cloneNode(true);
-    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-gymlock, #msx-ct-banner, .msx-ct-line, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, script, style').forEach((n) => n.remove());
+    clone.querySelectorAll('.msx-info, .msx-stock, .msx-heat, .msx-ticker, #msx-gymlock, #msx-ct-banner, .msx-ct-line, #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading, script, style').forEach((n) => n.remove());
     // A locked Train button is this script's own doing, not something the game itself did -- a page capture
     // should reflect the real page, so the lock is undone on the clone (never on the live page) before saving.
     clone.querySelectorAll('button.msx-train-locked').forEach((n) => { n.disabled = false; n.classList.remove('msx-train-locked'); });
@@ -4945,220 +4852,6 @@
     return h + 'h' + (mm ? ` ${mm}m` : '');
   }
 
-  // ─── Copy your crew job to Discord (Crew page) ─────────────────────────────
-  // Builds a plain-text message from the crew job you are actually in right now (recruiting or already
-  // launched): which seats are filled, which are open and what stat each open seat wants (crewJobRoles, the
-  // game's own data, not a guess), and the payout. A button copies it to the clipboard for you to paste --
-  // nothing is ever sent anywhere by this script itself; pasting it into Discord is still something you do.
-  function copyToClipboard(text) {
-    try { if (typeof GM_setClipboard === 'function') { GM_setClipboard(text, 'text'); return true; } } catch (e) { /* fall through */ }
-    try { if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(text); return true; } } catch (e) { /* fall through */ }
-    return false;
-  }
-
-  function buildCrewJobMessage(job, crewName) {
-    const roles = apiState && apiState.crewJobRoles;
-    const title = job.name || 'Crew job';
-    const filled = job.members || [];
-    const seatsTotal = job.maxMembers || filled.length;
-    const openCount = Math.max(0, seatsTotal - filled.length);
-    const roleTitle = (key) => (roles && roles[key] && roles[key].title) || key || 'Unknown role';
-    const lines = [];
-    lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${job.tier ? ` (tier ${job.tier})` : ''}`);
-    if (job.minLevel != null) lines.push(`🔒 Level ${job.minLevel}+`);
-    if (job.status === 'planning') {
-      lines.push(`Recruiting — ${filled.length}/${seatsTotal} seats filled${job.minMembers ? `, ${job.minMembers} minimum to launch` : ''}`);
-    } else {
-      const remain = job.endsAt ? job.endsAt - Date.now() : null;
-      lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
-    }
-    // Open seats first, filled ones under them (user request, 0.17.3): the open seats are what a reader acts on.
-    if (job.status === 'planning' && openCount > 0) {
-      const filledRoles = new Set(filled.map((m) => m.role));
-      const openRoles = (job.roles || []).filter((r) => !filledRoles.has(r));
-      lines.push('', '🟡 Open:');
-      if (openRoles.length) {
-        openRoles.forEach((rk) => {
-          const stat = roles && roles[rk] && roles[rk].stat && statAbbr(roles[rk].stat);
-          lines.push(`• ${roleTitle(rk)}${stat ? ` — needs ${stat}` : ''}`);
-        });
-      } else {
-        lines.push(`• ${openCount} seat${openCount === 1 ? '' : 's'} open`);
-      }
-    }
-    if (filled.length) {
-      lines.push('', '✅ Filled:');
-      filled.forEach((m) => lines.push(`• ${roleTitle(m.role)} — ${m.name || 'someone'}${m.level != null ? ` (Lv ${m.level})` : ''}`));
-    }
-    const payoutBits = [];
-    if (job.cut != null) payoutBits.push(`💰 ${money0(job.cut)} each`);
-    if (job.take != null) payoutBits.push(`treasury ${money0(job.take)}`);
-    if (job.respect != null) payoutBits.push(`+${job.respect} respect`);
-    const oddsBits = [];
-    if (job.chance != null) oddsBits.push(`🎲 ${job.chance}% chance`);
-    if (job.nerve != null) oddsBits.push(`${job.nerve} nerve`);
-    if (job.stake) oddsBits.push(`${money0(job.stake)} stake`);
-    if (payoutBits.length || oddsBits.length) lines.push('');
-    if (payoutBits.length) lines.push(payoutBits.join(' · '));
-    if (oddsBits.length) lines.push(oddsBits.join(' · '));
-    return lines.join('\n');
-  }
-
-  // Same idea as the crew job message, but for a heist you're actually in. Heists carry no role->stat lookup
-  // the way crew jobs do (checked -- there's no `heistRoles` anywhere in the game's own data), so an open seat
-  // just says how many are left, not what it wants.
-  // Laid out like the crew job message (0.39.0): open seats with the stat each needs, filled seats with role, stat and
-  // who, then payout and odds. Roles and stats from the game's own heist `roles` list.
-  function buildHeistMessage(heist, crewName) {
-    const title = heist.name || 'Heist';
-    const roles = (apiState && apiState.heistRoles) || {};
-    const roleName = (r) => (roles[r] && roles[r].title) || r || 'someone';
-    const roleStat = (r) => (roles[r] && roles[r].stat && statAbbr(roles[r].stat)) || null;
-    const filled = heist.members || [];
-    const seatsTotal = heist.maxMembers || filled.length;
-    const openCount = Math.max(0, seatsTotal - filled.length);
-    const lines = [];
-    lines.push(`🐾 **${crewName ? crewName + ' — ' : ''}${title}**${heist.tier ? ` (tier ${heist.tier})` : ''}`);
-    if (heist.status !== 'running') {
-      lines.push(`Recruiting — ${filled.length}/${seatsTotal} seats filled${heist.minMembers ? `, ${heist.minMembers} minimum to launch` : ''}`);
-      if (openCount > 0) {
-        const taken = new Set(filled.map((m) => m.role));
-        const open = Object.keys(roles).filter((r) => !taken.has(r)).slice(0, openCount);
-        lines.push('', '🟡 Open:');
-        if (open.length) open.forEach((r) => lines.push(`• ${roleName(r)}${roleStat(r) ? ` — needs ${roleStat(r)}` : ''}`));
-        else lines.push(`• ${openCount} seat${openCount === 1 ? '' : 's'} open`);
-      }
-    } else {
-      const remain = heist.endsAt ? heist.endsAt - Date.now() : null;
-      lines.push(remain != null && remain > 0 ? `🚀 Underway — done in ${fmtClock(remain)}` : '🚀 Underway');
-    }
-    if (filled.length) {
-      lines.push('', '✅ Filled:');
-      filled.forEach((m) => lines.push(`• ${roleName(m.role)}${roleStat(m.role) ? ` (${roleStat(m.role)})` : ''}${m.name ? ` — ${m.name}` : ''}`));
-    }
-    const payoutBits = [];
-    if (heist.profit != null) payoutBits.push(`💰 +${money0(heist.profit)} profit each`);
-    if (heist.failReturn != null) payoutBits.push(`${money0(heist.failReturn)} back on a bust`);
-    const oddsBits = [];
-    if (heist.chance != null) oddsBits.push(`🎲 ${heist.chance}% chance`);
-    if (heist.energy != null) oddsBits.push(`${heist.energy} energy`);
-    if (heist.nerve != null) oddsBits.push(`${heist.nerve} nerve`);
-    if (heist.stake != null) oddsBits.push(`${money0(heist.stake)} stake`);
-    if (payoutBits.length || oddsBits.length) lines.push('');
-    if (payoutBits.length) lines.push(payoutBits.join(' · '));
-    if (oddsBits.length) lines.push(oddsBits.join(' · '));
-    return lines.join('\n');
-  }
-
-  // Shared by the crew job and heist "Copy for Discord" panels: when there's more than one you're in at once
-  // (e.g. one already underway while a seat is reserved in a second, still-recruiting one), a row of tabs lets
-  // you switch which one's message is shown -- the panel never has to guess which one you meant to post.
-  // The click handler reads `panel.__msxJobs` fresh every time rather than closing over it, so a tab clicked
-  // after the underlying data has moved on (a new member joined, the chance changed, ...) never posts stale text.
-  function ensureJobMessagesPanel(panelId, pathMatch, anchorId, heading, note, jobs, buildMessage, crewName) {
-    if (location.pathname.replace(/\/+$/, '') !== pathMatch) { document.getElementById(panelId)?.remove(); return; }
-    if (!jobs || !jobs.length) { document.getElementById(panelId)?.remove(); return; }
-    const host = document.querySelector('.main-content') || document.querySelector('main');
-    if (!host) return;
-    let panel = document.getElementById(panelId);
-    const renderSelected = () => {
-      const js = panel.__msxJobs || [];
-      if (!js.length) return;
-      let selected = panel.dataset.selectedId;
-      if (!js.some((j) => String(j.id) === selected)) selected = String(js[0].id);
-      panel.dataset.selectedId = selected;
-      panel.querySelectorAll('.msx-jobtab').forEach((btn) => btn.classList.toggle('active', btn.dataset.id === selected));
-      const job = js.find((j) => String(j.id) === selected) || js[0];
-      const msg = panel.__msxBuildMessage(job, panel.__msxCrewName);
-      const ta = panel.querySelector('textarea');
-      if (ta.value !== msg) ta.value = msg;
-    };
-    if (!panel) {
-      panel = document.createElement('section');
-      panel.id = panelId;
-      panel.innerHTML = `<h2>${heading}</h2><p class="msx-inv-note">${note}</p><div class="msx-jobtabs"></div><textarea readonly></textarea><button type="button" class="msx-copybtn">📋 Copy for Discord</button>`;
-      panel.querySelector('.msx-copybtn').addEventListener('click', () => {
-        const ta = panel.querySelector('textarea');
-        const ok = copyToClipboard(ta.value);
-        if (!ok) { ta.focus(); ta.select(); }
-        toast(ok ? 'Copied — paste it in Discord.' : 'Couldn’t copy automatically — the text is selected, press Ctrl+C.');
-      });
-      panel.querySelector('.msx-jobtabs').addEventListener('click', (e) => {
-        const btn = e.target.closest('.msx-jobtab');
-        if (!btn) return;
-        panel.dataset.selectedId = btn.dataset.id;
-        renderSelected();
-      });
-      const anchor = document.getElementById(anchorId);
-      if (anchor) host.insertBefore(panel, anchor); else host.appendChild(panel);
-    }
-    panel.__msxJobs = jobs;
-    panel.__msxBuildMessage = buildMessage;
-    panel.__msxCrewName = crewName;
-    // The heading and note both depend on how many jobs there are right now (singular/plural, the "click a
-    // tab" hint) -- a second one can start recruiting after the panel already exists, so these are kept live
-    // rather than only ever set at creation.
-    const h2 = panel.querySelector('h2');
-    if (h2 && h2.textContent !== heading) h2.textContent = heading;
-    const noteEl = panel.querySelector('.msx-inv-note');
-    if (noteEl && noteEl.innerHTML !== note) noteEl.innerHTML = note;
-    const tabsEl = panel.querySelector('.msx-jobtabs');
-    let selected = panel.dataset.selectedId;
-    if (!jobs.some((j) => String(j.id) === selected)) selected = String(jobs[0].id);
-    panel.dataset.selectedId = selected;
-    const tabsHtml = jobs.length > 1
-      ? jobs.map((j) => {
-        // Two jobs can share a name, so each tab also says whether it's yours and how full it is.
-        const seats = j.maxMembers ? ` · ${(j.members || []).length}/${j.maxMembers}` : '';
-        return `<button type="button" class="msx-jobtab${String(j.id) === selected ? ' active' : ''}" data-id="${escHtml(String(j.id))}">` +
-          `${escHtml(j.name || 'Job')}${j.mine ? ' (yours)' : ''}${seats}</button>`;
-      }).join('')
-      : '';
-    if (tabsEl.innerHTML !== tabsHtml) tabsEl.innerHTML = tabsHtml;
-    renderSelected();
-  }
-
-  function ensureMyCrewJobPanel() {
-    const jobs = (apiState && apiState.myCrewJobs) || [];
-    ensureJobMessagesPanel('msx-mycrewjob', '/crew', 'msx-crewjobs', jobs.length > 1 ? 'Crew jobs' : 'Crew job',
-      'A ready-to-paste Discord message: open seats, filled seats and the payout.' +
-      (jobs.length > 1 ? ' Click a job to make its message.' : ''),
-      jobs, buildCrewJobMessage, apiState && apiState.crew && apiState.crew.name);
-    // In the right-hand column, straight under the "Your neighborhood" card (user request, 0.17.6; layout from a
-    // dev-tools capture, Screenshot 337: aside.right-column > section.panel.neighborhood). Falls back to the
-    // main column if that card isn't there.
-    const panel = document.getElementById('msx-mycrewjob');
-    const hood = document.querySelector('.right-column .neighborhood');
-    const anchor = hood && hood.nextElementSibling && hood.nextElementSibling.id === 'msx-chainpost' ? hood.nextElementSibling : hood;
-    if (panel && anchor && anchor.nextElementSibling !== panel) anchor.after(panel);
-    // "📣 Post to Discord" (0.19.0): only while crew sharing is on. The crew bot posts the selected job and then
-    // keeps editing that post as people join.
-    ensurePostButton(panel, 'Post this job in the crew Discord. The post updates itself as people join.', postJobToDiscord);
-  }
-
-  // The 📣 button beside "Copy for Discord" (crew jobs 0.19.0, heists 0.32.0), only while crew sharing is on.
-  function ensurePostButton(panel, title, send) {
-    let post = panel && panel.querySelector('.msx-postbtn');
-    if (panel && crewSharingOn() && !post) {
-      post = document.createElement('button');
-      post.type = 'button';
-      post.className = 'msx-postbtn';
-      post.textContent = '📣 Post to Discord';
-      post.title = title;
-      post.addEventListener('click', () => send(panel.dataset.selectedId));
-      panel.querySelector('.msx-copybtn').after(post);
-    } else if (post && !crewSharingOn()) post.remove();
-  }
-
-  function ensureMyHeistPanel() {
-    const jobs = (apiState && apiState.myHeists) || [];
-    ensureJobMessagesPanel('msx-myheist', '/heists', 'msx-heists', 'Your heist' + (jobs.length > 1 ? 's' : ''),
-      'Ready to post in Discord: who\'s in the clowder, how many seats are open, and the payout.' +
-      (jobs.length > 1 ? ' Click a heist\'s name above to switch which one\'s message is shown.' : ''),
-      jobs, buildHeistMessage, apiState && apiState.crew && apiState.crew.name);
-    ensurePostButton(document.getElementById('msx-myheist'), 'Post this heist in the crew Discord. The post updates itself as people join and goes away when the heist is over.', postHeistToDiscord);
-  }
-
   function ensureHeistsPanel() {
     if (location.pathname.replace(/\/+$/, '') !== '/heists') { document.getElementById('msx-heists')?.remove(); return; }
     const host = document.querySelector('.main-content') || document.querySelector('main');
@@ -5367,22 +5060,6 @@
     return h;
   }
 
-  document.addEventListener('click', (e) => {
-    const b = e.target.closest && e.target.closest('.msx-ws-deal');
-    if (!b) return;
-    e.preventDefault(); e.stopPropagation();
-    if (!crewSharingOn()) { toast(NOT_POSTED); return; }
-    const body = { v: 1, sender: shareId(), crew: shareCrewRef(), item: b.dataset.item, price: Number(b.dataset.price) };
-    if (b.dataset.min) { body.min = Number(b.dataset.min); body.max = Number(b.dataset.max); }
-    if (Number(b.dataset.until) > Date.now()) body.until = Number(b.dataset.until); // when this price ends (0.29.0: Discord countdown)
-    GM_xmlhttpRequest({
-      method: 'POST', url: CREW_BOT_DEAL_URL, data: JSON.stringify(body), timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (err) { /* not json */ } toast(j && j.ok ? `Posted: ${b.dataset.item} for $${Number(b.dataset.price).toLocaleString()}.` : 'Not posted: ' + ((j && j.error) || 'unknown problem') + '.'); },
-      onerror: () => toast('Not posted: could not reach the crew bot.'),
-      ontimeout: () => toast('Not posted: the crew bot did not answer.'),
-    });
-  }, true);
-
   // Arrived from a crime's tool chip (#msx-item=<name>): scroll to that item and highlight it, once.
   function focusWhiskersItem() {
     const m = location.hash.match(/^#msx-item=(.+)$/);
@@ -5407,13 +5084,7 @@
       if (!nameEl) return;
       const it = items.get(norm(nameEl.textContent));
       let box = text.querySelector(':scope > .msx-ws');
-      // 📣 while crew sharing is on (user request, 0.20.0): posts "X is for sale at Whiskers & Co. for $Y" to the
-      // crew bot's deals channel. Only on items whose price moves within a range (0.21.0) -- fixed prices are no news.
-      // The Discord post gets the normal price and range, never your personal discount (user request, 0.22.0).
-      const deal = it && crewSharingOn() && it.baseMin != null && it.baseMax > it.baseMin
-        ? `<button type="button" class="msx-ws-deal" data-item="${escHtml(it.name)}" data-price="${it.base}" data-min="${it.baseMin}" data-max="${it.baseMax}" data-until="${it.until || ''}" title="Post this price to the crew Discord">📣 Post to Discord</button>`
-        : '';
-      const html = it ? whiskersHtml(it) + deal : '';
+      const html = it ? whiskersHtml(it) : '';
       if (!html) { if (box) box.remove(); return; }
       if (!box) { box = document.createElement('div'); box.className = 'msx-ws'; text.appendChild(box); }
       if (box.__msxHtml !== html) { box.innerHTML = html; box.__msxHtml = html; }
@@ -5422,9 +5093,9 @@
 
   // The Account page switch and the card below both turn sharing on or off this way.
   function setSharing(on) {
-    settings.shareCrew = !!on;
+    settings.shareOff = !on;
     saveSettings();
-    if (settings.shareCrew) { shareCrew(); syncStocks(true); }
+    if (on) { shareCrew(); syncStocks(true); }
   }
 
   // ─── Crime mastery unlocks shared across the alliance (0.49.0, user request) ───
@@ -5449,7 +5120,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: RUNGS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), rungs: mine }),
-      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
+      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
       onerror: done, ontimeout: done,
     });
   }
@@ -5481,24 +5152,6 @@
     setTitle(tip, 'What this unlock does, from an alliance member who has reached it (crew sharing). The game only shows it once you get there.');
   }
 
-  // ─── "Turn on crew sharing" button (0.46.7, user request) ─────────────────
-  // A little button right under the sidebar's crew chain box (.sidebar-bottom .cn-fuses), on every page, for our
-  // crew's members with sharing off. One click turns it on (the same as the Account page switch) and it's gone.
-  function ensureSharePrompt() {
-    const old = document.getElementById('msx-sharepop');
-    const fuses = document.querySelector('.sidebar-bottom .cn-fuses');
-    if (!inShareCrew() || settings.shareCrew || !fuses) { if (old) old.remove(); return; }
-    if (old && old.previousElementSibling === fuses) return;
-    if (old) old.remove();
-    const btn = document.createElement('button');
-    btn.type = 'button';
-    btn.id = 'msx-sharepop';
-    btn.textContent = '🐾 Turn on crew sharing';
-    btn.title = 'Shares crew jobs, the chain, stock prices, fish and fight gear with our crew\'s Discord bot. The full list is on the Account page.';
-    btn.addEventListener('click', () => { setSharing(true); btn.remove(); });
-    fuses.insertAdjacentElement('afterend', btn);
-  }
-
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   function ensureAccountPanel() {
@@ -5511,9 +5164,10 @@
     box.id = 'msx-account';
     box.innerHTML =
       '<h2>MeowStreets Extra Info</h2>' +
-      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. It only sends or asks for anything if you turn on crew sharing or save a game API key below.</p>' +
+      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. It only sends or asks for anything through the sharing switch below (on unless you turn it off) or a game API key you save below.</p>' +
       '<h3>Recording</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
+      '<div id="msx-acc-outbox" hidden><button type="button" id="msx-acc-outbtn"></button></div>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
       '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear and stats from your fights, your own base stats, level and worn gear (so the alliance sees them on your profile), the crime mastery unlocks you have reached, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear and stats from your fights, your own base stats, level and worn gear, the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, the alliance\'s ⚔️ stats and gear, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</span></label></div>' +
@@ -5546,6 +5200,7 @@
 
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
     box.querySelector('#msx-acc-share').addEventListener('change', (e) => setSharing(e.target.checked));
+    box.querySelector('#msx-acc-outbtn').addEventListener('click', () => { setSharing(!!settings.shareOff); updateAccountPanel(); });
     updateAccountPanel();
   }
 
@@ -5555,12 +5210,19 @@
     const ev = box.querySelector('#msx-acc-events');
     const sh = box.querySelector('#msx-acc-share');
     const shBox = box.querySelector('#msx-acc-sharebox');
-    if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // only shown to the alliance
+    if (shBox.hidden === inShareCrew()) shBox.hidden = !inShareCrew(); // the alliance: the switch and what it sends
     const allyNote = box.querySelector('#msx-acc-allynote');
     if (allyNote.hidden === !inOwnCrew()) allyNote.hidden = inOwnCrew(); // allies: what they share instead
+    // Outside the alliance (0.49.2, user request): only a button to turn it off (or back on).
+    const outBox = box.querySelector('#msx-acc-outbox');
+    const outside = !!(apiState && apiState.myId) && !inShareCrew();
+    if (outBox.hidden === outside) outBox.hidden = !outside;
+    const outLabel = settings.shareOff ? 'Turn sharing data on' : 'Turn sharing data off';
+    const outBtn = box.querySelector('#msx-acc-outbtn');
+    if (outBtn.textContent !== outLabel) outBtn.textContent = outLabel;
     const what = box.querySelector('#msx-acc-sharewhat');
     if (what.hidden === inOwnCrew()) what.hidden = !inOwnCrew(); // the full list is crew 2's
-    if (sh.checked !== settings.shareCrew) sh.checked = settings.shareCrew;
+    if (sh.checked !== !settings.shareOff) sh.checked = !settings.shareOff;
     if (ev.checked !== settings.events) ev.checked = settings.events;
     // The key itself is never shown again once saved.
     const ki = box.querySelector('#msx-acc-key');
@@ -5632,13 +5294,9 @@
       updatePierPill();
       drawPierLog();
       drawContractPay();
-      ensureChainPostButton();
-      ensureMyCrewJobPanel();
-      ensureMyHeistPanel();
       ensureHeistsPanel();
       ensureCrewJobsPanel();
       ensureTradingPanel();
-      ensureSharePrompt();
       logShopPricesFromApi();
       drawWhiskers();
       if (isStockPage() && document.querySelector('.watch-table')) {
@@ -5665,7 +5323,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, .msx-rungtip, #msx-invest, #msx-heists, #msx-crewjobs, #msx-mycrewjob, #msx-chainpost, #msx-myheist, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, .msx-rungtip, #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
