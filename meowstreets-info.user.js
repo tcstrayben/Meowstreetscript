@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.2
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches and the gear and stats of cats seen in your fights, with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' battle stats and gear, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
+// @version      0.49.3
+// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights and your own base stats (other cats' stats are never kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and alliance members' own stats, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -191,8 +191,10 @@
           .map((a) => ({ id: a.id, victim: a.defender_id, name: a.defender || '', at: Number(a.created_at) }));
       }
       if (raw.combat && Number(raw.combat.repeatWindow) > 0) out.repeatWindow = Number(raw.combat.repeatWindow);
-      // Other cats' gear and stats, last seen in a fight (0.42.0). Each of your last 10 fights carries `state` (JSON
-      // text) with both cats' level, exact stats, max health and gear ids at the time. Your own side is skipped.
+      // Other cats' gear, last seen in a fight (0.42.0). Each of your last 10 fights carries `state` (JSON text) with
+      // both cats' level, max health and gear ids at the time. Your own side is skipped. Its other cats' stats are
+      // never read (0.49.3): the game owner said they leaked by mistake (fixed 2026-11-12) and asked that they be
+      // deleted and not shared.
       if (raw.player && raw.player.id != null) out.myId = raw.player.id;
       // Your own base stats, level and worn gear (0.49.0, user request: see the alliance's stats like fight records).
       // Only these few fields of `player`; they leave this browser only with sharing on (noteSelfGear).
@@ -215,7 +217,7 @@
         try { s = a && (typeof a.state === 'string' ? JSON.parse(a.state) : a.state); } catch (e) { s = null; }
         const at = a && Number(a.created_at);
         if (!s || !(at > 0)) return;
-        [s.a, s.d].forEach((c) => { const r = c && c.id !== out.myId && gearRecord(c, at, true); if (r) out.fightCats.push(r); });
+        [s.a, s.d].forEach((c) => { const r = c && c.id !== out.myId && gearRecord(c, at); if (r) out.fightCats.push(r); });
       });
       // Bank deposits still "open" (0.22.0): only the amount and end time. One past its end time is waiting to be
       // collected on the Feline Bank page ("broken" = taken out early, not counted).
@@ -1866,9 +1868,10 @@
     setTitle(tag, halfXpTitle(h));
   }
 
-  // ─── ⚔️ Other cats' gear and stats, last seen in a fight (0.42.0, user request) ───
-  // Kept per cat, newest first by timestamp: gear (level, health, primary, secondary, thrown, armour) with `at`, the
-  // exact stats with their own `stAt` (only fight records carry them). A newer sighting replaces what it knows; an
+  // ─── ⚔️ Other cats' gear, last seen in a fight (0.42.0, user request) ───
+  // Kept per cat, newest first by timestamp: gear (level, health, primary, secondary, thrown, armour) with `at`.
+  // Stats (`st`, `stAt`) only from a cat's own share (`me`, 0.49.0): other cats' stats from fights leaked by the
+  // game's mistake and are never kept (0.49.3; the game owner asked for them to be deleted and not shared). A newer sighting replaces what it knows; an
   // older one only fills gaps. From three places, all replies the game's own pages already load:
   //   your last 10 fights (`attacks[].state`, every page): level, stats, max health, all four gear slots
   //   a fight page (/api/fight/<code>): both cats' level, max health and gear, as at the start of that fight
@@ -1878,16 +1881,16 @@
   const GEAR_KEY = 'ms_cat_gear_v1'; // { [catId]: { n, at, lv, hp, p, s, t, a, st: [str, def, spd, dex], stAt, src, d } }
   const GEAR_MAX = 3000;
   const GEAR_FIELDS = ['lv', 'hp', 'p', 's', 't', 'a'];
-  // One cat from a fight's `state` side or a fight page (same field names); stats only from `state`.
-  function gearRecord(c, at, withStats) {
+  // One cat from a fight's `state` side or a fight page (same field names). Gear only, never stats (0.49.3).
+  function gearRecord(c, at) {
     if (!c || c.id == null) return null;
     const r = { id: c.id, n: c.name || '', at, p: c.primary || null, s: c.secondary || null, t: c.thrown || null, a: c.armor || null };
     if (Number.isFinite(c.level)) r.lv = c.level;
     if (Number.isFinite(c.maxHp)) r.hp = c.maxHp;
-    const s = withStats && c.stats;
-    if (s && [s.strength, s.defense, s.speed, s.dexterity].every(Number.isFinite)) { r.st = [s.strength, s.defense, s.speed, s.dexterity]; r.stAt = at; }
     return r;
   }
+  // Stats count only when they are the cat's own share (`me`, sent with them at the same time).
+  const ownStats = (r) => !!r && Array.isArray(r.st) && Number.isFinite(r.me) && r.stAt === r.me;
   // `undefined` = not known from this sighting, null = none.
   function mergeGear(old, nw) {
     const r = old ? { ...old } : { n: '', at: 0 };
@@ -1895,8 +1898,9 @@
     if (nw.n && (newer || !r.n)) r.n = nw.n;
     GEAR_FIELDS.forEach((k) => { if (nw[k] !== undefined && (newer || r[k] === undefined)) r[k] = nw[k]; });
     if (newer) { r.at = nw.at; r.src = nw.src; }
-    if (Array.isArray(nw.st) && !(r.stAt >= nw.stAt)) { r.st = nw.st; r.stAt = nw.stAt; }
+    if (ownStats(nw) && !(r.stAt >= nw.stAt)) { r.st = nw.st; r.stAt = nw.stAt; }
     if (Number.isFinite(nw.me) && !(r.me >= nw.me)) r.me = nw.me; // when the cat itself last shared this (0.49.0)
+    if (r.st && !ownStats(r)) { delete r.st; delete r.stAt; }
     const strip =(x) => JSON.stringify(x ? { ...x, d: 0 } : null);
     return strip(r) === strip(old) ? null : r;
   }
@@ -1918,6 +1922,16 @@
     GM_setValue(GEAR_KEY, m);
     schedule();
   }
+  // 0.49.3: delete every other cat's stats already kept from fights (the game owner's request), on every load (cheap,
+  // writes only when something goes). Gear and cats' own shared stats stay.
+  function purgeFightStats() {
+    const m = GM_getValue(GEAR_KEY, null);
+    if (!m) return;
+    let changed = false;
+    Object.values(m).forEach((r) => { if (r && (r.st || r.stAt) && !ownStats(r)) { delete r.st; delete r.stAt; changed = true; } });
+    if (changed) GM_setValue(GEAR_KEY, m);
+  }
+  purgeFightStats();
   let fightCatsAt = null;
   function noteFightCats() {
     if (!apiState || !apiState.fightCats || apiState.at === fightCatsAt) return;
@@ -1993,7 +2007,7 @@
         g.hp != null ? n0(g.hp) + ' HP' : null].filter(Boolean).join(' · ');
     const st = g.st;
     const stats = st ? `STR ${n0(st[0])} · DEF ${n0(st[1])} · SPD ${n0(st[2])} · DEX ${n0(st[3])} (total ${n0(st[0] + st[1] + st[2] + st[3])})` +
-      (Math.abs(g.stAt - g.at) > 60000 ? `, as of ${seenAt(g.stAt)}` : '') : 'Stats not seen yet (only your own fights show them).';
+      (Math.abs(g.stAt - g.at) > 60000 ? `, as of ${seenAt(g.stAt)}` : '') : 'Stats: only when this cat shares its own (alliance members with the script).';
     return { gear, stats };
   }
   const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + (g.me >= g.at ? '\nTheir own base stats and gear, shared by their script (no temporary boosts).' : '\nWhat they had then; they may have changed gear or trained since.'); };
@@ -2044,7 +2058,7 @@
       const r = m[k];
       const o = { id: Number(k), n: r.n, at: r.at };
       GEAR_FIELDS.forEach((f) => { if (r[f] !== undefined) o[f] = r[f]; });
-      if (r.st) { o.st = r.st; o.stAt = r.stAt; }
+      if (ownStats(r)) { o.st = r.st; o.stAt = r.stAt; }
       if (r.me) o.me = r.me; // the bot keeps it only from the cat itself
       return o;
     });
