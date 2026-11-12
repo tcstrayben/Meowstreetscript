@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.0
+// @version      0.49.1
 // @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. It sends nothing anywhere unless you turn on crew sharing (Account page), and then only crew chain, crew job, stock price and earned-feat info, plus the gear and stats of cats seen in your fights, to your crew's own Discord bot (which shares the crew's stock price history, how to get hidden feats and the crew's last-seen gear back). Sharing is only offered to members of the crew the bot serves.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -1604,11 +1604,19 @@
     }));
     let sync = {};
     try { sync = JSON.parse(GM_getValue(STOCK_SYNC_KEY, '{}')) || {}; } catch (e) { sync = {}; }
+    // 🐟 Whiskers price alerts (0.49.1, user request): this hour's normal price (before your discount) of the two
+    // items whose store price moves hourly, Premium tuna and Catnip tea: [[item id, until, price]].
+    const shop = [];
+    const items = (apiState && apiState.storeItems) || {};
+    ['tuna', 'catnip'].forEach((id) => {
+      const it = items[id];
+      if (it && it.until > Date.now() && Number.isFinite(it.base) && it.base > 0) shop.push([id, it.until, it.base]);
+    });
     stockSyncAt = Date.now();
     stockSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: STOCK_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), prices: out, since: Number.isInteger(sync.since) ? sync.since : null }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), prices: out, since: Number.isInteger(sync.since) ? sync.since : null, shop }),
       onload: (r) => {
         stockSyncBusy = false;
         let j = null;
