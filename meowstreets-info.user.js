@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.6
+// @version      0.49.7
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (seen by the Cataclysm alliance only; nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -2094,14 +2094,65 @@
   // Fair), so the numbers here are pay and XP per nerve; the crime's own % is still in the game's data (`crimes[]`).
   const crimePageId = () => { const m = location.pathname.match(/^\/crimes\/([a-z]+)\/?$/); return m ? m[1] : null; };
   const streetCrime = (id) => (apiState && apiState.street && apiState.street.crimes.find((c) => c.id === id)) || null;
+  // ─── Expected pay and XP per nerve (0.49.7, user request: "factor in mastery when calculating $/nerve") ───
+  // What mastery does (API log 2026-11-13): +1 odds per level (in the game's odds), +2.5% pay per level (`payoutBonus`
+  // = 1 + 0.025 × level, already inside every payout the game shows) and +1 clean-job chance per level
+  // (`criticalChance` = 5 + mastery + Sharp eyes ranks). A failed attempt, near miss or jail, pays $0 and 0 XP (street
+  // log 2026-11-13). So expected per nerve = what it pays when it works × the place's odds × (1 + clean chance ×
+  // (clean multiplier − 1)), with no clean jobs at 80+ heat. The clean multiplier is learned from your own Mews crime
+  // results (clean vs ordinary XP and cash of the same job, chain bonuses left out) once there are 3 clean jobs;
+  // until then 1.5× (the game's guide). The clock pays XP on every step ("Step 1 of 3 done. 87 XP.") and its cash once
+  // at the end; each step is counted at the place's odds.
+  const CLEAN_GUIDE = 1.5, CLEAN_MIN_SAMPLES = 3;
+  let cleanCache = null;
+  function cleanMults() {
+    const ev = loadEvents().events;
+    if (cleanCache && cleanCache.n === ev.length) return cleanCache.v;
+    const by = {};
+    ev.forEach((e) => {
+      if (e.kind !== 'crime' || !e.crime || e.chain || e.chainBonusPct) return; // chain bonuses would skew the cash
+      if (e.outcome !== 'clean' && e.outcome !== 'success') return;
+      const k = norm(e.crime);
+      const b = by[k] || (by[k] = { clean: [], plain: [] });
+      (e.outcome === 'clean' ? b.clean : b.plain).push(e);
+    });
+    let n = 0, wx = 0, wc = 0;
+    const avg = (list, f) => list.reduce((t, e) => t + (Number(e[f]) || 0), 0) / list.length;
+    Object.values(by).forEach((b) => {
+      if (!b.clean.length || b.plain.length < 3) return;
+      const px = avg(b.plain, 'xp'), pc = avg(b.plain, 'cash');
+      if (!(px > 0) || !(pc > 0)) return;
+      n += b.clean.length;
+      wx += (avg(b.clean, 'xp') / px) * b.clean.length;
+      wc += (avg(b.clean, 'cash') / pc) * b.clean.length;
+    });
+    const v = n >= CLEAN_MIN_SAMPLES ? { cash: wc / n, xp: wx / n, n, learned: true } : { cash: CLEAN_GUIDE, xp: CLEAN_GUIDE, n, learned: false };
+    cleanCache = { n: ev.length, v };
+    return v;
+  }
+  const cleanNote = (m) => (m.learned ? `a clean job pays ×${m.cash.toFixed(2)} cash and ×${m.xp.toFixed(2)} XP (from your ${fmtInt(m.n)} clean jobs)` : 'a clean job pays about ×1.5 (the game\'s guide; your own figure once the Mews has seen 3 clean jobs)');
+  // { cash, xp } expected per nerve from what it pays when it works (per nerve), the odds (%) and the job's data.
+  function expectedPerNerve(cash, xp, odds, api) {
+    const p = Number.isFinite(odds) ? Math.max(0, Math.min(100, odds)) / 100 : null;
+    if (p == null) return null;
+    const hot = api && (api.hot || (Number.isFinite(api.heat) && api.heat >= HOT_HEAT));
+    const crit = !hot && api && Number.isFinite(api.criticalChance) ? Math.max(0, Math.min(100, api.criticalChance)) / 100 : 0;
+    const m = cleanMults();
+    return { cash: Number.isFinite(cash) ? cash * p * (1 + crit * (m.cash - 1)) : null, xp: Number.isFinite(xp) ? xp * p * (1 + crit * (m.xp - 1)) : null, crit: crit * 100, p: p * 100, m };
+  }
+
   // A place's best paying button: pay per nerve uses the middle of the range; a job that pays once at the end (safe,
-  // clock) is spread over all its steps.
-  function placeValue(crime, place) {
+  // clock) is spread over all its steps. `cash`/`xp` = when it works; `eCash`/`eXp` = expected (above). Best = expected.
+  function placeValue(crime, place, api) {
     let best = null;
     place.acts.forEach((a) => {
       if (!(a.cost > 0) || !Number.isFinite(a.payMin) || !Number.isFinite(a.payMax)) return;
       const cash = (a.payMin + a.payMax) / 2 / (a.cost * crime.steps);
-      if (!best || cash > best.cash) best = { act: a, cash, xp: Number.isFinite(a.xp) ? a.xp / a.cost : null, odds: Number.isFinite(a.odds) ? a.odds : null };
+      const xp = Number.isFinite(a.xp) ? a.xp / a.cost : null;
+      const odds = Number.isFinite(a.odds) ? a.odds : null;
+      const e = expectedPerNerve(cash, xp, odds != null ? odds : crime.chance, api);
+      const v = { act: a, cash, xp, odds, eCash: e ? e.cash : cash, eXp: e && e.xp != null ? e.xp : xp, e };
+      if (!best || v.eCash > best.eCash) best = v;
     });
     return best;
   }
@@ -2134,24 +2185,26 @@
     let box = document.getElementById('msx-crimetable');
     if (!ladder || !street) { if (box) box.remove(); return; }
     const rows = street.crimes.filter((c) => c.state !== 'locked').map((c) => {
+      const api = apiState.crimes[norm(c.name)];
       let best = null;
-      c.places.filter((p) => p.open).forEach((p) => { const v = placeValue(c, p); if (v && (!best || v.cash > best.v.cash)) best = { p, v }; });
+      c.places.filter((p) => p.open).forEach((p) => { const v = placeValue(c, p, api); if (v && (!best || v.eCash > best.v.eCash)) best = { p, v }; });
       return { c, best };
     });
     const top = (k) => rows.reduce((m, r) => (r.best && r.best.v[k] != null && (!m || r.best.v[k] > m.best.v[k]) ? r : m), null);
-    const topCash = top('cash'), topXp = top('xp');
+    const topCash = top('eCash'), topXp = top('eXp');
+    const ifWorks = (v, k) => (v.e ? ` title="${k === 'cash' ? fmtMoney(v.cash) : v.xp.toFixed(1)} when it works · ${v.e.p}% odds, ${Math.round(v.e.crit)}% clean"` : '');
     const body = rows.map((r) => {
       const v = r.best && r.best.v;
       const ct = contractForCrime(r.c.id);
       const chip = ct ? `<span class="msx-ct-chip" title="Crew contract ${escHtml(ct.name)}">Crew ${fmtInt(ct.got)}/${fmtInt(ct.goal)}</span>` : '';
       const ms = masteryShort(masteryNext(apiState.crimes[norm(r.c.name)]));
       return `<tr${ct ? ' class="msx-crew-row"' : ''}><td>${escHtml(r.c.name)}${chip}</td><td>${v && v.odds != null ? v.odds + '%' : Number.isFinite(r.c.chance) ? r.c.chance + '%' : '—'}</td><td>${r.best ? escHtml(r.best.p.name) : '<i>nothing open</i>'}</td>` +
-        `<td class="${r === topCash ? 'msx-best' : ''}">${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.cash) : '—'}</td>` +
-        `<td class="${r === topXp ? 'msx-best' : ''}">${v && v.xp != null ? (r === topXp ? '★ ' : '') + v.xp.toFixed(1) : '—'}</td><td>${ms || '—'}</td></tr>`;
+        `<td class="${r === topCash ? 'msx-best' : ''}"${v ? ifWorks(v, 'cash') : ''}>${v ? (r === topCash ? '★ ' : '') + fmtMoney(v.eCash) : '—'}</td>` +
+        `<td class="${r === topXp ? 'msx-best' : ''}"${v && v.xp != null ? ifWorks(v, 'xp') : ''}>${v && v.eXp != null ? (r === topXp ? '★ ' : '') + v.eXp.toFixed(1) : '—'}</td><td>${ms || '—'}</td></tr>`;
     }).join('');
     const html = '<h3>Best place in each job</h3><table><thead><tr><th>Job</th><th title="The odds the game shows at the best place, with your bonuses and heat.">Success</th><th>Best place now</th>' +
-      '<th title="Middle of the payout range per nerve. The safe and the clock pay once for all their steps, so it is spread over them.">$ per nerve</th><th>XP per nerve</th><th title="Mastery level, and successes to the next level (each level is +1 odds)">Mastery</th></tr></thead>' +
-      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the game's odds at that place.</small>`;
+      '<th title="Expected: the middle of the payout per nerve × the odds, plus the clean-job chance. The safe and the clock pay once for all their steps, so it is spread over them. Hover a number for what it pays when it works.">$ per nerve</th><th title="Expected, the same way (a failed attempt gives no XP)">XP per nerve</th><th title="Mastery level, and successes to the next level. Each level: +1 odds, +2.5% pay, +1 clean-job chance">Mastery</th></tr></thead>' +
+      `<tbody>${body}</tbody></table><small>Jobs you can do now (locked ones left out). Success is the game's odds at that place. Pay and XP are expected per nerve: failures pay nothing, and ${escHtml(cleanNote(cleanMults()))}.</small>`;
     if (!box) { box = document.createElement('section'); box.id = 'msx-crimetable'; }
     if (ladder.nextElementSibling !== box) ladder.after(box);
     if (box.dataset.html !== html) { box.innerHTML = html; box.dataset.html = html; }
@@ -2170,14 +2223,24 @@
     const xp = xpDd ? num(xpDd.querySelector('dd')?.textContent) : NaN;
     const costM = (dock.querySelector('button.cs-go.is-main .cs-go-cost')?.textContent || '').match(/(\d+)\s*nerve/);
     const cost = costM ? Number(costM[1]) : NaN;
+    // The picked place's odds, as the dock shows them ("98%"): what the game rolls there.
+    const oddsDd = quote && [...quote.querySelectorAll('div')].find((d) => /^Odds$/i.test(d.querySelector('dt')?.textContent.trim() || ''));
+    const oddsM = oddsDd && (oddsDd.querySelector('dd')?.textContent || '').match(/(\d+)\s*%/);
+    const api = crime && apiState.crimes[norm(crime.name)];
+    const odds = oddsM ? Number(oddsM[1]) : api && Number.isFinite(api.chance) ? api.chance : NaN;
     if (quote && payM && cost > 0) {
       const steps = crime ? crime.steps : 1;
       const lo = num(payM[1]) / (cost * steps), hi = num(payM[2]) / (cost * steps);
-      const text = `≈ ${fmtMoney(lo)}–${fmtMoney(hi)} per nerve` + (Number.isFinite(xp) ? ` · ${(xp / cost).toFixed(1)} XP per nerve` : '') +
+      const xpN = Number.isFinite(xp) ? xp / cost : NaN;
+      const e = expectedPerNerve((lo + hi) / 2, xpN, odds, api);
+      const text = (e ? `Expected ≈ ${fmtMoney(e.cash)}` + (Number.isFinite(xpN) ? ` · ${e.xp.toFixed(1)} XP` : '') + ' per nerve · when it works ' : '≈ ') +
+        `${fmtMoney(lo)}–${fmtMoney(hi)}` + (Number.isFinite(xpN) ? ` · ${xpN.toFixed(1)} XP` : '') + (e ? '' : ' per nerve') +
         (steps > 1 ? ` (pays once for all ${steps} steps: ${cost * steps} nerve)` : '');
       if (!line) { line = document.createElement('p'); line.className = 'msx-pernerve'; }
       if (quote.nextElementSibling !== line) quote.after(line);
       if (line.textContent !== text) line.textContent = text;
+      const tip = e ? `Expected = when it works × ${e.p}% odds, plus a ${Math.round(e.crit)}% clean-job chance${e.crit ? '' : ' (none at 80+ heat)'}; ${cleanNote(e.m)}. A failed attempt pays nothing.` : '';
+      if (line.title !== tip) line.title = tip;
     } else if (line) line.remove();
     drawCrimeChance(crime, dock, quote);
     drawContractLine(id, dock);
@@ -2221,8 +2284,10 @@
     }
     const mn = masteryNext(api);
     const mastHtml = !mn ? '' : `<div class="msx-crimeheat">⭐ <b>Mastery ${mn.level}</b>` + (mn.max ? ' · the top level' : ` · ${mn.exact ? '' : 'about '}${fmtInt(mn.toGo)} more success${mn.toGo === 1 ? '' : 'es'} to level ${mn.level + 1}` +
-      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`) + ' · each level is +1 odds') + '</div>';
-    const html = heatHtml + mastHtml + `<small>${api.chance}% for this job with your bonuses and heat${api.ceiling ? `; the most it can be here is ${api.ceiling}%` : ''}</small>` +
+      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`)) + ' · each level: +1 odds, +2.5% pay, +1 clean-job chance</div>';
+    // The job's own %, capped at its ceiling; each place's odds (the dock's "Odds", what the game rolls) can go past
+    // it ("Sure-footed", e.g. 98% at the clock's bell rope against a 96% job: user, 2026-11-13).
+    const html = heatHtml + mastHtml + `<small>The job's odds: ${api.chance}% with your bonuses and heat${api.ceiling ? ` (its ceiling is ${api.ceiling}%)` : ''}. Each place shows its own odds above, which can go past it ("Sure-footed"); those are what count.</small>` +
       oddsHtmlFromApi({ api, key: norm(crime.name) });
     if (!box) { box = document.createElement('div'); box.className = 'msx-chance'; }
     const after = dock.querySelector('.msx-pernerve') || quote;
