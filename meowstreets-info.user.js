@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.7
+// @version      0.49.8
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (seen by the Cataclysm alliance only; nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -229,6 +229,14 @@
         out.deposits = raw.deposits.filter((d) => d && d.status === 'open' && Number.isFinite(d.ends_at))
           .map((d) => ({ amount: Number(d.amount) || 0, rate: Number(d.rate) || 0, endsAt: d.ends_at }));
         out.depositsSeen = true; // this reply had the list (an empty one means none open)
+      }
+      // The crew's treasury log (0.49.8): every page carries its newest 25 rows. Only what each row is, how much, when
+      // and who (the crew bot's 💳 loans and 🏦 Treasury, crew sharing only).
+      if (Array.isArray(raw.crewLedger)) out.crewLedger = raw.crewLedger.map(ledgerRow).filter(Boolean);
+      // The bank's deposit terms (0.49.8): the game's own rates, for the crew bot's 🏦 bank loans.
+      if (Array.isArray(raw.depositTerms)) {
+        out.bankTerms = raw.depositTerms.filter((t) => t && typeof t.id === 'string' && Number(t.duration) > 0).slice(0, 10)
+          .map((t) => ({ id: t.id.slice(0, 30), name: String(t.name || t.id).slice(0, 30), duration: Number(t.duration), rate: Number(t.rate) || 0, baseRate: Number(t.baseRate) || 0 }));
       }
       if (raw.chain && typeof raw.chain === 'object') {
         out.chain ={ count: raw.chain.count, multiplier: raw.chain.multiplier, next: raw.chain.next, expiresAt: raw.chain.expiresAt };
@@ -523,7 +531,7 @@
 
   function onApiStateResponse(json) {
     const ex = extractApiState(json);
-    if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); schedule(); shareCrew(); syncGear(); syncFish(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
+    if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); noteLedger(ex.crewLedger); schedule(); shareCrew(); syncGear(); syncFish(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
 
   // ─── Tuna / catnip uses today (0.30.0, user request) ──────────────────────
@@ -1172,6 +1180,10 @@
     Object.assign(body, historyForBot());
     const tp = treasuryPaysForBot();
     if (tp) body.treasuryPays = tp;
+    // The whole treasury log (0.49.8, user request: tell loan payments from money passing through) and the bank's rates.
+    const lg = ledgerForBot();
+    if (lg) body.ledger = lg;
+    if (apiState.bankTerms && apiState.bankTerms.length) body.bankTerms = apiState.bankTerms;
     // Your open bank deposits (0.46.6, user request: a 💳 bank loan's interest share, how much and when), only when
     // the bot's last reply named your cat id as having one (`loanCats`), so nobody else's deposits are ever sent.
     const lc = GM_getValue(LOAN_CATS_KEY, []);
@@ -2742,10 +2754,35 @@
   const TREASURY_PAYS_KEY = 'ms_treasury_pays_v1';
   function onCrewResponse(json) {
     if (!json || !Array.isArray(json.ledger)) return;
+    noteLedger(json.ledger.map(ledgerRow).filter(Boolean));
     const list = json.ledger.filter((l) => l && l.reason === 'crew_pay' && typeof l.actor === 'string' && Number(l.amount) > 0 && Number(l.at) > 0)
       .slice(0, 60).map((l) => ({ name: l.actor, amount: Number(l.amount), at: Number(l.at) }));
     GM_setValue(TREASURY_PAYS_KEY, { at: Date.now(), list });
     shareCrew();
+  }
+  // The whole treasury log (0.49.8, user request 2026-11-13: the crew bot's 💳 loans and 🏦 Treasury): from every
+  // page's newest 25 rows and the Crew page's ledger. Each row only: id, reason (crew_donate, crew_pay, crew_stake…),
+  // amount, time, the name on it and the cat ids it carries. Kept: the newest 60 of the last 8 days.
+  const LEDGER_KEY = 'ms_treasury_log_v1';
+  function ledgerRow(l) {
+    if (!l || !Number.isInteger(l.id) || typeof l.reason !== 'string' || !(Number(l.amount) > 0) || !(Number(l.at) > 0)) return null;
+    const id = (v) => (Number.isInteger(v) ? v : null);
+    return { id: l.id, reason: l.reason.slice(0, 30), amount: Number(l.amount), at: Number(l.at), actor: typeof l.actor === 'string' ? l.actor.slice(0, 40) : null, from: id(l.from_id), to: id(l.to_id) };
+  }
+  function noteLedger(rows) {
+    if (!Array.isArray(rows) || !rows.length) return;
+    const saved = GM_getValue(LEDGER_KEY, null);
+    const have = new Map(((saved && Array.isArray(saved.rows)) ? saved.rows : []).map((r) => [r.id, r]));
+    let fresh = false;
+    rows.forEach((r) => { const was = have.get(r.id); if (!was || (r.from != null && was.from == null)) { have.set(r.id, r); fresh = true; } });
+    if (!fresh) return;
+    const cut = Date.now() - 8 * 86400000;
+    GM_setValue(LEDGER_KEY, { at: Date.now(), rows: [...have.values()].filter((r) => r.at > cut).sort((a, b) => b.at - a.at).slice(0, 60) });
+  }
+  function ledgerForBot() {
+    const saved = GM_getValue(LEDGER_KEY, null);
+    const list = saved && Array.isArray(saved.rows) ? saved.rows.filter((r) => r.at > Date.now() - 8 * 86400000) : [];
+    return list.length ? list : null;
   }
   // For the crew bot (sharing on): the last week of them.
   function treasuryPaysForBot() {
@@ -5000,7 +5037,7 @@
       '<li>your battle stats, only if you turn on Share my battle stats below</li></ul>' +
       'In return you get the pooled stock price history, how to get hidden feats, what mastery unlocks do, the pier\'s fish table and what the next Harbour sense levels do. Other cats\' gear and battle stats stay with the alliance. Nothing about your crew is sent, and nothing ever goes to MeowStreets.</div>' +
       '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (so the alliance sees them on your profile; your battle stats only with Share my battle stats on), the hourly Whiskers prices of Premium tuna and Catnip tea, the crime mastery unlocks you have reached, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, the crew\'s finished chains (each cat\'s links, crimes and fights) from the chain history, the results of heists you were in (each member\'s payout), your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, other cats\' ⚔️ gear and the battle stats alliance members chose to share, the leaders\' recruiting list, contract payouts, the crew\'s fish table, chain reports and heist results; nothing else, never sent to MeowStreets)</span></label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards, the crew\'s treasury log (who put money in, who was paid, crew job money), the bank\'s deposit rates, the crew\'s finished chains (each cat\'s links, crimes and fights) from the chain history, the results of heists you were in (each member\'s payout), your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, other cats\' ⚔️ gear and the battle stats alliance members chose to share, the leaders\' recruiting list, contract payouts, the crew\'s fish table, chain reports and heist results; nothing else, never sent to MeowStreets)</span></label></div>' +
       '<div id="msx-acc-statsbox" hidden><h3 id="msx-stats">Battle stats</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-stats"> Share my battle stats</label>' +
       '<p class="msx-acc-sub">Off unless you turn it on. Your base strength, defense, speed and dexterity (no temporary boosts) go to The Purrfessionals\' bot and show on your profile and the Players list for the Cataclysm alliance\'s script users, and nobody else, with the date they were last updated. Untick this and they are taken back. If you turn sharing off instead, the last ones you shared stay, with their date. Only cats who turn this on show stats; nobody else\'s are ever kept. Needs sharing on.</p>' +
