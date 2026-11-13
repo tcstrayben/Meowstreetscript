@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.4
-// @description  Crimes page: exact XP and cash per nerve, item drops, the success % breakdown and the best crimes highlighted on every card. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
+// @version      0.49.5
+// @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (Cataclysm alliance crews only; nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -36,38 +36,7 @@
 
   // ─── Config ───────────────────────────────────────────────────────────────
   const REFRESH_DEBOUNCE_MS = 250; // wait for the React page to settle before redrawing
-  const MAX_OBSERVATIONS_PER_CRIME = 300; // cap on stored history so the stored data stays small
   const DB_KEY = 'ms_db_v1';
-
-  // Exact per-crime figures from the game's crime pages (see crimes.csv). Keys are normalised crime names.
-  // xp = XP for a successful attempt, nerve = nerve cost, base = base success % (before level/mastery/heat).
-  const DROPS = {
-    alleys: { common: 'Lucky fish bone', rare: 'The Alleys glass eye' },
-    dockside: { common: 'Dockside pearl', rare: 'Black tide pearl' },
-    quarter: { common: 'Antique collar', rare: 'Old Quarter signet' },
-  };
-  const CRIMES = {
-    // The Alleys
-    dumpsterdiving: { xp: 6, nerve: 3, base: 92, drops: DROPS.alleys },
-    pickpocketatourist: { xp: 9, nerve: 4, base: 82, drops: DROPS.alleys },
-    fenceastolenbicycle: { xp: 14, nerve: 6, base: 72, drops: DROPS.alleys },
-    runacatnipstall: { xp: 20, nerve: 8, base: 66, drops: DROPS.alleys },
-    // Dockside
-    fishmarketheist: { xp: 12, nerve: 6, base: 78, drops: DROPS.dockside },
-    smuggletinnedtuna: { xp: 18, nerve: 8, base: 70, drops: DROPS.dockside },
-    cratejacking: { xp: 26, nerve: 10, base: 64, drops: DROPS.dockside },
-    harbourmasterssafe: { xp: 36, nerve: 12, base: 58, drops: DROPS.dockside },
-    // Old Quarter
-    rooftopburglary: { xp: 22, nerve: 10, base: 62, drops: DROPS.quarter },
-    gallerynight: { xp: 32, nerve: 12, base: 58, drops: DROPS.quarter },
-    jewellerswindow: { xp: 44, nerve: 14, base: 54, drops: DROPS.quarter },
-    thecathedralclockjob: { xp: 60, nerve: 16, base: 50, drops: DROPS.quarter },
-  };
-  // Exact XP per nerve, using the nerve cost shown on the card (falls back to the table).
-  const xpnOf = (c) => {
-    const t = CRIMES[c.key];
-    return t ? t.xp / (c.nerve || t.nerve) : null;
-  };
 
   // ─── Helpers ──────────────────────────────────────────────────────────────
   const norm = (s) => (s || '').toLowerCase().replace(/[^a-z0-9]/g, '');
@@ -86,6 +55,41 @@
   const pageWin = typeof unsafeWindow !== 'undefined' ? unsafeWindow : window;
   let apiState = null; // { at, crimes: {key: {...}}, meritLines: {name: {...}}, merits, crew, chain } | null
   let tradingRefreshAt = 0; // when the soonest hourly store price on the Trading panel goes out of date
+
+  // Crime success pieces from the game's `bonuses` list (see above). null when the game sent no list. Each piece:
+  // { label, v, crimes: [crime ids] or null for every crime }. Lines about other things (gym, wages, springing a cat,
+  // the clean-job chance) are left out because they name no crime.
+  function crimeBonusesFromList(raw) {
+    // Only the list as sent since 2026-11-13 ({ source, line, from }); the older plain strings (2026-11-04) left out
+    // Inside line and the merits, so for those the older reckoning above stays.
+    if (!Array.isArray(raw.bonuses) || !raw.bonuses.length || !raw.bonuses.every((x) => x && typeof x === 'object' && typeof x.line === 'string' && x.source)) return null;
+    const crimes = (raw.crimes || []).filter((c) => c && c.id && c.name);
+    const byName = (n) => { const k = norm(String(n).replace(/^the\s+/i, '')); const c = crimes.find((x) => norm(x.name.replace(/^the\s+/i, '')) === k); return c ? c.id : null; };
+    const districtNames = {};
+    ((raw.street && raw.street.districts) || []).forEach((d) => { if (d && d.id && d.name) districtNames[norm(d.name.replace(/^the\s+/i, ''))] = d.id; });
+    const out = [];
+    raw.bonuses.forEach((b) => {
+      if (!b || typeof b.line !== 'string') return;
+      const label = String(b.from || b.source || 'bonus').split(' · ')[0];
+      b.line.split(/,\s*(?=[+−-]\d)/).forEach((part) => { // "+5% crime cash, +4 points on A, B and C": split before each +N only
+        const m = part.trim().replace(/\.$/, '').match(/^([+−-])(\d+) points? (to|on) (.+)$/i);
+        if (!m) return;
+        const v = (m[1] === '+' ? 1 : -1) * Number(m[2]);
+        // "to every crime’s success chance" (and "on every crime’s …", as the game wrote it before): every crime.
+        if (/^every crime(?:’s|'s|s)?\b/i.test(m[4])) { out.push({ label, v, crimes: null }); return; }
+        if (m[3].toLowerCase() !== 'on') return; // "to spring a cat", "to your happiness cap": not a crime
+        const dm = m[4].match(/^every (.+?) crime$/i);
+        if (dm) {
+          const id = districtNames[norm(dm[1].replace(/^the\s+/i, ''))];
+          if (id) out.push({ label, v, crimes: crimes.filter((c) => c.district === id).map((c) => c.id) });
+          return;
+        }
+        const ids = m[4].split(/\s*,\s*|\s+and\s+/i).map(byName);
+        if (ids.length && ids.every(Boolean)) out.push({ label, v, crimes: ids });
+      });
+    });
+    return out;
+  }
 
   function extractApiState(raw) {
     if (!raw || typeof raw !== 'object') return null;
@@ -211,7 +215,7 @@
       out.gearNames = {};
       [...(Array.isArray(raw.gear) ? raw.gear : []), ...(Array.isArray(raw.throwables) ? raw.throwables : [])]
         .forEach((g) => { if (g && g.id && g.name) out.gearNames[g.id] = g.name; });
-      out.fightCats = [];
+      out.fightCats = []; // from `attacks[].state`, which the game no longer sends (2026-11-12); fight pages still give gear
       (Array.isArray(raw.attacks) ? raw.attacks : []).forEach((a) => {
         let s = null;
         try { s = a && (typeof a.state === 'string' ? JSON.parse(a.state) : a.state); } catch (e) { s = null; }
@@ -432,6 +436,12 @@
         addPart(p.name, +m[1], /every crime/i.test(m[2]) ? null : [norm(m[2].replace(/^the\s+/i, '').replace(/['’]s success chance$/i, ''))]);
       });
       if (raw.crew && raw.crew.buffActive) addPart('crew chain', 5);
+      // The game's own list of everything you have (`bonuses`, seen 2026-11-13: { source, line, from }), e.g. "+6 points
+      // to every crime’s success chance" from "Inside line", "+3 points on Crate-jacking" from "Manifest access · Harbour
+      // pilot", "+5% crime cash, +4 points on Fish market heist and Rooftop burglary". When it is there it replaces the
+      // pieces above (it already has Inside line and the chain bonus): the game's words, so the split always matches.
+      const fromList = crimeBonusesFromList(raw);
+      if (fromList) { out.crimeBonusParts = fromList; out.bonusesFromGame = true; }
       // Whiskers & Co.'s own buy price and sell-back price for every item, keyed by the game's own item id (the
       // same id that a trading listing's `item` field uses -- confirmed by matching real listings in the user's
       // own data to store items by name: "tuna"/"bandages"/"vetpass" listings line up with Premium tuna/
@@ -561,7 +571,9 @@
     // /api/stocks/chart (0.32.0) is the stock page's own price chart, used for the market trend line.
     // /api/crew/contracts (0.34.0) is the Crew > Contracts tab's own reply: what each crew contract counts.
     // /api/crew/attacks (0.35.0) is the Crew > Crew attacks log: mugs by the crew, for the 💰 muggable mark.
-    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew': onCrewResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse, '/api/crew/attack': onCrewAttackResponse, '/api/pier': onPierResponse };
+    const HANDLERS = { '/api/state': onApiStateResponse, '/api/action': onActionResponse, '/api/mews': onMewsResponse, '/api/merits': onMeritsResponse, '/api/players': onPlayersResponse, '/api/stocks/chart': onStockChartResponse, '/api/crew': onCrewResponse, '/api/crew/contracts': onCrewContractsResponse, '/api/crew/attacks': onCrewAttacksResponse, '/api/crew/attack': onCrewAttackResponse, '/api/pier': onPierResponse, '/api/crew/chains': onChainHistoryResponse, '/api/heists/history': onHeistHistoryResponse };
+    // /api/crew/chains and /api/heists/history (0.49.5): the Crew page's chain history and the Heists page's history,
+    // for the crew bot's ⛓️ chain report and ✅ heist results (crew sharing only).
     // /api/fight/<code> (0.42.0) is a fight page's own reply: both cats' gear, for the ⚔️ record. /api/pier and anything
     // under it (0.42.0): the Pier page's weekly board, and the pier itself if a cast's reply carries it.
     const handlerFor = (path) => HANDLERS[path] || (/^\/api\/fight\/[\w-]+$/.test(path) ? onFightResponse : /^\/api\/pier\//.test(path) ? onPierResponse : null);
@@ -598,103 +610,9 @@
     return m ? parseInt(m[1], 10) : null;
   }
 
-  function readChain() {
-    const el = document.querySelector('.chain');
-    if (!el) return { count: null, bonusPct: 0 };
-    const t = el.textContent;
-    const c = t.match(/Chain\s*[×x]\s*(\d+)/i);
-    const b = t.match(/\+(\d+)%/);
-    return { count: c ? parseInt(c[1], 10) : null, bonusPct: b ? parseInt(b[1], 10) : 0 };
-  }
-
-  function readCard(card, districtName, playerLevel) {
-    const name = card.querySelector('.rung-name strong')?.textContent.trim();
-    if (!name) return null;
-
-    const lvlEl = card.querySelector('.rung-level b');
-    const level = lvlEl ? parseInt(lvlEl.textContent, 10) : null;
-
-    const cashText = card.querySelector('.rung-stats .cash')?.textContent || '';
-    const cashM = cashText.match(/\$([\d,]+)\s*[–-]\s*\$([\d,]+)/);
-    const cashMin = cashM ? num(cashM[1]) : null;
-    const cashMax = cashM ? num(cashM[2]) : null;
-
-    // Read the nerve cost from its own span: the stats' combined text runs "$77" into "3 nerve".
-    let nerve = null;
-    card.querySelectorAll('.rung-stats > span').forEach((sp) => {
-      const m = sp.textContent.trim().match(/^(\d+)\s*nerve$/i);
-      if (m) nerve = parseInt(m[1], 10);
-    });
-
-    const oddsText = card.querySelector('.odds strong')?.textContent || '';
-    const successM = oddsText.match(/([\d.]+)\s*%/);
-    const domSuccess = successM ? parseFloat(successM[1]) / 100 : null;
-    const api = apiState && apiState.crimes[norm(name)] || null;
-    const success = api ? api.chance / 100 : domSuccess;
-
-    const mastText = card.querySelector('.rung-mastery')?.textContent || '';
-    const mastM = mastText.match(/Mastery\s+(\d+)\s*\/\s*(\d+)/i);
-    const masteryLevel = mastM ? parseInt(mastM[1], 10) : null;
-    const masteryMax = mastM ? parseInt(mastM[2], 10) : null;
-
-    const bar = card.querySelector('.rung-mastery [role="progressbar"]');
-    const vt = bar?.getAttribute('aria-valuetext') || '';
-    const vtM = vt.match(/Level\s+(\d+)\s+of\s+(\d+),\s*([\d,]+)\s+of\s+([\d,]+)\s+successes/i);
-    const progressCur = vtM ? num(vtM[3]) : null;
-    const progressNeed = vtM ? num(vtM[4]) : null;
-
-    const lockedByState = card.getAttribute('data-state') === 'locked';
-    const lockedByLevel = playerLevel != null && level != null && level > playerLevel;
-    const unlocked = !lockedByState && !lockedByLevel;
-
-    return {
-      key: norm(name), name, district: districtName, level, nerve, cashMin, cashMax, success,
-      masteryLevel, masteryMax, progressCur, progressNeed, unlocked, card, api,
-    };
-  }
-
-  function readAll() {
-    const playerLevel = readPlayerLevel();
-    const chain = readChain();
-    const crimes = [];
-    const heat = {};
-    const heatHeads = {};
-    document.querySelectorAll('.ladders .ladder').forEach((ladder) => {
-      const head = ladder.querySelector('.ladder-head');
-      const headText = head ? head.textContent : '';
-      const districtName = (head?.querySelector('h1,h2,h3,strong')?.textContent || headText.replace(/\d+\s*\/\s*\d+\s*heat/i, '')).trim();
-      const heatM = headText.match(/(\d+)\s*\/\s*(\d+)\s*heat/i);
-      if (heatM) { heat[districtName] = parseInt(heatM[1], 10); heatHeads[districtName] = head; }
-      ladder.querySelectorAll('article.rung').forEach((card) => {
-        const c = readCard(card, districtName, playerLevel);
-        if (c) crimes.push(c);
-      });
-    });
-    return { playerLevel, chain, crimes, heat, heatHeads };
-  }
-
-  // ─── Maths ────────────────────────────────────────────────────────────────
-  // Expected XP/nerve = (XP / nerve) x success x (1 + 0.5 x clean chance); clean chance = 5% + 1% per mastery level.
-  // At 80 heat and up a district pays half the XP and turns no clean job at all. The game's text says "above 80",
-  // but the user saw a district still hot at exactly 80 (2026-10-02), so 80 counts; the game's own `hot` flag wins
-  // whenever its data has been seen.
+  // At 80 heat and up a district pays half the XP and turns no clean job at all; the game's own `hot` flag wins
+  // whenever its data has been seen (the job pages' heat lock).
   const HOT_HEAT = 80;
-  function score(c, chain, heat) {
-    const hot = (c.api && c.api.hot) || (heat != null && heat >= HOT_HEAT);
-    const cleanChance = hot ? 0 : 0.05 + 0.01 * (c.masteryLevel || 0);
-    const cleanMult = 1 + 0.5 * cleanChance;
-    const xpn = xpnOf(c);
-    const out = { xpn, hot, xpPerNerve: null, cashLow: null, cashHigh: null, cashEV: null };
-    if (c.success == null) return out;
-    if (xpn != null) out.xpPerNerve = xpn * c.success * cleanMult * (hot ? 0.5 : 1);
-    if (c.nerve && c.cashMin != null) {
-      out.cashLow = c.cashMin / c.nerve;
-      out.cashHigh = c.cashMax / c.nerve;
-      const avg = (c.cashMin + c.cashMax) / 2;
-      out.cashEV = (avg * c.success * cleanMult * (1 + chain.bonusPct / 100)) / c.nerve;
-    }
-    return out;
-  }
 
   // ─── Database (stored via GM_setValue, exported to a file on demand) ─────
   // The db is parsed once and kept in memory: the page ticks every second, so re-parsing a growing
@@ -723,61 +641,6 @@
   // listeners near the end), and a tab that is being hidden saves what it has.
   document.addEventListener('visibilitychange', () => { if (document.hidden && dbCache) saveDb(dbCache); });
 
-  function logObservations(data) {
-    const db = loadDb();
-    const now = new Date().toISOString();
-    let changed = false;
-
-    if (data.playerLevel != null && !db.playerLevels.some((p) => p.level === data.playerLevel)) {
-      db.playerLevels.push({ level: data.playerLevel, firstSeen: now });
-      changed = true;
-    }
-
-    data.crimes.forEach((c) => {
-      const rec = db.crimes[c.key] || (db.crimes[c.key] = { name: c.name, district: c.district, unlockLevel: c.level, observations: [] });
-      rec.name = c.name; rec.district = c.district; if (c.level != null) rec.unlockLevel = c.level;
-      if (c.nerve != null) rec.nerve = c.nerve;
-      if (c.cashMin != null) { rec.cashMin = c.cashMin; rec.cashMax = c.cashMax; }
-      const tbl = CRIMES[c.key];
-      if (tbl) { rec.xp = tbl.xp; rec.baseSuccess = tbl.base; rec.drops = tbl.drops; }
-
-      if (!c.unlocked || c.success == null) return;
-
-      if (c.masteryLevel != null && c.progressNeed != null) {
-        const t = db.masteryThresholds[c.key] || (db.masteryThresholds[c.key] = {});
-        if (t[c.masteryLevel] !== c.progressNeed) { t[c.masteryLevel] = c.progressNeed; changed = true; }
-      }
-
-      const last = rec.observations[rec.observations.length - 1];
-      const ss = db.mods?.merits?.['Street sense'] ?? null;
-      const edu = db.mods?.eduCrimePoints ?? null;
-      const crew = crewPoints(db.mods);
-      const perk = db.mods?.crewPerkCrime ?? null;
-      const crewInf = db.mods?.crewInferred?.active ?? null;
-      const sameAsLast = last && last.success === c.success && last.masteryLevel === c.masteryLevel &&
-        last.progressCur === c.progressCur && last.playerLevel === data.playerLevel &&
-        last.heat === (data.heat[c.district] ?? null) && (last.ss ?? null) === ss && (last.edu ?? null) === edu &&
-        (last.crew ?? null) === crew && (last.perk ?? null) === perk && (last.crewInf ?? null) === crewInf; // ?? null: readings saved by older versions lack these fields
-      if (!sameAsLast) {
-        rec.observations.push({
-          t: now, playerLevel: data.playerLevel, success: c.success,
-          masteryLevel: c.masteryLevel, progressCur: c.progressCur, progressNeed: c.progressNeed,
-          heat: data.heat[c.district] ?? null, chainBonusPct: data.chain.bonusPct, chain: data.chain.count,
-          ss, edu, crew, perk, crewInf, // Street sense ranks, education points, crew chain bonus points and crew perk, as last seen on those pages
-          // What the card shows minus base, mastery and heat. It was a steady +12 at level 4; this is how we find where it comes from.
-          // Readings at the 95% cap say nothing about the bonus, so they are left blank.
-          bonus: tbl && data.heat[c.district] != null && Math.round(c.success * 100) < 95
-            ? Math.round(c.success * 100) - tbl.base - (c.masteryLevel || 0) + Math.floor(data.heat[c.district] / 4)
-            : null,
-        });
-        if (rec.observations.length > MAX_OBSERVATIONS_PER_CRIME) rec.observations.shift();
-        changed = true;
-      }
-    });
-
-    if (changed) { db.updated = now; saveDb(db); }
-  }
-
   // ─── Drawing ──────────────────────────────────────────────────────────────
   const STYLE_ID = 'msx-style';
   function injectStyle() {
@@ -785,12 +648,6 @@
     const s = document.createElement('style');
     s.id = STYLE_ID;
     s.textContent = `
-      .msx-info { display:flex; flex-wrap:wrap; gap:4px 12px; align-items:center; margin-top:6px;
-        padding:6px 8px; border-radius:8px; background:rgba(0,0,0,.28);
-        border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:12px; line-height:1.3; }
-      .msx-info .msx-xp { color:var(--ms-lime-light, #d3f0b4); font-weight:600; }
-      .msx-info .msx-cash { color:var(--ms-gold, #e9c46a); font-weight:600; }
-      .msx-info small { color:var(--ms-smoke, #8d9289); font-size:11px; }
       .msx-odds { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
       .msx-odds summary { display:inline-block; cursor:pointer; list-style:none; user-select:none; }
       .msx-odds summary::-webkit-details-marker { display:none; }
@@ -820,15 +677,9 @@
       .cs-dock .msx-croplock { display:flex; flex-direction:column; gap:4px; margin-top:6px; }
       .msx-odds .msx-odds-body { margin-top:2px; }
       .msx-odds .msx-unk { color:var(--ms-gold, #e9c46a); }
-      .msx-drops { flex-basis:100%; color:var(--ms-smoke, #8d9289); font-size:11px; }
-      .msx-drops b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-tag { padding:1px 7px; border-radius:999px; font-size:11px; font-weight:700; }
       .msx-tag.xp { background:var(--ms-lime, #b4df87); color:var(--ms-ink, #182316); }
       .msx-tag.cash { background:var(--ms-gold, #e9c46a); color:var(--ms-ink, #182316); }
-      article.rung[data-msx-best~="xp"] { box-shadow: inset 0 0 0 2px var(--ms-lime, #b4df87); }
-      article.rung[data-msx-best~="cash"] { box-shadow: inset 0 0 0 2px var(--ms-gold, #e9c46a); }
-      article.rung[data-msx-best~="xp"][data-msx-best~="cash"] {
-        box-shadow: inset 0 0 0 2px var(--ms-lime, #b4df87), inset 0 0 0 4px var(--ms-gold, #e9c46a); }
       .msx-stock { display:flex; flex-wrap:wrap; gap:4px 8px; align-items:center; margin-top:4px; font-weight:400; }
       .msx-stock small { color:var(--ms-smoke, #8d9289); font-size:11px; }
       a.xr-screen.msx-low { outline:2px solid var(--ms-lime, #b4df87); outline-offset:-2px; }
@@ -921,8 +772,6 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:11.5px; line-height:1.35; color:var(--ms-smoke, #8d9289); font-weight:400; }
       .msx-ws b { color:var(--ms-bone, #e7ede1); font-weight:600; }
       .msx-ws .msx-ws-disc b { color:var(--ms-lime, #b4df87); }
-      .rung .tool-line > span.msx-tool-link { cursor:pointer; }
-      .rung .tool-line > span.msx-tool-link:hover { border-color:#9ecbff; text-decoration:underline; }
       .ws-row.msx-ws-focus { outline:2px solid var(--ms-lime, #b4df87); outline-offset:4px; border-radius:10px; transition:outline-color .4s; }
       .sidebar .brand:has(.msx-clock) { min-width:0; }
       .sidebar .brand:has(.msx-clock) .brand-logo { flex:0 1 auto; min-width:0; }
@@ -956,7 +805,6 @@
       .msx-crimeheat { font-size:12px; margin:2px 0 4px; color:var(--ms-smoke, #8d9289); }
       .msx-crimeheat b { color:var(--ms-ink, #e7ede1); }
       .msx-crimeheat.hot, .msx-crimeheat.hot b { color:var(--ms-red, #eb6561); }
-      .msx-heat { margin-left:8px; font-size:11px; color:var(--ms-smoke, #8d9289); white-space:nowrap; }
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); font-size:12px; color:var(--ms-bone, #e7ede1); }
       #msx-account { margin:18px 0; padding:16px 18px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
@@ -1013,6 +861,7 @@
       .msx-contracts .msx-ct.off { opacity:.55; }
       .msx-statsnudge { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
       .msx-statsnudge:hover { text-decoration:underline; }
+      .msx-hittook { margin-left:6px; font-size:11px; font-weight:700; color:var(--ms-red, #e8846f); }
       a.msx-crew-ct { outline:2px solid var(--msx-crew); outline-offset:2px; border-radius:6px; }
       #msx-crimetable tr.msx-crew-row td:first-child { box-shadow:inset 3px 0 0 var(--msx-crew); padding-left:6px; }
       #msx-crimetable .msx-ct-chip { margin-left:6px; padding:0 6px; border-radius:999px; font-size:11px; color:var(--msx-crew); border:1px solid var(--msx-crew); }
@@ -1058,80 +907,6 @@
     document.head.appendChild(s);
   }
 
-  function clearDrawn() {
-    document.querySelectorAll('.msx-info, .msx-heat').forEach((n) => n.remove());
-    document.querySelectorAll('article.rung[data-msx-best]').forEach((n) => n.removeAttribute('data-msx-best'));
-  }
-
-  // Crew chain bonus in points right now: null if the Crew page was never read, 0 once its window has ended.
-  function crewPoints(mods) {
-    const cb = mods && mods.crewBonus;
-    if (!cb) return null;
-    return cb.until > Date.now() ? cb.pct : 0;
-  }
-
-  // Where each point of a crime's success % comes from:
-  // base + mastery + Street sense + education + crew chain bonus + crew perk + (unknown other) - floor(heat / 4), max 95.
-  // The crew bonus is worked out from the card itself when everything else is known: if the shown % is exactly 5
-  // above the rest, the crew +5% window is on; if it is exactly equal, it is off. That works from the Crimes page alone.
-  let crewVotes = []; // per draw: what each card said about the crew bonus (true / false)
-  function oddsBreakdown(c, heat, mods) {
-    const t = CRIMES[c.key];
-    if (!t || c.success == null || heat == null) return null;
-    const shown = Math.round(c.success * 100);
-    const items = [
-      { label: 'base', v: t.base },
-      { label: 'mastery', v: c.masteryLevel || 0 },
-      { label: 'merits', v: mods.merits?.['Street sense'] ?? null, from: 'Merits' },
-      { label: 'education', v: mods.eduCrimePoints ?? null, from: 'Education' },
-      { label: 'crew chain', v: crewPoints(mods), from: 'Crew', crew: true },
-      { label: 'crew perk', v: mods.crewPerkCrime ?? null, from: 'Crew > Perks' },
-    ];
-    const heatPts = Math.floor(heat / 4);
-    const sumOf = (skipCrew) => items.reduce((a, i) => a + (skipCrew && i.crew ? 0 : (i.v || 0)), 0) - heatPts;
-    const crewItem = items.find((i) => i.crew);
-    const storedCrew = crewItem.v;
-    let crewInferred = null;
-    if (!items.some((i) => i.v == null && !i.crew) && shown < 95) {
-      const pct = mods.crewPctSeen || 5;
-      const x = shown - sumOf(true);
-      if (x === pct) crewInferred = true; else if (x === 0) crewInferred = false;
-      if (crewInferred !== null) {
-        const val = crewInferred ? pct : 0;
-        crewItem.inferred = storedCrew !== val;
-        crewItem.storedValue = storedCrew;
-        crewItem.v = val;
-      }
-    }
-    const sum = sumOf(false);
-    const unknown = items.filter((i) => i.v == null);
-    const capped = shown >= 95 && sum >= 95;
-    const other = capped ? 0 : shown - sum; // whatever the known sources don't explain
-    return { shown, items, heatPts, sum, unknown, capped, other, crewInferred };
-  }
-
-  function oddsHtml(c, heat, mods) {
-    const b = oddsBreakdown(c, heat, mods);
-    if (!b) return '';
-    const fmt = (v) => (v < 0 ? '−' : '+') + Math.abs(v);
-    if (b.crewInferred !== null) crewVotes.push(b.crewInferred);
-    const bits = b.items.filter((i) => i.v !== 0 || i.label === 'base').map((i) =>
-      i.v == null ? `<span class="msx-unk">? ${i.label}</span>` : i.label === 'base' ? `${i.v} base` : `${fmt(i.v)} ${i.label}${i.inferred ? '*' : ''}`);
-    if (b.heatPts) bits.push(`${fmt(-b.heatPts)} heat`);
-    if (b.other) bits.push(`<span class="msx-unk">${fmt(b.other)} other</span>`);
-    const end = b.capped ? `= ${b.sum} → capped at 95%` : `= ${b.shown}%`;
-    const cb = mods.crewBonus;
-    const crewNote = cb && cb.until > Date.now()
-      ? ` The crew +${cb.pct}% window ends in ${Math.max(1, Math.round((cb.until - Date.now()) / 60000))} min (${new Date(cb.until).toUTCString().slice(17, 22)} UTC).` : '';
-    const ci = b.items.find((i) => i.crew);
-    const inferredNote = ci.inferred ? ` * Worked out from this card: the shown % is ${ci.v ? 'exactly ' + ci.v + ' above' : 'exactly equal to'} everything else, so the crew bonus is ${ci.v ? 'on' : 'off'}` +
-      ` (the Crew page data said ${ci.storedValue == null ? 'nothing yet' : ci.storedValue}). Open Crew or the Mews to refresh its end time.` : '';
-    const missing = b.unknown.length ? ` Not read yet: open ${[...new Set(b.unknown.map((i) => i.from))].join(', ')} once to fill in.` : '';
-    const other = b.other && !b.unknown.length ? ' "other" is something this script does not know about yet, such as a job perk or a stock perk.' : '';
-    const title = 'Where the success % comes from: base success + mastery level + Street sense merit ranks + education points + crew chain bonus + crew Inside-line perk - 1 per 4 heat, never above 95%.' + crewNote + inferredNote + missing + other;
-    return oddsDetails(c.key, title.replace(/"/g, '&quot;'), `${bits.join(' ')} ${end}`);
-  }
-
   // The breakdown sits folded away behind a small "Odds" toggle (user request, 0.17.4: the always-open line was
   // too big). Cards are redrawn often, so which ones you opened is remembered for as long as the page is open.
   const oddsOpen = new Set();
@@ -1156,8 +931,9 @@
       // "other", so the line always adds up to the game's own number.
       const forThis = (p) => !p.crimes || p.crimes.some((k) => k === a.id || c.key.startsWith(norm(k)));
       const parts = ((apiState && apiState.crimeBonusParts) || []).filter(forThis).map((p) => ({ label: p.label, v: p.v }));
+      // The game's own list already has Inside line in it; only the older reckoning adds it here.
       const inside = apiState && Number.isFinite(apiState.crewPerkCrime) ? apiState.crewPerkCrime : loadDb().mods?.crewPerkCrime;
-      if (apiState && apiState.crew && inside) parts.push({ label: 'Inside line', v: inside });
+      if (apiState && !apiState.bonusesFromGame && apiState.crew && inside) parts.push({ label: 'Inside line', v: inside });
       const other = a.bonus - parts.reduce((s, p) => s + p.v, 0);
       parts.forEach((p) => bits.push(`${fmt(p.v)} ${escHtml(p.label)}`));
       if (other) bits.push(`<span class="msx-unk" title="Part of the game's bonus that none of the known sources explain">${fmt(other)} other</span>`);
@@ -1175,18 +951,12 @@
     return oddsDetails(c.key, title, `${bits.join(' ')} ${end}`);
   }
 
-  function dropsHtml(c) {
-    const d = CRIMES[c.key]?.drops;
-    if (!d) return '';
-    return `<div class="msx-drops" title="Clean jobs drop the common item. About 1 in 100 clean jobs also drops the district rare, which only comes from this source.">` +
-      `Clean-job drops: <b>${d.common}</b> · rare (~1%): <b>${d.rare}</b></div>`;
-  }
-
   // ─── Heat lock (Crimes page) ──────────────────────────────────────────────
   // User request (0.17.7): at 80 heat and up (half XP, no clean jobs) a crime's own Attempt button is disabled
   // until the district cools to 79, with an "Unlock anyway" button per district. Same idea as the Cat Tree lock:
   // the script never clicks or attempts anything, it only blocks your own click. Button from a dev-tools capture
-  // (Screenshot 338): article.rung > div.rung-main > button.accent. An override lasts until the district cools.
+  // (Screenshot 338). Since the 2026-10-10 rebuild it is the job page's nerve buttons (applyCrimeLocks); an override lasts
+  // until the district cools.
   const HEAT_OVERRIDE_KEY = 'ms_heat_override_v1';
   function loadHeatOverrides() { try { return JSON.parse(GM_getValue(HEAT_OVERRIDE_KEY, '{}')) || {}; } catch (e) { return {}; } }
   document.addEventListener('click', (e) => {
@@ -1197,130 +967,18 @@
     GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(o));
     schedule();
   });
-  function applyHeatLock(c, hot, heat, box, overrides) {
-    const btn = c.card.querySelector('.rung-main > button.accent');
-    if (!btn) return;
-    const locked = hot && !overrides[c.district];
-    if (locked) { if (!btn.disabled) btn.disabled = true; btn.classList.add('msx-heat-locked'); }
-    else if (btn.classList.contains('msx-heat-locked')) { btn.classList.remove('msx-heat-locked'); btn.disabled = false; }
-    if (!hot) return;
-    const mins = heat != null ? Math.max(0, heat - (HOT_HEAT - 1)) * 5 : 0; // cools 1 point per 5 minutes
-    const when = mins ? ` · unlocks in ~${mins >= 60 ? Math.floor(mins / 60) + 'h ' : ''}${mins % 60}m` : '';
-    const note = document.createElement('div');
-    note.className = 'msx-heatlock' + (locked ? ' locked' : '');
-    note.innerHTML = (locked ? `🔒 Heat ${heat != null ? heat : '80+'}: half XP, Attempt locked${when}` : '🔓 Hot, unlocked by you') +
-      ` <button type="button" class="msx-heat-toggle" data-district="${escHtml(c.district)}">${locked ? 'Unlock anyway' : 'Lock again'}</button>`;
-    box.prepend(note);
-  }
 
   // ─── Tool chips -> Whiskers & Co. (Crimes page) ───────────────────────────
   // User request (0.18.1): clicking a crime's tool chip ("Fake manifest none", "Crowbar ×1") opens Whiskers & Co.
   // and scrolls to that tool. Your own click, a plain page change. Chip from a dev-tools capture (Screenshot 339):
-  // article.rung > div.rung-main > div.tool-line > span (class "missing" when you own none).
+  // since the rebuild, the job page's dock: p.cs-risk / p.cs-gear > span ("Bolt cutters ×9").
   const toolName = (chip) => chip.textContent.replace(/\s*(none|×\s*\d+|x\s*\d+)\s*$/i, '').trim();
   document.addEventListener('click', (e) => {
-    const chip = e.target.closest && e.target.closest('.rung .tool-line > span, .cs-dock .cs-risk > span, .cs-dock .cs-gear > span');
+    const chip = e.target.closest && e.target.closest('.cs-dock .cs-risk > span, .cs-dock .cs-gear > span');
     if (!chip) return;
     const name = toolName(chip);
     location.assign('/whiskers' + (name ? '#msx-item=' + encodeURIComponent(name) : ''));
   });
-  function decorateToolChips() {
-    document.querySelectorAll('.rung .tool-line > span').forEach((chip) => {
-      if (!chip.classList.contains('msx-tool-link')) chip.classList.add('msx-tool-link');
-      setTitle(chip, 'Open Whiskers & Co. to buy this tool');
-    });
-  }
-
-  function draw(data) {
-    clearDrawn();
-    decorateToolChips();
-    // An "Unlock anyway" ends once its district has cooled below 80.
-    const overrides = loadHeatOverrides();
-    let overridesChanged = false;
-    Object.keys(overrides).forEach((d) => { if (data.heat[d] != null && data.heat[d] < HOT_HEAT) { delete overrides[d]; overridesChanged = true; } });
-    if (overridesChanged) GM_setValue(HEAT_OVERRIDE_KEY, JSON.stringify(overrides));
-    crewVotes = [];
-    const scored = data.crimes.map((c) => ({ c, s: score(c, data.chain, data.heat[c.district]) }));
-
-    // Best among crimes the player can actually use at their level.
-    let bestXp = null, bestCash = null;
-    scored.forEach((x) => {
-      if (!x.c.unlocked) return;
-      if (x.s.xpPerNerve != null && (!bestXp || x.s.xpPerNerve > bestXp.s.xpPerNerve)) bestXp = x;
-      if (x.s.cashEV != null && (!bestCash || x.s.cashEV > bestCash.s.cashEV)) bestCash = x;
-    });
-
-    // Time until each district's heat is back to 0 (it cools 1 point every 5 minutes).
-    Object.entries(data.heatHeads).forEach(([district, head]) => {
-      const h = data.heat[district];
-      const mins = h * 5;
-      const txt = h <= 0 ? 'Cool' : `Heat 0 in ~${mins >= 60 ? Math.floor(mins / 60) + 'h ' : ''}${mins % 60}m`;
-      const el = document.createElement('span');
-      el.className = 'msx-heat';
-      el.textContent = txt;
-      el.title = 'Heat cools 1 point every 5 minutes (the rules say "while you are away", so it may not cool while you sit on the page).';
-      head.appendChild(el);
-    });
-
-    scored.forEach((x) => {
-      const { c, s } = x;
-      const host = c.card.querySelector('.rung-main') || c.card;
-      const box = document.createElement('div');
-      box.className = 'msx-info';
-
-      if (!c.unlocked) {
-        box.innerHTML = `<small>Unlocks at level ${c.level ?? '?'}</small>` +
-          (s.xpn != null ? `<small>XP/n ${s.xpn.toFixed(2)} base</small>` : '') + dropsHtml(c);
-        host.appendChild(box);
-        return;
-      }
-
-      const parts = [];
-      if (s.xpPerNerve != null) {
-        parts.push(`<span class="msx-xp" title="XP ${CRIMES[c.key].xp} / ${c.nerve || CRIMES[c.key].nerve} nerve = ${s.xpn.toFixed(2)} XP per nerve, x your success x clean-bonus">XP/n ${s.xpPerNerve.toFixed(2)}</span>`);
-      }
-      if (s.cashLow != null) {
-        parts.push(`<span class="msx-cash" title="Cash per nerve, min-max">$/n ${fmtMoney(s.cashLow)}–${fmtMoney(s.cashHigh)}</span>`);
-      }
-      // Heat forecast. Every attempt adds 6 heat to the district and every 4 heat costs 1 point of success.
-      // The card's success % already includes today's heat, so add that back to get the zero-heat base.
-      const h0 = data.heat[c.district];
-      if (h0 != null && c.success != null) {
-        if (s.hot) {
-          parts.push('<span class="msx-tag hot" title="At 80 heat and up this district pays half the XP and turns no clean job. The XP/n above already reflects that.">Heat 80+: ½ XP, no clean</span>');
-        } else {
-          const n = Math.ceil((HOT_HEAT - h0) / 6); // attempts until heat reaches 80 (+6 heat each)
-          if (n <= 8) parts.push(`<small title="Attempts until this district's heat reaches 80 (half XP, no clean jobs)">Heat 80 in ${n} attempt${n === 1 ? '' : 's'}</small>`);
-        }
-      }
-      if (x === bestXp) parts.push('<span class="msx-tag xp">★ Best XP</span>');
-      if (x === bestCash) parts.push('<span class="msx-tag cash">★ Best $</span>');
-      const oddsBlock = c.api ? oddsHtmlFromApi(c) : oddsHtml(c, data.heat[c.district], loadDb().mods || {});
-      box.innerHTML = (parts.join('') || '<small>No data yet</small>') + oddsBlock + dropsHtml(c);
-      host.appendChild(box);
-      applyHeatLock(c, s.hot, h0, box, overrides);
-
-      const best = [];
-      if (x === bestXp) best.push('xp');
-      if (x === bestCash) best.push('cash');
-      if (best.length) c.card.setAttribute('data-msx-best', best.join(' '));
-    });
-
-    // Remember what the cards said about the crew bonus (the checklist and the log use it).
-    if (crewVotes.length) {
-      const db = loadDb();
-      if (!db.mods) db.mods = { merits: {} };
-      const active = crewVotes.filter(Boolean).length * 2 >= crewVotes.length;
-      const ci = db.mods.crewInferred;
-      if (!ci || ci.active !== active || Date.now() - ci.at > 300000) {
-        const changed = !ci || ci.active !== active;
-        db.mods.crewInferred = { active, at: Date.now() };
-        if (changed) saveDb(db);
-      } else {
-        ci.at = Date.now();
-      }
-    }
-  }
 
   // ─── Claw Street Ex (stocks): log every price move, show low/high vs history ─
   const isStockPage = () => location.pathname.startsWith('/claw-street-ex');
@@ -1509,6 +1167,8 @@
     const pay = contractPayForBot();
     if (pay) body.contractPay = pay;
     // Treasury payments to members from the Crew page (0.44.3), so the bot can tick contract pay off by itself.
+    // Finished chains and your recent heist results (0.49.5), only once you have opened those histories.
+    Object.assign(body, historyForBot());
     const tp = treasuryPaysForBot();
     if (tp) body.treasuryPays = tp;
     // Your open bank deposits (0.46.6, user request: a 💳 bank loan's interest share, how much and when), only when
@@ -1724,6 +1384,39 @@
     muggableCache = null;
     schedule();
   }
+  // ⛓️ / ✅ History for the crew bot (0.49.5, user request): finished chains with each cat's links, crimes and fights,
+  // and your finished heists with each member's payout. Kept in memory only, sent with crew sharing (names, never ids).
+  let chainHistory = null, heistHistory = null;
+  function onChainHistoryResponse(json) {
+    if (!json || !Array.isArray(json.chains)) return;
+    chainHistory = json.chains.filter((c) => c && Number.isFinite(c.start) && Number.isFinite(c.end) && Number.isFinite(c.last) && Number.isInteger(c.links));
+    shareCrew();
+  }
+  function onHeistHistoryResponse(json) {
+    if (!json || !Array.isArray(json.heists)) return;
+    heistHistory = json.heists.filter((h) => h && h.id != null && h.status === 'completed' && Number.isFinite(h.closed_at));
+    shareCrew();
+  }
+  function historyForBot() {
+    const now = Date.now();
+    const out = {};
+    if (chainHistory) {
+      // Finished chains only (the day's chain stays in the list until 00:00 UTC), newest first.
+      out.chains = chainHistory.filter((c) => c.end <= now).slice(0, 5).map((c) => ({
+        start: c.start, end: c.end, last: c.last, links: c.links, best: !!c.best,
+        cats: (Array.isArray(c.cats) ? c.cats : []).filter((x) => x && x.name).map((x) => ({ name: x.name, links: x.links, crimes: x.crimes, fights: x.fights })),
+      }));
+    }
+    if (heistHistory) {
+      // Heists that closed in the last 6 hours (the bot only notes ones it posted).
+      out.heistResults = heistHistory.filter((h) => now - h.closed_at < 6 * 3600000).slice(0, 5).map((h) => ({
+        id: h.id, name: h.name, success: h.success, closedAt: h.closed_at,
+        members: (Array.isArray(h.members) ? h.members : []).filter((m) => m && m.name).map((m) => ({ name: m.name, payout: m.payout, stake: m.stake })),
+      }));
+    }
+    return out;
+  }
+
   function onCrewAttacksResponse(json) {
     if (!json || !Array.isArray(json.attacks)) return;
     const mugs = json.attacks.filter((a) => a && a.side === 'out' && a.result === 'mug' && a.them && a.them.id != null)
@@ -1876,7 +1569,8 @@
   // Stats (`st`, `stAt`) only from a cat's own share (`me`, 0.49.0): other cats' stats from fights leaked by the
   // game's mistake and are never kept (0.49.3; the game owner asked for them to be deleted and not shared). A newer sighting replaces what it knows; an
   // older one only fills gaps. From three places, all replies the game's own pages already load:
-  //   your last 10 fights (`attacks[].state`, every page): level, stats, max health, all four gear slots
+  //   your last 10 fights (`attacks[].state`, every page): level, max health, all four gear slots. The game stopped
+  //   sending `state` with its 2026-11-12 fix (API log 2026-11-13); kept in case it comes back, stats never read
   //   a fight page (/api/fight/<code>): both cats' level, max health and gear, as at the start of that fight
   //   an opened crew attack (/api/crew/attack): only the weapons each cat actually used, by name
   // With crew sharing on, records also go to the crew bot and the crew's come back (src 'crew'), so they stay fresh
@@ -2050,7 +1744,7 @@
     const html = `<div>⚔️ ${escHtml(l.gear)}</div><div class="msx-catgear-stats">${escHtml(l.stats)}</div>`;
     if (box.innerHTML !== html) box.innerHTML = html;
     setTitle(box, g.me >= g.at ? (g.st ? 'Base stats this cat chose to share, and its gear, from its own script. No temporary boosts.' : 'This cat\'s level and gear, shared by its own script.')
-      : 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear or trained since.');
+      : 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear since.');
   }
 
   // Crew pool (sharing on): send what you saw, get back what the crew saw. The bot keeps the newest per cat too.
@@ -2162,6 +1856,21 @@
       if (tag.textContent !== halfXpText(h)) tag.textContent = halfXpText(h);
       setTitle(tag, halfXpTitle(h));
     });
+    // 💸 what a cat took when it last hit you (0.49.5), right after the game's own "Hit you 1 day ago" tag. Only when it
+    // took money (a fight it lost or a leave takes nothing).
+    document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
+      const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
+      const hit = m && playerInfo(m[1]) && playerInfo(m[1]).hitYou;
+      const row = b.closest('.reg-item');
+      const gameTag = row && [...row.querySelectorAll('.reg-tag')].find((t) => /^Hit you\b/i.test(t.textContent.trim()));
+      let tag = row && row.querySelector('.msx-hittook');
+      if (!hit || !(hit.took > 0) || !gameTag) { if (tag) tag.remove(); return; }
+      if (!tag) { tag = document.createElement('span'); tag.className = 'msx-hittook'; }
+      if (gameTag.nextElementSibling !== tag) gameTag.after(tag);
+      const text = `took ${fmtMoney(hit.took)}`;
+      if (tag.textContent !== text) tag.textContent = text;
+      setTitle(tag, `What this cat took from you when it last hit you (${new Date(hit.at).toUTCString().slice(5, 22)} UTC), from the game's own list.`);
+    });
     // ⚔️ last seen stats (total + top two) and gear (hover), last of all.
     document.querySelectorAll('.reg-item button.reg-hit[aria-label]').forEach((b) => {
       const m = b.getAttribute('aria-label').match(/, ID (\d+),/);
@@ -2252,6 +1961,9 @@
         id: Number(c.id), name: c.name, level: Number.isFinite(c.level) ? c.level : null, rank: Number.isFinite(c.rank) ? c.rank : null,
         joined: Number.isFinite(c.created_at) ? c.created_at : null, crew: c.crew && c.crew.name ? String(c.crew.name) : '', none: !c.crew,
         lyingLow: typeof c.lying_low === 'boolean' ? c.lying_low : undefined,
+        // The last time this cat attacked you and what it took (`hit_you`, API log 2026-11-13). The game shows "Hit you
+        // 1 day ago" itself; the script adds only the amount.
+        hitYou: c.hit_you && Number.isFinite(c.hit_you.at) && Number.isFinite(c.hit_you.took) ? { at: c.hit_you.at, took: c.hit_you.took } : null,
       });
     });
     if (!players.api.size) return;
@@ -5213,7 +4925,7 @@
       '<div id="msx-acc-outbox" hidden><button type="button" id="msx-acc-outbtn"></button></div>' +
       '<div id="msx-acc-sharebox" hidden><h3>Crew Discord bot</h3>' +
       '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (so the alliance sees them on your profile; your battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, other cats\' ⚔️ gear and the battle stats alliance members chose to share, the leaders\' recruiting list, contract payouts and the crew\'s fish table; nothing else, never sent to MeowStreets)</span></label></div>' +
+      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards and the treasury\'s payments to members from the Crew page, the crew\'s finished chains (each cat\'s links, crimes and fights) from the chain history, the results of heists you were in (each member\'s payout), your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, other cats\' ⚔️ gear and the battle stats alliance members chose to share, the leaders\' recruiting list, contract payouts, the crew\'s fish table, chain reports and heist results; nothing else, never sent to MeowStreets)</span></label></div>' +
       '<div id="msx-acc-statsbox" hidden><h3 id="msx-stats">Battle stats</h3>' +
       '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-stats"> Share my battle stats</label>' +
       '<p class="msx-acc-sub">Off unless you turn it on. Your base strength, defense, speed and dexterity (no temporary boosts) go to The Purrfessionals\' bot and show on your profile and the Players list for the Cataclysm alliance\'s script users, and nobody else. Turn it off and they are taken back. Only cats who turn this on show stats; nobody else\'s are ever kept. Needs sharing on.</p>' +
@@ -5314,11 +5026,6 @@
       drawGymProgress();
       sortCrewMembers();
       readTraining();
-      if (isCrimesPage() && document.querySelector('.ladders article.rung')) {
-        const data = readAll();
-        draw(data);
-        logObservations(data);
-      }
       // The rebuilt Crimes pages (0.33.0): overview table, per-nerve line and the locks on each job's page.
       const onCrimes = isCrimesPage() || !!crimePageId();
       drawCrimeTable();
