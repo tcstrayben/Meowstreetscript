@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.9
-// @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (seen by the Cataclysm alliance only; nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
+// @version      0.50.0
+// @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -818,6 +818,8 @@
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
       #msx-account h2 { margin:0 0 2px; font-size:17px; }
       #msx-account h3 { margin:16px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
+      #msx-account h4 { margin:12px 0 2px; font-size:12px; }
+      #msx-account #msx-acc-areas { margin-top:6px; padding-left:10px; border-left:2px solid var(--ms-line, rgba(231,237,225,.25)); }
       #msx-account .msx-acc-key { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
       #msx-account .msx-acc-key input { flex:1 1 220px; min-width:0; padding:4px 6px; font:inherit; color:inherit; background:transparent; border:1px solid var(--ms-line, rgba(231,237,225,.25)); border-radius:4px; }
       #msx-account .msx-acc-key .msx-bad { color:var(--ms-red, #eb6561); }
@@ -867,8 +869,8 @@
       .msx-contracts .msx-ct b { font-weight:600; }
       .msx-contracts .msx-ct.done { opacity:.55; }
       .msx-contracts .msx-ct.off { opacity:.55; }
-      .msx-statsnudge { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
-      .msx-statsnudge:hover { text-decoration:underline; }
+      .msx-statsnudge, .msx-verifynudge { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
+      .msx-statsnudge:hover, .msx-verifynudge:hover { text-decoration:underline; }
       .msx-hittook { margin-left:6px; font-size:11px; font-weight:700; color:var(--ms-red, #e8846f); }
       a.msx-crew-ct { outline:2px solid var(--msx-crew); outline-offset:2px; border-radius:6px; }
       #msx-crimetable tr.msx-crew-row td:first-child { box-shadow:inset 3px 0 0 var(--msx-crew); padding-left:6px; }
@@ -1093,7 +1095,10 @@
   // shareOff (0.49.2, user request 2026-11-12): sharing is on unless switched off on the Account page. The old
   // shareCrew switch (off by default until 0.49.1) is no longer read, so every install starts on.
   // shareStats: opt-in, alliance crews only (0.49.4, user request); statsNudgeOff: hide the sidebar reminder to share them.
-  const DEFAULT_SETTINGS = { events: true, shareOff: false, shareStats: false, statsNudgeOff: false };
+  // 0.50.0 (user request 2026-11-14), each kind of sharing on its own switch: fightOff (gear seen in fights, your own
+  // level and gear), crewOff (our crew's data), shareBank (your bank deposits, for a 💳 bank loan; opt-in), keyData
+  // (the server may also read public pages with your Public key; opt-in).
+  const DEFAULT_SETTINGS = { events: true, shareOff: false, shareStats: false, statsNudgeOff: false, fightOff: false, crewOff: false, shareBank: false, keyData: false };
   let settings = { ...DEFAULT_SETTINGS };
   try {
     const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
@@ -1103,7 +1108,8 @@
     try { GM_setValue(SETTINGS_KEY, JSON.stringify(settings)); } catch (e) { /* ignore */ }
   }
 
-  // ─── Sharing with The Purrfessionals' Discord bot (0.19.0; on by default since 0.49.2) ────────────
+  // ─── Sharing with the MeowStreets Info server (0.19.0; on by default since 0.49.2; verify first since 0.50.0) ───
+  // The server is the crew's Discord bot; the script calls it "the MeowStreets Info server" (user request 2026-11-14).
   // ON unless switched off on the Account page (user request 2026-11-12). Crew 2's members also send their crew's
   // summary each time the game's own /api/state passes by: crew name, chain count and end time, and the crew's
   // active jobs (seats, members' names/levels, payout) -- the same things the Crew page already shows. Never your
@@ -1124,11 +1130,42 @@
   const ALLIANCE_CREW_IDS = [2, 3, 4, 10, 11]; // The Purrfessionals, Cats With Attitude, The Church of Meowology (joined 2026-11-12), The Meowfia Cat$, Night Watch
   const inShareCrew = () => !!(apiState && apiState.crew && ALLIANCE_CREW_IDS.includes(apiState.crew.id));
   const inOwnCrew = () => !!(apiState && apiState.crew && apiState.crew.id === SHARE_CREW_ID);
-  const sharingOn = () => !settings.shareOff && !!(apiState && apiState.myId); // sends what you see
-  const gearPoolOn = () => sharingOn() && inShareCrew(); // ...and gets other cats' battle stats and gear back
-  const crewSharingOn = () => gearPoolOn() && inOwnCrew();
-  // No crew: { name: null, id: null } (the bot checks the cat id alone).
-  const shareCrewRef = () => ({ name: (apiState.crew && apiState.crew.name) || null, id: (apiState.crew && apiState.crew.id) || null, cat: apiState.myId || null });
+  // ✅ Verify first (0.50.0, user request 2026-11-14: "verify with api is first step to access data sharing"). The
+  // player pastes a Public key on the Account page; the script asks the game what kind of key it is (straight to
+  // meowstreets.com) and refuses Self and Crew keys without sending them anywhere. A Public key goes once to the server,
+  // which asks the game who owns it, returns a private code for this cat and throws the key away (unless "Use my key
+  // for data" is ticked). Every send then carries the cat id and the code (crew.tok); the server keeps only a hash.
+  // Scripts that haven't verified keep sharing until VERIFY_GRACE_UNTIL (2 days after the 0.50.0 server update).
+  const SHARE_CODE_KEY = 'ms_share_code_v1'; // { cat, name, code, at }
+  const VERIFY_URL = 'http://168.138.79.225:3001/v1/verify';
+  const VERIFY_GRACE_UNTIL = Date.UTC(2026, 10, 16, 9, 0);
+  let verifyState = null; // { ok, text } for the Account page
+  function shareCode() {
+    const c = GM_getValue(SHARE_CODE_KEY, null);
+    return c && typeof c === 'object' && typeof c.code === 'string' && apiState && c.cat === apiState.myId ? c : null;
+  }
+  const verifiedNow = () => !!shareCode();
+  const inVerifyGrace = () => Date.now() < VERIFY_GRACE_UNTIL;
+  // A reply from the server; `verify: true` = it doesn't know this browser's code (any more): verify again.
+  function botJson(r) {
+    let j = null;
+    try { j = JSON.parse(r.responseText); } catch (e) { return null; }
+    if (j && j.verify === true && GM_getValue(SHARE_CODE_KEY, null)) {
+      GM_setValue(SHARE_CODE_KEY, null);
+      verifyState = { ok: false, text: 'The MeowStreets Info server no longer knows this browser: verify again.' };
+      schedule();
+    }
+    return j;
+  }
+  const sharingOn = () => !settings.shareOff && !!(apiState && apiState.myId) && (verifiedNow() || inVerifyGrace()); // city data
+  const fightSharingOn = () => sharingOn() && !settings.fightOff; // gear seen in fights, your own level and gear
+  const gearPoolOn = () => fightSharingOn() && inShareCrew(); // ...and other cats' gear and shared battle stats come back
+  const crewSharingOn = () => sharingOn() && inOwnCrew() && !settings.crewOff;
+  // No crew: { name: null, id: null } (the server checks the cat id alone). tok: the code from verifying.
+  const shareCrewRef = () => {
+    const c = shareCode();
+    return { name: (apiState.crew && apiState.crew.name) || null, id: (apiState.crew && apiState.crew.id) || null, cat: apiState.myId || null, ...(c ? { tok: c.code } : {}) };
+  };
   // Crew chain mode (0.23.0–0.33.x) was retired in 0.34.0: a failed crime no longer costs the crew chain anything
   // (API log "ubernew", 2026-10-20), so no crime can shrink it. Code kept in Archive/chain-mode/.
   let shareLastSig = '', shareLastAt = 0, shareTimer = null;
@@ -1148,7 +1185,8 @@
     const c = apiState.crew;
     // seenAt = when the game delivered this data. It changes on every game update, so the bot also hears "someone is
     // live" while nothing else changed -- the chain alert only fires on info the game confirmed in the last 2 minutes.
-    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
+    const code = shareCode();
+    const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, ...(code ? { tok: code.code } : {}), chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
     if (apiState.crewJobsSeen) {
       body.jobs = (apiState.myCrewJobs || []).map((j) => ({
         id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
@@ -1187,9 +1225,10 @@
     if (lg) body.ledger = lg;
     if (apiState.bankTerms && apiState.bankTerms.length) body.bankTerms = apiState.bankTerms;
     // Your open bank deposits (0.46.6, user request: a 💳 bank loan's interest share, how much and when), only when
-    // the bot's last reply named your cat id as having one (`loanCats`), so nobody else's deposits are ever sent.
+    // the bot's last reply named your cat id as having one (`loanCats`), so nobody else's deposits are ever sent; and
+    // only with "Share my bank deposits" ticked (0.50.0, user request: its own box).
     const lc = GM_getValue(LOAN_CATS_KEY, []);
-    if (apiState.myId && Array.isArray(lc) && lc.includes(apiState.myId) && apiState.depositsSeen) {
+    if (settings.shareBank && apiState.myId && Array.isArray(lc) && lc.includes(apiState.myId) && apiState.depositsSeen) {
       body.me = apiState.myId;
       body.deposits = apiState.deposits.map((d) => ({ amount: d.amount, rate: d.rate, endsAt: d.endsAt }));
     }
@@ -1202,7 +1241,7 @@
       method: 'POST', url: CREW_BOT_URL, data: JSON.stringify(body), timeout: 15000,
       headers: { 'Content-Type': 'application/json' },
       onload: (r) => {
-        let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
+        let j = null; try { j = botJson(r); } catch (e) { /* not json */ }
         // The crew's cut of contract rewards and who's been paid, set by the leaders on the bot (0.44.2), and who skips
         // their pay (0.45.1, 🚫 on the bot).
         if (j && j.contractPay && typeof j.contractPay === 'object' && Number.isFinite(Number(j.contractPay.cut))) {
@@ -1216,8 +1255,8 @@
         }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
-      onerror: () => { if (done) done({ ok: false, error: 'could not reach the crew bot' }); },
-      ontimeout: () => { if (done) done({ ok: false, error: 'the crew bot did not answer' }); },
+      onerror: () => { if (done) done({ ok: false, error: 'could not reach the MeowStreets Info server' }); },
+      ontimeout: () => { if (done) done({ ok: false, error: 'the MeowStreets Info server did not answer' }); },
     });
   }
 
@@ -1272,7 +1311,7 @@
       onload: (r) => {
         stockSyncBusy = false;
         let j = null;
-        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        try { j = botJson(r); } catch (e) { return; }
         if (!j || !j.ok) return;
         const db = loadDb();
         // Mark what was sent, so it isn't sent again.
@@ -1335,7 +1374,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: CREW_BOT_FEATS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), feats: mine, hiddenTotal: meritFeats.filter((f) => f.hidden).length }),
-      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
+      onload: (r) => { let j = null; try { j = botJson(r); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.feats && typeof j.feats === 'object') { GM_setValue(FEAT_POOL_KEY, j.feats); schedule(); } },
     });
   }
 
@@ -1370,7 +1409,7 @@
         ? `✅ You earned this: <b>${escHtml(f.name)}</b>: ${escHtml(f.criteria)}`
         : `🔓 Crew found: ${escHtml(found.criteria)}`;
       if (line.innerHTML !== html) line.innerHTML = html;
-      setTitle(line, mine ? 'From your own game data (the page keeps hidden feats as ??? even once earned).' : 'Shared by a crewmate who has earned this feat (crew sharing). Not shown by the game.');
+      setTitle(line, mine ? 'From your own game data (the page keeps hidden feats as ??? even once earned).' : 'Shared by a script user who has earned this feat (sharing). Not shown by the game.');
     });
   }
 
@@ -1477,16 +1516,17 @@
   // the game; see api-v1-reference.md). With a key saved on the Account page, the script reads one thing: a lying-low
   // cat's `status.shield_until` from /v1/cat/<id>, so "🛡️ ready" also shows for cats nobody in the crew mugged. At most
   // one read every 3 s (the game allows 60 a minute), each cat remembered 5 min, in memory only. The key is kept in
-  // this browser and sent only to meowstreets.com, never to the crew bot. No key: nothing is read, as before.
+  // this browser. Since 0.50.0 the same (Public) key verifies you for sharing: sent once to the MeowStreets Info server,
+  // which checks its owner with the game and throws it away (unless "Use my key for data"). No key: nothing is read.
   const API_KEY_KEY = 'ms_api_key_v1';
   const apiKey = () => String(GM_getValue(API_KEY_KEY, '') || '').trim();
   const CAT_API_TTL = 5 * 60000, CAT_API_GAP = 3000, CAT_API_QUEUE = 20;
   const catApi = new Map(); // id -> { at, shieldUntil, jailUntil, lyingLow }
   const catApiQueue = [];
   let catApiBusy = false, catApiWaitUntil = 0, apiKeyState = null; // apiKeyState: { ok, text } for the Account page
-  function apiGet(route, cb) {
+  function apiGet(route, cb, key) {
     GM_xmlhttpRequest({
-      method: 'GET', url: 'https://meowstreets.com/api/v1/' + route, headers: { Authorization: 'Bearer ' + apiKey() }, timeout: 15000,
+      method: 'GET', url: 'https://meowstreets.com/api/v1/' + route, headers: { Authorization: 'Bearer ' + (key || apiKey()) }, timeout: 15000,
       onload: (r) => {
         let j = null;
         try { j = JSON.parse(r.responseText); } catch (e) { /* not JSON */ }
@@ -1520,6 +1560,7 @@
         catApiWaitUntil = Date.now() + 10 * 60000;
         catApiQueue.length = 0;
         apiKeyState = { ok: false, text: `The game refused the key (${(j && j.error && j.error.code) || status}).` };
+        verifyState = null; // the newest news about the key shows on the Account page
       }
       setTimeout(pumpCatApi, CAT_API_GAP);
     });
@@ -1665,7 +1706,9 @@
   function noteSelfGear() {
     const s = apiState && apiState.selfCat;
     if (!s || !sharingOn()) return;
-    const mine = settings.shareStats ? s : { ...s, st: null };
+    // Fight info off (0.50.0): no level or gear of yours, only the battle stats switch (shared, or taken back).
+    const base = settings.fightOff ? { id: s.id, n: s.n } : s;
+    const mine = settings.shareStats ? { ...base, st: s.st } : { ...base, st: null };
     const sig = JSON.stringify(mine);
     const last = GM_getValue(SELF_GEAR_KEY, null) || {};
     if (last.sig === sig && Date.now() - (last.at || 0) < SELF_GEAR_EVERY_MS) return;
@@ -1771,13 +1814,14 @@
   function syncGear() {
     if (!sharingOn() || gearSyncBusy || typeof GM_xmlhttpRequest !== 'function') return;
     const m = GM_getValue(GEAR_KEY, null) || {};
-    const dirty = Object.keys(m).filter((k) => m[k].d);
+    // Fight info off (0.50.0): only your own record (battle stats) goes; other cats' gear stays on this computer.
+    const dirty = Object.keys(m).filter((k) => m[k].d && (!settings.fightOff || m[k].me));
     const gap = Date.now() - gearSyncAt;
     if (gap < GEAR_SEND_GAP_MS || (!dirty.length && gap < GEAR_SYNC_GAP_MS)) return;
     const send = dirty.slice(0, GEAR_SEND_MAX).map((k) => {
       const r = m[k];
       const o = { id: Number(k), n: r.n, at: r.at };
-      GEAR_FIELDS.forEach((f) => { if (r[f] !== undefined) o[f] = r[f]; });
+      if (!settings.fightOff) GEAR_FIELDS.forEach((f) => { if (r[f] !== undefined) o[f] = r[f]; }); // Fight info off: no gear, not even your own
       if (ownStatsUpdate(r)) { o.st = r.st; o.stAt = r.stAt; }
       if (r.me) o.me = r.me; // the bot keeps it only from the cat itself
       return o;
@@ -1790,7 +1834,7 @@
       onload: (r) => {
         gearSyncBusy = false;
         let j = null;
-        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        try { j = botJson(r); } catch (e) { return; }
         if (!j || !j.ok) return;
         // Sent ones are clean again, unless they changed while the request was out.
         const now = GM_getValue(GEAR_KEY, null) || {};
@@ -1951,7 +1995,7 @@
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef() }),
       onload: (r) => {
         done();
-        let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ }
+        let j = null; try { j = botJson(r); } catch (e) { /* not json */ }
         if (!j || !j.ok || !Array.isArray(j.cats)) return;
         GM_setValue(CREWLESS_KEY, { at: Date.now(), cats: j.cats.filter((c) => Array.isArray(c) && Number.isInteger(c[0]) && Number.isFinite(c[1])).slice(0, 5000) });
         schedule();
@@ -2065,7 +2109,7 @@
     let noCrew = all.filter((c) => c.none).sort(byLevel);
     const act = crewlessActivity();
     let head = `No crew: ${noCrew.length} cat${noCrew.length === 1 ? '' : 's'}`;
-    let actNote = inShareCrew() && !sharingOn() ? '<p class="msx-nc-note">Turn on crew sharing to hide cats away 48+ hours and sort the rest by when they were last active.</p>' : '';
+    let actNote = !sharingOn() ? '<p class="msx-nc-note">Verify and share (Account page) to hide cats away 48+ hours and sort the rest by when they were last active.</p>' : '';
     const lastBit = (c) => {
       if (!act) return '';
       const at = act.get(c.id);
@@ -2077,7 +2121,7 @@
       const hidden = noCrew.length - active.length - unread.length;
       noCrew = active.concat(unread);
       head = `No crew: ${active.length} active in the last 48h` + (unread.length ? ` · ${unread.length} not checked yet` : '') + (hidden ? ` · ${hidden} away longer hidden` : '');
-      actNote = '<p class="msx-nc-note">Last active from the crew bot\'s 🧲 Recruits, which checks each crewless cat\'s page (active ones every 6 hours).</p>';
+      actNote = '<p class="msx-nc-note">Last active from the MeowStreets Info server, which checks each crewless cat\'s public page (active ones every 6 hours).</p>';
     }
     setHtml(nc.querySelector('summary'), head + (partial ? ' <small>(so far)</small>' : ''));
     setHtml(nc.querySelector('.msx-nc-body'), note + actNote + (noCrew.length
@@ -2913,6 +2957,24 @@
     if (after) { if (after.nextElementSibling !== el) after.after(el); } else if (el.parentElement !== box) box.appendChild(el);
   }
 
+  // 🔑 Verify prompt under the crew box (0.50.0, user request 2026-11-14: "prompted below crew tab if not done"): until
+  // this cat is verified, a link to the Account page's verify box. Not while sharing is switched off. A plain link.
+  function updateVerifyPrompt() {
+    const box = document.querySelector('.msx-chain');
+    let el = document.querySelector('.msx-verifynudge');
+    const want = !!box && !!(apiState && apiState.myId) && !settings.shareOff && !verifiedNow();
+    if (!want) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('a');
+      el.className = 'msx-verifynudge';
+      el.href = '/account#msx-verify';
+      setTitle(el, 'Opens the Account page: verify with a Public game API key to share with the MeowStreets Info server (the key is thrown away after the check).');
+    }
+    const txt = inVerifyGrace() ? '🔑 Verify to keep sharing after ' + new Date(VERIFY_GRACE_UNTIL).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' →' : '🔑 Verify to share with the MeowStreets Info server →';
+    if (el.textContent !== txt) el.textContent = txt;
+    if (el.parentElement !== box || el.nextElementSibling) box.appendChild(el);
+  }
+
   // Crimes overview: a blue ring on the contract's crime in the ladder and on the street map.
   function markContractCrimes() {
     const cc = crewContracts();
@@ -3335,7 +3397,7 @@
       onload: (r) => {
         fishSyncBusy = false;
         let j = null;
-        try { j = JSON.parse(r.responseText); } catch (e) { return; }
+        try { j = botJson(r); } catch (e) { return; }
         if (!j || !j.ok) return;
         GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense) });
         if (sharingOn()) GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
@@ -3395,7 +3457,7 @@
     const junk = all.filter(isJunk).map(fishName);
     const n = crew ? crew.n : Object.values(kinds).reduce((s, k) => s + k.n, 0);
     return {
-      title: crew ? `🎣 Pier fish · the crew's ${n0(n)} catches` : `🎣 Pier fish · your ${n0(n)} catches${inShareCrew() ? ' (turn on crew sharing to see the crew\'s)' : ''}`,
+      title: crew ? `🎣 Pier fish · script users' ${n0(n)} catches` : `🎣 Pier fish · your ${n0(n)} catches (verify and share on the Account page to see everyone's)`,
       html: (rows.length ? `<table class="msx-pf"><thead><tr><th>Fish</th><th>Where</th><th>When</th><th>Avg</th><th>Weight</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div>No fish yet.</div>') +
         (rows.length && tide ? `<div class="msx-pf-dim">✓ = probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''}), from the game's notes and past catches. Ticked fish are listed first, best paying first.</div>` : '') +
         (junk.length ? `<div class="msx-pf-dim">Junk: ${junk.map(escHtml).join(', ')}</div>` : ''),
@@ -3435,7 +3497,7 @@
   function senseNextHtml(p) {
     const s = p.sense;
     if (!s || s.done) return '';
-    if (!sharingOn()) return inShareCrew() ? '<div class="msx-pf-dim">Turn on crew sharing to see what the next levels do, from crewmates who reached them.</div>' : '';
+    if (!sharingOn()) return '<div class="msx-pf-dim">Verify and share (Account page) to see what the next levels do, from script users who reached them.</div>';
     const crew = (GM_getValue(FISH_CREW_KEY, null) || {}).sense || {};
     const what = (l) => {
       const c = crew[l];
@@ -3801,7 +3863,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -4954,11 +5016,76 @@
     });
   }
 
-  // The Account page switch and the card below both turn sharing on or off this way.
+  // The Account page's city data switch turns sharing on or off this way.
   function setSharing(on) {
     settings.shareOff = !on;
     saveSettings();
     if (on) { shareCrew(); syncStocks(true); }
+  }
+
+  // ─── ✅ Verify (0.50.0): talking to /v1/verify ───
+  function postVerify(body, cb) {
+    if (typeof GM_xmlhttpRequest !== 'function') { cb({ ok: false, error: 'Tampermonkey blocked the request' }); return; }
+    GM_xmlhttpRequest({
+      method: 'POST', url: VERIFY_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' }, data: JSON.stringify(body),
+      onload: (r) => { let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } cb(j || { ok: false, error: 'bad reply (' + r.status + ')' }); },
+      onerror: () => cb({ ok: false, error: 'could not reach the MeowStreets Info server' }),
+      ontimeout: () => cb({ ok: false, error: 'the MeowStreets Info server did not answer' }),
+    });
+  }
+  // Verify button: the game says what kind of key it is first (straight to meowstreets.com); only a Public key of this
+  // cat's is saved and sent, once. Self and Crew keys are refused here and never leave this browser.
+  function verifyWithKey(key) {
+    verifyState = { ok: true, text: 'Checking the key with the game…' };
+    updateAccountPanel();
+    apiGet('key', (j, status) => {
+      const d = j && j.ok && j.data;
+      if (!d) verifyState = { ok: false, text: `The game refused it (${(j && j.error && j.error.code) || status || 'no answer'}). Nothing was saved or sent.` };
+      else if (d.level !== 'public') verifyState = { ok: false, text: `This is a ${String(d.level).charAt(0).toUpperCase() + String(d.level).slice(1)} key. It can see private things (like your cash and Mews), so the script only takes Public keys: it was not saved or sent anywhere. Make a Public key under Account → API in the game and paste that.` };
+      else if (apiState && apiState.myId && d.owner && d.owner.id !== apiState.myId) verifyState = { ok: false, text: `That key is ${d.owner.name}'s, not yours. Nothing was saved or sent.` };
+      if (!d || d.level !== 'public' || verifyState.ok === false) { updateAccountPanel(); return; }
+      GM_setValue(API_KEY_KEY, key);
+      catApiWaitUntil = 0; catApi.clear();
+      verifyState = { ok: true, text: 'Verifying with the MeowStreets Info server…' };
+      updateAccountPanel();
+      postVerify({ v: 1, do: 'verify', key, keep: !!settings.keyData }, (r) => {
+        if (r.ok && r.code && r.cat && Number.isInteger(r.cat.id)) {
+          GM_setValue(SHARE_CODE_KEY, { cat: r.cat.id, name: String(r.cat.name || ''), code: r.code, at: Date.now() });
+          settings.shareOff = false;
+          if (settings.keyData && !r.kept) settings.keyData = false;
+          saveSettings();
+          verifyState = { ok: true, text: `✅ Verified as ${r.cat.name}. The server threw your key away${r.kept ? ', except to read public pages with it (Use my key for data)' : ''}.${r.note ? ' ' + r.note : ''}` };
+          shareCrew(); syncStocks(true);
+        } else verifyState = { ok: false, text: r.error || 'Not verified.' };
+        updateAccountPanel();
+        schedule();
+      });
+    }, key);
+  }
+  // Use my key for data: on = the server keeps your Public key to read public pages with; off = it drops it.
+  function setKeyData(on) {
+    const c = shareCode();
+    if (!c) { settings.keyData = on; saveSettings(); updateAccountPanel(); return; } // used when you verify
+    if (on && !apiKey()) { verifyState = { ok: false, text: 'Save your Public key above first.' }; updateAccountPanel(); return; }
+    verifyState = { ok: true, text: on ? 'Lending your Public key…' : 'Asking the server to drop your key…' };
+    updateAccountPanel();
+    postVerify(on ? { v: 1, do: 'keep', key: apiKey(), cat: c.cat, code: c.code } : { v: 1, do: 'drop', cat: c.cat, code: c.code }, (r) => {
+      if (r.verify) GM_setValue(SHARE_CODE_KEY, null);
+      if (r.ok) settings.keyData = on ? !!r.kept : false;
+      saveSettings();
+      verifyState = { ok: !!r.ok, text: r.ok ? (on ? (r.kept ? '✅ The server now also reads public pages with your Public key.' : (r.note || 'The key was not kept.')) : '✅ The server dropped your key.') : (r.error || 'That didn\'t work.') };
+      updateAccountPanel();
+    });
+  }
+  // Stop sharing and forget me: sharing off, and the server drops this browser's code (and a lent key).
+  function forgetMe() {
+    const c = shareCode();
+    settings.shareOff = true; settings.keyData = false;
+    saveSettings();
+    GM_setValue(SHARE_CODE_KEY, null);
+    if (c) postVerify({ v: 1, do: 'forget', cat: c.cat, code: c.code }, () => {});
+    verifyState = { ok: true, text: 'Sharing is off and this browser is no longer verified; the server dropped its code (and your key, if it had it).' };
+    updateAccountPanel();
   }
 
   // ─── Crime mastery unlocks shared across the alliance (0.49.0, user request) ───
@@ -4983,7 +5110,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: RUNGS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), rungs: mine }),
-      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
+      onload: (r) => { done(); let j = null; try { j = botJson(r); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
       onerror: done, ontimeout: done,
     });
   }
@@ -5002,7 +5129,7 @@
     climb.querySelectorAll('.cs-peg').forEach((peg) => {
       const at = atOf(peg);
       const known = at != null && !peg.classList.contains('is-got') && !got.has(at) && pool[at];
-      if (known) setTitle(peg, `🔓 Found by the alliance: ${known.text}`);
+      if (known) setTitle(peg, `🔓 Found by a script user: ${known.text}`);
       if (peg.getAttribute('aria-pressed') === 'true') shownAt = at;
     });
     const line = climb.querySelector('.cs-rung');
@@ -5010,9 +5137,9 @@
     if (!known) { if (tip) tip.remove(); return; }
     if (!tip) { tip = document.createElement('p'); tip.className = 'msx-rungtip'; }
     if (line.nextElementSibling !== tip) line.after(tip);
-    const txt = `🔓 Found by the alliance: ${known.text}`;
+    const txt = `🔓 Found by a script user: ${known.text}`;
     if (tip.textContent !== txt) tip.textContent = txt;
-    setTitle(tip, 'What this unlock does, from an alliance member who has reached it (crew sharing). The game only shows it once you get there.');
+    setTitle(tip, 'What this unlock does, from a script user who has reached it (sharing). The game only shows it once you get there.');
   }
 
   // ─── Purrgatory: who is ours (0.49.9, user request) ───
@@ -5033,7 +5160,7 @@
     GM_xmlhttpRequest({
       method: 'POST', url: ALLIES_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
       data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef() }),
-      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && Array.isArray(j.cats)) { GM_setValue(ALLIES_KEY, { at: Date.now(), tried: Date.now(), cats: j.cats.slice(0, 2000) }); schedule(); } },
+      onload: (r) => { done(); let j = null; try { j = botJson(r); } catch (e) { /* not json */ } if (j && j.ok && Array.isArray(j.cats)) { GM_setValue(ALLIES_KEY, { at: Date.now(), tried: Date.now(), cats: j.cats.slice(0, 2000) }); schedule(); } },
       onerror: done, ontimeout: done,
     });
   }
@@ -5043,7 +5170,7 @@
     if (!have || !have.cats || !have.cats.length) { document.querySelectorAll('.msx-jailmark').forEach((m) => m.remove()); return; }
     const byName = new Map(have.cats.map(([, name, crew]) => [String(name).toLowerCase(), crew]));
     const own = apiState.crew && apiState.crew.id;
-    const names = { 2: 'The Purrfessionals', 3: 'Cats With Attitude', 4: 'The Church of Meowology', 10: 'The Meowfia Cat$', 11: 'Night Watch' };
+    const names = { 3: 'Cats With Attitude', 4: 'The Church of Meowology', 10: 'The Meowfia Cat$', 11: 'Night Watch' };
     rows.forEach((row) => {
       const btn = row.querySelector('.jl-name');
       if (!btn) return;
@@ -5062,6 +5189,8 @@
 
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
+  // Sharing (0.50.0, user request 2026-11-14): verify first, then one switch per kind of data, each saying what it
+  // sends and who gets it back.
   function ensureAccountPanel() {
     const existing = document.getElementById('msx-account');
     if (currentPath() !== '/account') { if (existing) existing.remove(); return; }
@@ -5070,99 +5199,116 @@
     if (!host) return;
     const box = document.createElement('section');
     box.id = 'msx-account';
+    const check = (id, label) => `<label class="msx-acc-check"><input type="checkbox" id="${id}"> ${label}</label>`;
+    const sub = (html, id) => `<div class="msx-acc-sub"${id ? ` id="${id}"` : ''}>${html}</div>`;
     box.innerHTML =
       '<h2>MeowStreets Extra Info</h2>' +
-      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. It only sends or asks for anything through the sharing switch below (on unless you turn it off) or a game API key you save below.</p>' +
+      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. Without verifying below, nothing is sent anywhere and everything the script works out from your own pages still works.</p>' +
       '<h3>Recording</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-events"> Log my Mews events (crime results, trades, training)</label>' +
-      '<div id="msx-acc-sharebox" hidden><h3>Sharing</h3>' +
-      '<div class="msx-acc-sub" id="msx-acc-outnote" hidden>Your crew isn\'t in the Cataclysm alliance. With sharing on, the script sends The Purrfessionals\' Discord bot what you see as you play, with your cat id:<ul>' +
-      '<li>Claw Street Ex stock prices as you view them</li>' +
-      '<li>Whiskers &amp; Co.\'s hourly prices for Premium tuna and Catnip tea</li>' +
-      '<li>the hidden feats you have earned (how to get them)</li>' +
-      '<li>the crime mastery unlocks you reach (what they do)</li>' +
-      '<li>the gear of cats you fight, and your own level and worn gear</li>' +
-      '<li>your Pier Nine catches, the fish book\'s notes and your Harbour sense</li>' +
-      '<li>your battle stats, only if you turn on Share my battle stats below</li></ul>' +
-      'In return you get the pooled stock price history, how to get hidden feats, what mastery unlocks do, the pier\'s fish table and what the next Harbour sense levels do. Other cats\' gear and battle stats stay with the alliance. Nothing about your crew is sent, and nothing ever goes to MeowStreets.</div>' +
-      '<p class="msx-acc-sub" id="msx-acc-allynote" hidden>Your crew is in the Cataclysm alliance. With sharing on, only the pooled parts below go to The Purrfessionals\' bot and come back pooled from the whole alliance: stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (so the alliance sees them on your profile; your battle stats only with Share my battle stats on), the hourly Whiskers prices of Premium tuna and Catnip tea, the crime mastery unlocks you have reached, the newest cat id from the Players page, your Pier Nine catches with the fish book\'s notes and your Harbour sense. Nothing about your own crew (chain, jobs, contracts, treasury, deposits) is sent, and there are no Discord posts. Your cat id goes with each, so the bot can check you are on your crew\'s member list.</p>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-share"> Share with The Purrfessionals\' Discord bot<span id="msx-acc-sharewhat"> (with your cat id, checked against the crew\'s member list): crew chain, crew jobs, stock prices, the feats you have earned, other cats\' gear from your fights, your own level and worn gear (battle stats only with Share my battle stats on), the crime mastery unlocks you have reached, the newest cat id from the Players page, the crew contracts\' cash rewards, the crew\'s treasury log (who put money in, who was paid, crew job money), the bank\'s deposit rates, the crew\'s finished chains (each cat\'s links, crimes and fights) from the chain history, the results of heists you were in (each member\'s payout), your Pier Nine catches (fish, weight, price, spot, tide, day or night) and the fish book\'s notes and your Harbour sense, and only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time) (for chain and job posts, the crew\'s shared stock lows/highs, how to get hidden feats, what mastery unlocks do, other cats\' ⚔️ gear and the battle stats alliance members chose to share, the leaders\' recruiting list, contract payouts, the crew\'s fish table, chain reports and heist results; nothing else, never sent to MeowStreets)</span></label></div>' +
-      '<div id="msx-acc-statsbox" hidden><h3 id="msx-stats">Battle stats</h3>' +
-      '<label class="msx-acc-check"><input type="checkbox" id="msx-acc-stats"> Share my battle stats</label>' +
-      '<p class="msx-acc-sub">Off unless you turn it on. Your base strength, defense, speed and dexterity (no temporary boosts) go to The Purrfessionals\' bot and show on your profile and the Players list for the Cataclysm alliance\'s script users, and nobody else, with the date they were last updated. Untick this and they are taken back. If you turn sharing off instead, the last ones you shared stay, with their date. Only cats who turn this on show stats; nobody else\'s are ever kept. Needs sharing on.</p>' +
+      check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') +
+      '<div id="msx-acc-sharebox" hidden><h3 id="msx-verify">Sharing with the MeowStreets Info server</h3>' +
+      sub('Sharing starts with verifying who you are. Make a <b>Public</b> key under Account → API in the game and paste it here:<ul>' +
+        '<li>The script first asks the game what kind of key it is (straight to meowstreets.com). <b>Self and Crew keys are refused</b> and never sent anywhere.</li>' +
+        '<li>A Public key is sent once to the MeowStreets Info server, which asks the game who owns it.</li>' +
+        '<li>The server gives this browser a private code and <b>throws the key away</b>, unless you tick Use my key for data below.</li></ul>' +
+        'A Public key only sees what anyone can see on cats\' and crews\' public pages. The key also stays in this browser for one thing: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds, asked only of meowstreets.com. Revoke it in the game whenever you like.') +
+      '<p class="msx-acc-sub" id="msx-acc-verified"></p>' +
+      sub('Until <b>' + new Date(VERIFY_GRACE_UNTIL).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</b>, sharing keeps working without verifying. After that it stops until you verify.', 'msx-acc-grace') +
+      '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Verify</button> <button type="button" id="msx-acc-keydel">Remove key</button> <button type="button" id="msx-acc-forget">Stop sharing and forget me</button> <span id="msx-acc-keystate"></span></div>' +
+      check('msx-acc-keydata', 'Use my key for data') +
+      sub('Off unless you tick it. The server keeps your Public key and also reads with it, taking turns with other keys: cats\' and crews\' public pages (the list of active cats without a crew, crew member moves, who is in jail, new players). A Public key can\'t see anything private: no cash, bank, Mews or battle stats. Untick it and the server drops the key.') +
+      '<div id="msx-acc-areas">' +
+      '<h4>City data</h4>' + check('msx-acc-share', 'Share city data (needed for everything below)') +
+      sub('<b>Sends</b>, with your cat id: Claw Street Ex stock prices as you view them; Whiskers &amp; Co.\'s hourly Premium tuna and Catnip tea prices; the hidden feats you have earned (how to get them); the crime mastery unlocks you reach (what they do); your Pier Nine catches, the fish book\'s notes and your Harbour sense.<br><b>Everyone verified gets back</b> the pooled stock price history, how to get hidden feats, what mastery unlocks do, the pier\'s fish table and what the next Harbour sense levels do, and which cats without a crew are active (Players page). Cataclysm alliance members also get the ✔/✖ marks in Purrgatory.') +
+      '<h4>Fight info</h4>' + check('msx-acc-fight', 'Share fight info') +
+      sub('<b>Sends:</b> the gear of cats seen in your fights, and your own level and worn gear.<br><b>Only the Cataclysm alliance gets back</b> other cats\' last-seen gear and the battle stats players chose to share. Outside the alliance, what you send is kept but nothing comes back.') +
+      '<div id="msx-acc-statsbox"><h4 id="msx-stats">Battle stats</h4>' + check('msx-acc-stats', 'Share my battle stats') +
+      sub('Off unless you turn it on. Your base strength, defense, speed and dexterity (no temporary boosts) go to the MeowStreets Info server and show on your profile and the Players list for the Cataclysm alliance\'s script users, and nobody else, with the date they were last updated. Untick this and they are taken back. If you turn sharing off instead, the last ones you shared stay, with their date. Only cats who turn this on show stats; nobody else\'s are ever kept.') +
       '<label class="msx-acc-check" id="msx-acc-nudgerow"><input type="checkbox" id="msx-acc-statsnudge"> Remind me in the sidebar (under the crew contracts) while I\'m not sharing them</label></div>' +
-      '<h3>Game API key (optional)</h3>' +
-      '<p class="msx-acc-sub">Make a <b>Public</b> key under Account in the game, named after this script, and paste it here. The script then reads one thing with it: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds. The key stays in this browser, goes only to meowstreets.com and never to the crew bot. Remove it here and revoke it in the game when you stop using it.</p>' +
-      '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Save</button> <button type="button" id="msx-acc-keydel">Remove</button> <span id="msx-acc-keystate"></span></div>';
+      '<div id="msx-acc-crewbox" hidden><h4>Crew data</h4>' + check('msx-acc-crew', 'Share crew data') +
+      sub('<b>Sends:</b> the crew chain and its end time; the crew\'s active jobs (seats, members\' names and levels, payout); heists you are in; the crew contracts\' cash rewards; the crew\'s treasury log (who put money in, who was paid, crew job money); the bank\'s deposit rates; the crew\'s finished chains (each cat\'s links, crimes and fights); the results of heists you were in (each member\'s payout); the newest cat id from the Players page.<br><b>Only your crew\'s leaders and Discord get it:</b> chain and job posts, contract payouts, chain reports, heist results and the recruiting list.') + '</div>' +
+      '<div id="msx-acc-bankbox" hidden><h4>Bank deposits</h4>' + check('msx-acc-bank', 'Share my bank deposits (for my 💳 bank loan)') +
+      sub('Off unless you tick it. Shown because the crew\'s leaders entered a 💳 bank loan for you. <b>Sends</b> your open bank deposits (amount, rate, end time), so <b>only the crew\'s treasurers</b> can see your loan\'s interest share and when it\'s due.') + '</div>' +
+      '</div>' +
+      sub('Nothing about your account (cash, email, messages) is sent, and nothing is ever sent to MeowStreets.') +
+      '</div>';
     host.appendChild(box);
     box.querySelector('#msx-acc-keysave').addEventListener('click', () => {
-      const v = box.querySelector('#msx-acc-key').value.trim();
-      if (!/^ms_[\w-]{20,}$/.test(v)) { apiKeyState = { ok: false, text: 'That doesn\'t look like a key (they start with ms_).' }; updateAccountPanel(); return; }
-      GM_setValue(API_KEY_KEY, v);
-      box.querySelector('#msx-acc-key').value = '';
-      catApiWaitUntil = 0; catApi.clear();
-      apiKeyState = { ok: true, text: 'Checking…' };
-      updateAccountPanel();
-      apiGet('key', (j, status) => {
-        const d = j && j.ok && j.data;
-        apiKeyState = d
-          ? { ok: true, text: `✅ Works: "${d.label}", ${d.level} level, ${d.owner && d.owner.name}'s key.${d.level !== 'public' ? ' (A Public key is all this script needs.)' : ''}` }
-          : { ok: false, text: `The game refused it (${(j && j.error && j.error.code) || status || 'no answer'}).` };
-        updateAccountPanel();
-      });
+      const inp = box.querySelector('#msx-acc-key');
+      const v = inp.value.trim();
+      if (!v && apiKey()) { verifyWithKey(apiKey()); return; } // verify (again) with the key already saved
+      if (!/^ms_[\w-]{20,}$/.test(v)) { verifyState = { ok: false, text: 'That doesn\'t look like a key (they start with ms_).' }; updateAccountPanel(); return; }
+      inp.value = '';
+      verifyWithKey(v);
     });
     box.querySelector('#msx-acc-keydel').addEventListener('click', () => {
+      if (settings.keyData) setKeyData(false);
       GM_setValue(API_KEY_KEY, '');
       catApi.clear(); catApiQueue.length = 0;
-      apiKeyState = { ok: true, text: 'Removed. Revoke it in the game too.' };
+      verifyState = { ok: true, text: `Key removed from this browser${verifiedNow() ? ' (you stay verified)' : ''}. Revoke it in the game too.` };
       updateAccountPanel();
     });
-
+    box.querySelector('#msx-acc-forget').addEventListener('click', forgetMe);
+    box.querySelector('#msx-acc-keydata').addEventListener('change', (e) => setKeyData(e.target.checked));
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
     box.querySelector('#msx-acc-share').addEventListener('change', (e) => setSharing(e.target.checked));
+    box.querySelector('#msx-acc-fight').addEventListener('change', (e) => { settings.fightOff = !e.target.checked; saveSettings(); noteSelfGear(); syncGear(); });
     box.querySelector('#msx-acc-stats').addEventListener('change', (e) => { settings.shareStats = e.target.checked; saveSettings(); noteSelfGear(); syncGear(); updateStatsNudge(); });
     box.querySelector('#msx-acc-statsnudge').addEventListener('change', (e) => { settings.statsNudgeOff = !e.target.checked; saveSettings(); updateStatsNudge(); });
+    box.querySelector('#msx-acc-crew').addEventListener('change', (e) => { settings.crewOff = !e.target.checked; saveSettings(); shareCrew(); });
+    box.querySelector('#msx-acc-bank').addEventListener('change', (e) => { settings.shareBank = e.target.checked; saveSettings(); shareCrew(); });
     updateAccountPanel();
   }
 
   function updateAccountPanel() {
     const box = document.getElementById('msx-account');
     if (!box) return;
-    const ev = box.querySelector('#msx-acc-events');
-    const sh = box.querySelector('#msx-acc-share');
-    const shBox = box.querySelector('#msx-acc-sharebox');
-    // The switch for everyone once the game has said who you are; what it sends depends on the crew: ours (the full
-    // list), the alliance, or anyone else (0.49.6, user request: a list of what it does, not just a button).
     const known = !!(apiState && apiState.myId);
-    const toggle = (el, show) => { if (el.hidden === show) el.hidden = !show; };
-    toggle(shBox, known);
-    toggle(box.querySelector('#msx-acc-allynote'), inShareCrew() && !inOwnCrew());
-    toggle(box.querySelector('#msx-acc-outnote'), known && !inShareCrew());
-    const what = box.querySelector('#msx-acc-sharewhat');
-    if (what.hidden === inOwnCrew()) what.hidden = !inOwnCrew(); // the full list is crew 2's
-    if (sh.checked !== !settings.shareOff) sh.checked = !settings.shareOff;
+    const toggle = (el, show) => { if (el && el.hidden === show) el.hidden = !show; };
+    const setBox = (id, checked, disabled) => {
+      const el = box.querySelector('#' + id);
+      if (el.checked !== !!checked) el.checked = !!checked;
+      if (el.disabled !== !!disabled) el.disabled = !!disabled;
+    };
+    const ev = box.querySelector('#msx-acc-events');
     if (ev.checked !== settings.events) ev.checked = settings.events;
-    // Battle stats: anyone may share their own (0.49.6, user request); only the alliance sees them. Opened from the
-    // sidebar reminder (alliance only), scrolled into view.
-    toggle(box.querySelector('#msx-acc-nudgerow'), inShareCrew());
-    const stBox = box.querySelector('#msx-acc-statsbox');
-    if (stBox.hidden === known) {
-      stBox.hidden = !known;
-      if (!stBox.hidden && location.hash === '#msx-stats' && stBox.scrollIntoView) stBox.scrollIntoView({ block: 'center' });
+    const shBox = box.querySelector('#msx-acc-sharebox');
+    if (shBox.hidden === known) {
+      shBox.hidden = !known;
+      const target = location.hash === '#msx-stats' ? '#msx-stats' : location.hash === '#msx-verify' ? '#msx-verify' : null;
+      const t = target && !shBox.hidden && box.querySelector(target);
+      if (t && t.scrollIntoView) t.scrollIntoView({ block: 'center' });
     }
-    const stn = box.querySelector('#msx-acc-statsnudge');
-    if (stn.checked !== !settings.statsNudgeOff) stn.checked = !settings.statsNudgeOff;
-    if (stn.disabled !== !!(settings.shareOff || settings.shareStats)) stn.disabled = !!(settings.shareOff || settings.shareStats);
-    const stx = box.querySelector('#msx-acc-stats');
-    if (stx.checked !== !!settings.shareStats) stx.checked = !!settings.shareStats;
-    if (stx.disabled !== !!settings.shareOff) stx.disabled = !!settings.shareOff;
+    const code = shareCode();
+    const allowed = known && (!!code || inVerifyGrace()); // verified, or an old install in the 2-day grace
+    const vt = code ? `✅ Verified as ${code.name || 'you'}.` : inVerifyGrace() ? 'Not verified yet.' : 'Not verified: nothing is sent or received.';
+    const vEl = box.querySelector('#msx-acc-verified');
+    if (vEl.textContent !== vt) vEl.textContent = vt;
+    toggle(box.querySelector('#msx-acc-grace'), !code && inVerifyGrace());
+    const save = box.querySelector('#msx-acc-keysave');
+    const st = code ? 'Verify again' : 'Verify';
+    if (save.textContent !== st) save.textContent = st;
+    toggle(box.querySelector('#msx-acc-forget'), !!code);
+    setBox('msx-acc-keydata', settings.keyData, false);
+    setBox('msx-acc-share', !settings.shareOff, !allowed);
+    const on = sharingOn();
+    setBox('msx-acc-fight', !settings.fightOff, !on);
+    setBox('msx-acc-stats', settings.shareStats, !on);
+    toggle(box.querySelector('#msx-acc-nudgerow'), inShareCrew());
+    setBox('msx-acc-statsnudge', !settings.statsNudgeOff, !on || settings.shareStats);
+    toggle(box.querySelector('#msx-acc-crewbox'), inOwnCrew());
+    setBox('msx-acc-crew', !settings.crewOff, !on);
+    const lc = GM_getValue(LOAN_CATS_KEY, []);
+    toggle(box.querySelector('#msx-acc-bankbox'), inOwnCrew() && Array.isArray(lc) && lc.includes(apiState && apiState.myId));
+    setBox('msx-acc-bank', settings.shareBank, !on || settings.crewOff);
     // The key itself is never shown again once saved.
     const ki = box.querySelector('#msx-acc-key');
-    const ph = apiKey() ? 'Key saved (hidden). Paste a new one to replace it.' : 'ms_…';
+    const ph = apiKey() ? 'Key saved (hidden). Paste a new one to replace it.' : 'ms_… (a Public key)';
     if (ki && ki.placeholder !== ph) ki.placeholder = ph;
     const ks = box.querySelector('#msx-acc-keystate');
-    const kt = apiKeyState ? apiKeyState.text : '';
-    if (ks && ks.textContent !== kt) { ks.textContent = kt; ks.className = apiKeyState && !apiKeyState.ok ? 'msx-bad' : ''; }
+    const state = verifyState || apiKeyState;
+    const kt = state ? state.text : '';
+    if (ks && ks.textContent !== kt) { ks.textContent = kt; ks.className = state && !state.ok ? 'msx-bad' : ''; }
   }
 
   // ─── Wiring ───────────────────────────────────────────────────────────────
@@ -5204,7 +5350,7 @@
       ensureChainPill();
       updateCrewJobPill();
       updateCrewBuffPill();
-      updateContractsPill(); updateStatsNudge();
+      updateContractsPill(); updateStatsNudge(); updateVerifyPrompt();
       updateChainPill();
       updateHeistPill();
       updateCompanionPill();

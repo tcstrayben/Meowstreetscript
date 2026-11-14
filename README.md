@@ -2,7 +2,7 @@
 
 A userscript that adds extra information to [MeowStreets](https://meowstreets.com). It reads what the page already shows (and the JSON the game's own pages fetch from their own API) and draws numbers next to it. It never plays for you.
 
-> **Unofficial.** Not made by or affiliated with MeowStreets. Their terms ban "bots, scripts or automation that play for you". This script is display-only: it clicks nothing and presses nothing, and it only asks the game for anything if you give it a key for the game's official read-only API (see below). Read the game's own rules and decide for yourself.
+> **Unofficial.** Not made by or affiliated with MeowStreets. Their terms ban "bots, scripts or automation that play for you". This script is display-only: it clicks nothing and presses nothing. It only sends or asks for anything if you verify for sharing with a game API key (see below). Read the game's own rules and decide for yourself.
 
 ## What it shows
 
@@ -15,26 +15,38 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 - **Investment Tracker (Claw Street Ex):** tracks money put into and pulled out of crew stock investments, and what's actually been made.
 - **Cat Tree:** lock any stat so the Train button can't train it by accident; auto-lock (on by default) locks the stats your current gym trains slower than its best. Unlocking is one click.
 - **Players page:** a green 💰 beside cats the crew has mugged for over $1,000 at least twice (from the crew attack log and your own attacks); and "🛡️ ready 04:12" beside a cat the crew or you mugged that is still safe from muggers (one hour after a mug); "½ XP until 1:45 AM" for 3 hours after you attack a cat; "took $2,450" beside the game's own "Hit you" tag when that cat took money from you; and ⚔️ for cats seen in a fight, with their last-seen level, weapons and armour on hover (also on their profile). Battle stats show only for cats whose players chose to share them, with the date they were last updated (Share my battle stats on the Account page; "⚔️ 3,924 · DEX/SPD": total, then the two biggest). Nobody else's battle stats are ever kept.
-- **Purrgatory (jail):** for members of the Cataclysm alliance with crew sharing on, a mark beside each jailed cat: blue ✔ our crew, green ✔ another alliance crew, red ✖ not in the alliance (the crew is named on hover). The alliance member list comes from the crew bot, refreshed at most every 15 minutes.
-- **Pier Nine:** a sidebar row with fish left to keep today, your bucket's value, when the first fish goes off and when the tide turns (learned from the tide changes it sees); on the pier, a table of every fish with where it bites, on what tide and time of day, its average price and weight range (the whole crew's catches with crew sharing on, else yours).
-- **Crew → Contracts (crew sharing on):** under each crime contract, the crew's cut of the cash reward and each member's share of the rest by how many of the crimes they did, yours first, with ✅ for shares the leaders have paid.
+- **Purrgatory (jail):** for verified members of the Cataclysm alliance with sharing on, a mark beside each jailed cat: blue ✔ your crew, green ✔ another alliance crew, red ✖ not in the alliance (the crew is named on hover). The alliance member list comes from the MeowStreets Info server, refreshed at most every 15 minutes.
+- **Pier Nine:** a sidebar row with fish left to keep today, your bucket's value, when the first fish goes off and when the tide turns (learned from the tide changes it sees); on the pier, a table of every fish with where it bites, on what tide and time of day, its average price and weight range (every script user's catches with sharing on, else yours).
+- **Crew → Contracts (the maintainer's crew, Crew data on):** under each crime contract, the crew's cut of the cash reward and each member's share of the rest by how many of the crimes they did, yours first, with ✅ for shares the leaders have paid.
 - **Trading page:** the cheapest currently-open listing for every item, next to Whiskers & Co.'s own buy price (tax included) and what it pays to sell the item back — flagging both an underpriced listing not worth skipping and a listing cheap enough to buy and immediately resell for a profit.
 - **Whiskers & Co.:** the price range for items whose price changes hourly, and your discounted price.
-- **Account page:** the script's settings, Share my battle stats (any crew or none, off unless you turn it on, seen by the Cataclysm alliance only; for alliance members a sidebar reminder under the crew contracts links there and can be switched off), and the optional game API key.
+- **Account page:** the script's settings: verifying with a Public game API key, and one switch for each kind of sharing (see Sharing below). Until you verify, a link under the sidebar's crew box points there; for alliance members a reminder to share battle stats sits there too and can be switched off.
 - **Records on your computer:** stock prices you've seen and a log of your Mews events (crime results, trades, heists, training and so on), so the game's real rates can be worked out. It never runs on a timer and never requests a page for you.
 
-## Sharing (on unless you turn it off)
+## Sharing (verify first, then one switch per kind of data)
 
-The script shares what you see with the Discord bot of The Purrfessionals (the maintainer's crew). It is on unless you turn it off on the Account page. Everyone sends the city data they see: stock prices, Whiskers & Co.'s hourly prices for Premium tuna and Catnip tea, the feats and crime mastery unlocks you have reached, the gear of cats seen in your fights, your own level and worn gear (your battle stats only if you turn on Share my battle stats; untick it and they are taken back, or turn sharing off and the last ones you shared stay, with their date), and your Pier Nine catches, with your cat id. Everyone gets the pooled data back, except other cats' gear and the battle stats members chose to share, which only the crews of the Cataclysm alliance get. Members of The Purrfessionals also send, and get, the crew features below. For them the script sends: the crew chain and its end time, the crew's active jobs (seats, members' names and levels, payout), the stock prices you've seen, the feats you've earned, the gear of other cats seen in your fights, the highest cat id you've seen on the Players page (so the leaders' recruiting list knows how many cats there are), the crew contracts' cash rewards from the Crew → Contracts tab (so leaders can work out each member's share), the crew's treasury log (who put money in, who was paid, crew job money; so contract pay is ticked off once it's sent and the leaders can tell loan payments from money passing through), the bank's deposit rates, the crew's finished chains from the chain history (each cat's links, crimes and fights, by name) and the results of heists you were in (each member's payout, by name), your Pier Nine catches (fish, weight, price, spot, tide, day or night) with the fish book's notes and your Harbour sense, the crime mastery unlocks you have reached, and, only if the leaders entered a 💳 bank loan for you, your open bank deposits (amount, rate, end time). In return you get the crew's shared stock price history, how to get hidden feats a crewmate has found, what mastery unlocks do, contract payouts, the crew's last-seen gear for other cats, the crew's fish table, and crew jobs and heists posted to the crew's Discord by the bot, with a ⛓️ report when a chain ends and a ✅ result under each heist it posted. The crew's money features (contracts, treasury, loans, deposits) take data from members of The Purrfessionals only; the bot refuses them from anyone else. Nothing is ever sent to MeowStreets, and nothing about your account (cash, email, messages) is sent anywhere.
+Sharing goes to the **MeowStreets Info server** (a small server run by the maintainer). Without verifying, nothing is sent anywhere and everything the script works out from your own pages still works.
 
-## Game API key (optional)
+**Verifying.** Make a **Public** key under Account → API in the game and paste it into the script's box on the Account page.
 
-MeowStreets has an official read-only API for tools ("A key only ever reads"). If you want, make a **Public** key under Account in the game, name it after this script, and paste it into the script's box on the Account page. What it does and keeps:
+1. The script asks the game what kind of key it is (straight to meowstreets.com). **Self and Crew keys are refused** and never sent anywhere: they can see private things like your cash and Mews.
+2. A Public key is sent once to the MeowStreets Info server, which asks the game who owns it.
+3. The server gives your browser a private code and **throws the key away**, unless you tick **Use my key for data**. Every later send carries your cat id and that code, so nobody can share in your name. The server keeps only a scrambled copy of the code.
 
-- **Reads:** only `/api/v1/cat/<id>` for cats on the Players list that the game shows as lying low, to show their exact "🛡️ ready" time from the game's own shield time. At most one read every 3 seconds; each cat is remembered for 5 minutes, in memory only.
-- **Keeps:** the key, in your userscript manager's storage on your computer. It is sent only to meowstreets.com, never to the crew bot or anyone else, and is never shown again once saved.
-- **Who sees it:** only you.
-- **Stop:** press Remove in the script's box, and revoke the key under Account in the game.
+A Public key only sees what anyone can see on cats' and crews' public pages. The key also stays in your browser for one thing: the game's own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds, asked only of meowstreets.com. **Remove key** takes it out of your browser; **Stop sharing and forget me** turns sharing off and has the server drop your code. Revoke the key in the game whenever you like.
+
+**The switches** (Account page, after verifying). Each one says what it sends and who gets it back:
+
+| Switch | Sends (with your cat id) | Who gets it back |
+|---|---|---|
+| **City data** (on after verifying; needed for the rest) | stock prices as you view them, Whiskers & Co.'s hourly Premium tuna and Catnip tea prices, hidden feats you've earned, crime mastery unlocks you reach, your Pier Nine catches, the fish book's notes and your Harbour sense | **everyone verified**: pooled stock history, how to get hidden feats, what mastery unlocks do, the fish table, what the next Harbour sense levels do, which crewless cats are active |
+| **Fight info** | the gear of cats seen in your fights, your own level and worn gear | **the Cataclysm alliance only**: other cats' last-seen gear and the battle stats players chose to share |
+| **Share my battle stats** (off unless ticked) | your base strength, defense, speed and dexterity | **the Cataclysm alliance only**, with the date; untick to take them back |
+| **Crew data** (the maintainer's crew only) | crew chain, active jobs, heists you're in, contract rewards, the treasury log, the bank's deposit rates, finished chains, heist results, the newest cat id on the Players page | that crew's leaders and Discord only |
+| **Bank deposits** (off unless ticked; only shown to someone with a 💳 bank loan from that crew) | your open deposits (amount, rate, end time) | that crew's treasurers only |
+| **Use my key for data** (off unless ticked) | nothing more from you: the server keeps your Public key and reads public cat and crew pages with it, taking turns with other keys | helps the server read faster |
+
+Scripts that haven't verified yet keep sharing until 16 November 2026; after that they share nothing until they verify. Nothing about your account (cash, email, messages) is ever sent, and nothing is ever sent to MeowStreets.
 
 ## Install
 
