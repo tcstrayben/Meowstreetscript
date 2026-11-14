@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.49.8
+// @version      0.49.9
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Sharing with The Purrfessionals' Discord bot is on unless you turn it off (Account page): stock prices, earned feats, mastery unlocks, fish catches, the gear of cats seen in your fights, and your own battle stats only if you turn on Share my battle stats (seen by the Cataclysm alliance only; nobody else's stats are ever kept), with your cat id (plus crew chain and job info for the crew the bot serves). Everyone gets the shared data back except other cats' gear and the battle stats members chose to share, which only the Cataclysm alliance crews get. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -911,6 +911,8 @@
         border:1px solid var(--ms-lime, #b4df87); font-size:12px; line-height:1.4; opacity:0; pointer-events:none; transition:opacity .2s; }
       #msx-toast.show { opacity:1; }
       .msx-rungtip { margin:4px 0 0; font-size:12px; color:var(--ms-lime, #b4df87); }
+      .msx-jailmark { display:inline-block; width:1.2em; margin-right:3px; font-weight:700; text-align:center; }
+      .msx-jailmark.is-crew { color:#4ea8ff; } .msx-jailmark.is-ally { color:#3fbf5f; } .msx-jailmark.is-none { color:#e5484d; }
     `;
     document.head.appendChild(s);
   }
@@ -4280,6 +4282,8 @@
 
     // ── Crew: membership, treasury, crew jobs ──
     if ((m = text.match(/^(.+?) joined the crew\.?/i))) return { kind: 'crew', sub: 'joined', who: m[1] };
+    // "Crew chain reached 500: +40 respect and a day of +5% crime chance." (a known gap until 0.49.9)
+    if ((m = text.match(/^Crew chain reached ([\d,]+): \+(\d+) respect/i))) return { kind: 'crew', sub: 'chain', links: +m[1].replace(/,/g, ''), respect: +m[2] };
     if ((m = text.match(/^(.+?) paid you \$([\d,]+) from the (.+?) treasury\.?/i))) return { kind: 'crew', sub: 'treasury_paid', who: m[1], amount: moneyOf(m[2]), treasury: m[3] };
     if ((m = text.match(/^(.+?) planned \(#(\d+)\) and your seat cost (\d+) nerve\./i))) return { kind: 'crew', sub: 'job_planned', job: m[1], id: +m[2], nerve: +m[3] };
     if ((m = text.match(/^(.+?) came off: \$([\d,]+) to the treasury and (\d+) respect\.?/i))) return { kind: 'crew', sub: 'job_done', job: m[1], amount: moneyOf(m[2]), respect: +m[3] };
@@ -5011,6 +5015,51 @@
     setTitle(tip, 'What this unlock does, from an alliance member who has reached it (crew sharing). The game only shows it once you get there.');
   }
 
+  // ─── Purrgatory: who is ours (0.49.9, user request) ───
+  // A mark before each jailed cat's name: blue ✔ our crew, green ✔ the alliance, red ✖ not affiliated. The game's jail
+  // list doesn't say which crew a cat is in, so the alliance crews' member lists come from the crew bot (it reads the
+  // public crew pages every 15 minutes), for alliance members with sharing on. Matched by the cat's name.
+  const ALLIES_URL = 'http://168.138.79.225:3001/v1/allies';
+  const ALLIES_KEY = 'ms_allies_v1'; // { at, cats: [[id, name, crewId]] }
+  const ALLIES_GAP_MS = 15 * 60000;
+  let alliesBusy = false;
+  function syncAllies() {
+    if (currentPath() !== '/purrgatory' || !sharingOn() || !inShareCrew() || alliesBusy || typeof GM_xmlhttpRequest !== 'function') return;
+    const have = GM_getValue(ALLIES_KEY, null);
+    if (have && Date.now() - (have.tried || have.at || 0) < ALLIES_GAP_MS) return;
+    GM_setValue(ALLIES_KEY, { ...(have || { cats: [] }), tried: Date.now() });
+    alliesBusy = true;
+    const done = () => { alliesBusy = false; };
+    GM_xmlhttpRequest({
+      method: 'POST', url: ALLIES_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef() }),
+      onload: (r) => { done(); let j = null; try { j = JSON.parse(r.responseText); } catch (e) { /* not json */ } if (j && j.ok && Array.isArray(j.cats)) { GM_setValue(ALLIES_KEY, { at: Date.now(), tried: Date.now(), cats: j.cats.slice(0, 2000) }); schedule(); } },
+      onerror: done, ontimeout: done,
+    });
+  }
+  function drawJailMarks() {
+    const rows = currentPath() === '/purrgatory' ? document.querySelectorAll('.jl-row') : [];
+    const have = rows.length && sharingOn() && inShareCrew() ? GM_getValue(ALLIES_KEY, null) : null;
+    if (!have || !have.cats || !have.cats.length) { document.querySelectorAll('.msx-jailmark').forEach((m) => m.remove()); return; }
+    const byName = new Map(have.cats.map(([, name, crew]) => [String(name).toLowerCase(), crew]));
+    const own = apiState.crew && apiState.crew.id;
+    const names = { 2: 'The Purrfessionals', 3: 'Cats With Attitude', 4: 'The Church of Meowology', 10: 'The Meowfia Cat$', 11: 'Night Watch' };
+    rows.forEach((row) => {
+      const btn = row.querySelector('.jl-name');
+      if (!btn) return;
+      const crew = byName.get(btn.textContent.trim().toLowerCase());
+      const kind = crew == null ? 'none' : crew === own ? 'crew' : 'ally';
+      const text = kind === 'none' ? '✖' : '✔';
+      const tip = kind === 'none' ? 'Not in our crew or the alliance' : kind === 'crew' ? 'Our crew' : `Alliance: ${names[crew] || 'crew ' + crew}`;
+      let mark = row.querySelector('.msx-jailmark');
+      if (!mark) { mark = document.createElement('span'); btn.before(mark); }
+      const cls = 'msx-jailmark is-' + kind;
+      if (mark.className !== cls) mark.className = cls;
+      if (mark.textContent !== text) mark.textContent = text;
+      setTitle(mark, tip);
+    });
+  }
+
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   function ensureAccountPanel() {
@@ -5142,6 +5191,8 @@
       if (onCrimes) drawCrimeDock();
       syncRungs(); // mastery unlocks: at most every 30 minutes unless yours changed, sharing on only
       drawRungTips();
+      syncAllies(); // Purrgatory only: the alliance's member lists, at most every 15 minutes
+      drawJailMarks();
       markContractCrimes();
       drawContractBanner();
       if (isStockPage()) syncNextMove();
