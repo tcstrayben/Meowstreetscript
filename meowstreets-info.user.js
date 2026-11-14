@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.50.0
+// @version      0.50.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -871,6 +871,9 @@
       .msx-contracts .msx-ct.off { opacity:.55; }
       .msx-statsnudge, .msx-verifynudge { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
       .msx-statsnudge:hover, .msx-verifynudge:hover { text-decoration:underline; }
+      .msx-rail > .msx-ticker.msx-verifyrow { display:block; }
+      #msx-account .msx-acc-sub ul { margin:2px 0 6px; padding-left:18px; }
+      #msx-account .msx-acc-sub li { margin:1px 0; }
       .msx-hittook { margin-left:6px; font-size:11px; font-weight:700; color:var(--ms-red, #e8846f); }
       a.msx-crew-ct { outline:2px solid var(--msx-crew); outline-offset:2px; border-radius:6px; }
       #msx-crimetable tr.msx-crew-row td:first-child { box-shadow:inset 3px 0 0 var(--msx-crew); padding-left:6px; }
@@ -1121,10 +1124,10 @@
   const SHARE_MIN_GAP_MS = 15000; // at most one update every 15 seconds
   const SHARE_ID_KEY = 'ms_share_id_v1';
   // Who gets what (0.48.0; 0.49.2, user request 2026-11-12): everyone sends the pooled city data they see (stock
-  // prices, Whiskers' hourly tuna/catnip prices, gear seen in fights, their own level and gear, pier fish, hidden
-  // feats, mastery unlocks) and gets it back, except other cats' gear and shared battle stats: those come back to the
-  // alliance crews only (gearPoolOn), which the bot enforces from the cat id. Anyone may share their own battle stats
-  // (opt-in; 0.49.6, user request: crews outside the alliance too); only the alliance sees them. Crew 2 (ours) alone has the crew features (chain, jobs, heists, contracts, treasury, deposits). Each message carries your
+  // prices, Whiskers' hourly tuna/catnip prices, pier fish, hidden
+  // feats, mastery unlocks) and gets it back, except fight info (gear seen in fights, your own level and gear) and battle
+  // stats: since 0.50.1 those are sent and received by the alliance crews only (fightSharingOn), and the bot keeps
+  // nothing of them from anyone else. Crew 2 (ours) alone has the crew features (chain, jobs, heists, contracts, treasury, deposits). Each message carries your
   // cat id from the game's own data: the bot checks it is on that crew's live member list.
   const SHARE_CREW_ID = 2;
   const ALLIANCE_CREW_IDS = [2, 3, 4, 10, 11]; // The Purrfessionals, Cats With Attitude, The Church of Meowology (joined 2026-11-12), The Meowfia Cat$, Night Watch
@@ -1158,8 +1161,10 @@
     return j;
   }
   const sharingOn = () => !settings.shareOff && !!(apiState && apiState.myId) && (verifiedNow() || inVerifyGrace()); // city data
-  const fightSharingOn = () => sharingOn() && !settings.fightOff; // gear seen in fights, your own level and gear
-  const gearPoolOn = () => fightSharingOn() && inShareCrew(); // ...and other cats' gear and shared battle stats come back
+  // Fight info and battle stats are the alliance's only (0.50.1, user request 2026-11-14: "only Alliance members should
+  // even see that option or know about it"): outside it nothing is sent and the Account page doesn't show them.
+  const fightSharingOn = () => sharingOn() && inShareCrew() && !settings.fightOff; // gear seen in fights, your own level and gear
+  const gearPoolOn = () => fightSharingOn(); // ...and other cats' gear and shared battle stats come back
   const crewSharingOn = () => sharingOn() && inOwnCrew() && !settings.crewOff;
   // No crew: { name: null, id: null } (the server checks the cat id alone). tok: the code from verifying.
   const shareCrewRef = () => {
@@ -1705,7 +1710,7 @@
   const SELF_GEAR_EVERY_MS = 6 * 3600000;
   function noteSelfGear() {
     const s = apiState && apiState.selfCat;
-    if (!s || !sharingOn()) return;
+    if (!s || !sharingOn() || !inShareCrew()) return;
     // Fight info off (0.50.0): no level or gear of yours, only the battle stats switch (shared, or taken back).
     const base = settings.fightOff ? { id: s.id, n: s.n } : s;
     const mine = settings.shareStats ? { ...base, st: s.st } : { ...base, st: null };
@@ -1770,10 +1775,10 @@
         g.hp != null ? n0(g.hp) + ' HP' : null].filter(Boolean).join(' · ');
     const st = g.st;
     const stats = st ? `STR ${n0(st[0])} · DEF ${n0(st[1])} · SPD ${n0(st[2])} · DEX ${n0(st[3])} (total ${n0(st[0] + st[1] + st[2] + st[3])}), updated ${seenAt(g.stAt)}`
-      : 'No battle stats: only cats who choose to share their own show them.';
+      : inShareCrew() ? 'No battle stats: only cats who choose to share their own show them.' : '';
     return { gear, stats };
   }
-  const gearTitle = (g) => { const l = gearLines(g); return l.gear + '\n' + l.stats + (g.me >= g.at ? (g.st ? '\nBase stats this cat chose to share, and its gear, from its own script (no temporary boosts).' : '\nLevel and gear shared by this cat\'s own script.') : '\nWhat they had then; they may have changed gear since.'); };
+  const gearTitle = (g) => { const l = gearLines(g); return l.gear + (l.stats ? '\n' + l.stats : '') + (g.me >= g.at ? (g.st ? '\nBase stats this cat chose to share, and its gear, from its own script (no temporary boosts).' : '\nLevel and gear shared by this cat\'s own script.') : '\nWhat they had then; they may have changed gear since.'); };
   // Beside a name: "⚔️ 1,234 · DEX/DEF" (total, then the two biggest stats) once stats are known, else just ⚔️.
   const STAT_ABBR = ['STR', 'DEF', 'SPD', 'DEX'];
   // Stats are always shown as STR/DEF/SPD/DEX (user request 2026-11-07), wherever the game spells them out.
@@ -1800,7 +1805,7 @@
     const anchor = lead.nextElementSibling && lead.nextElementSibling.classList.contains('reason') ? lead.nextElementSibling : lead;
     if (anchor.nextElementSibling !== box) anchor.after(box);
     const l = gearLines(g);
-    const html = `<div>⚔️ ${escHtml(l.gear)}</div><div class="msx-catgear-stats">${escHtml(l.stats)}</div>`;
+    const html = `<div>⚔️ ${escHtml(l.gear)}</div>` + (l.stats ? `<div class="msx-catgear-stats">${escHtml(l.stats)}</div>` : '');
     if (box.innerHTML !== html) box.innerHTML = html;
     setTitle(box, g.me >= g.at ? (g.st ? 'Base stats this cat chose to share, and its gear, from its own script. No temporary boosts.' : 'This cat\'s level and gear, shared by its own script.')
       : 'What this cat had in its last fight the script saw' + (g.src === 'crew' ? ' (shared by a crewmate)' : '') + '. They may have changed gear since.');
@@ -1812,7 +1817,7 @@
   const GEAR_SYNC_GAP_MS = 5 * 60000, GEAR_SEND_GAP_MS = 65000, GEAR_SEND_MAX = 300;
   let gearSyncAt = 0, gearSyncBusy = false;
   function syncGear() {
-    if (!sharingOn() || gearSyncBusy || typeof GM_xmlhttpRequest !== 'function') return;
+    if (!sharingOn() || !inShareCrew() || gearSyncBusy || typeof GM_xmlhttpRequest !== 'function') return;
     const m = GM_getValue(GEAR_KEY, null) || {};
     // Fight info off (0.50.0): only your own record (battle stats) goes; other cats' gear stays on this computer.
     const dirty = Object.keys(m).filter((k) => m[k].d && (!settings.fightOff || m[k].me));
@@ -2959,11 +2964,15 @@
 
   // 🔑 Verify prompt under the crew box (0.50.0, user request 2026-11-14: "prompted below crew tab if not done"): until
   // this cat is verified, a link to the Account page's verify box. Not while sharing is switched off. A plain link.
+  // 0.50.1 (user, 2026-11-14: no crew "should still have a verify button"): while the crew box is hidden (no crew, or
+  // no crew job or contract running) it is a row of its own in the sidebar's timers box instead.
   function updateVerifyPrompt() {
     const box = document.querySelector('.msx-chain');
     let el = document.querySelector('.msx-verifynudge');
-    const want = !!box && !!(apiState && apiState.myId) && !settings.shareOff && !verifiedNow();
-    if (!want) { if (el) el.remove(); return; }
+    const want = !!(apiState && apiState.myId) && !settings.shareOff && !verifiedNow();
+    const inBox = !!box && box.style.display !== 'none';
+    const rail = document.querySelector('.msx-rail');
+    if (!want || (!inBox && !rail)) { if (el) el.remove(); return; }
     if (!el) {
       el = document.createElement('a');
       el.className = 'msx-verifynudge';
@@ -2972,7 +2981,12 @@
     }
     const txt = inVerifyGrace() ? '🔑 Verify to keep sharing after ' + new Date(VERIFY_GRACE_UNTIL).toLocaleDateString([], { month: 'short', day: 'numeric' }) + ' →' : '🔑 Verify to share with the MeowStreets Info server →';
     if (el.textContent !== txt) el.textContent = txt;
-    if (el.parentElement !== box || el.nextElementSibling) box.appendChild(el);
+    const cls = inBox ? 'msx-verifynudge' : 'msx-ticker msx-verifynudge msx-verifyrow';
+    if (el.className !== cls) el.className = cls;
+    if (inBox) { if (el.parentElement !== box || el.nextElementSibling) box.appendChild(el); return; }
+    // Its own row: right after the (hidden) crew box, else at the bottom of the timers.
+    const after = box && box.parentElement === rail ? box : null;
+    if (after) { if (after.nextElementSibling !== el) after.after(el); } else if (rail.lastElementChild !== el) rail.appendChild(el);
   }
 
   // Crimes overview: a blue ring on the contract's crime in the ladder and on the street map.
@@ -3749,7 +3763,7 @@
   // money/energy/nerve/life/happy box (and above Overview), joined to it like part of the same box, with a line
   // between each timer. The pills keep being built where they always were; this moves them into the box each run.
   // The box copies the vitals box's own background, border and corners at run time (its exact style is the game's).
-  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank):not(.msx-cafe):not(.msx-pier)',
+  const RAIL_ORDER = ['.msx-ticker:not(.msx-chain):not(.msx-verifyrow):not(.msx-companion):not(.msx-consumable):not(.msx-heist):not(.msx-pvp):not(.msx-bank):not(.msx-cafe):not(.msx-pier)',
     '.msx-consumable', '.msx-companion', '.msx-cafe', '.msx-pier', '.msx-chain', '.msx-heist', '.msx-pvp', '.msx-bank'];
   function arrangeRail() {
     const vitals = document.querySelector('.sidebar .rail-vitals');
@@ -5201,36 +5215,37 @@
     box.id = 'msx-account';
     const check = (id, label) => `<label class="msx-acc-check"><input type="checkbox" id="${id}"> ${label}</label>`;
     const sub = (html, id) => `<div class="msx-acc-sub"${id ? ` id="${id}"` : ''}>${html}</div>`;
+    const pts = (items, id) => sub('<ul>' + items.map((x) => '<li>' + x + '</li>').join('') + '</ul>', id);
     box.innerHTML =
       '<h2>MeowStreets Extra Info</h2>' +
-      '<p class="msx-acc-sub">Settings for the userscript. It also reads (never requests) the JSON the game\'s own pages fetch from their own API, for exact crime, merit and crew numbers; only specific known fields are kept, never your email or other players\' data. Everything it records stays on this computer. Without verifying below, nothing is sent anywhere and everything the script works out from your own pages still works.</p>' +
+      pts(['Reads what the game\'s own pages already load. Never your email or other players\' private data.', 'Everything it records stays on this computer.', 'Nothing is sent anywhere unless you verify below.']) +
       '<h3>Recording</h3>' +
       check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') +
       '<div id="msx-acc-sharebox" hidden><h3 id="msx-verify">Sharing with the MeowStreets Info server</h3>' +
-      sub('Sharing starts with verifying who you are. Make a <b>Public</b> key under Account → API in the game and paste it here:<ul>' +
-        '<li>The script first asks the game what kind of key it is (straight to meowstreets.com). <b>Self and Crew keys are refused</b> and never sent anywhere.</li>' +
-        '<li>A Public key is sent once to the MeowStreets Info server, which asks the game who owns it.</li>' +
-        '<li>The server gives this browser a private code and <b>throws the key away</b>, unless you tick Use my key for data below.</li></ul>' +
-        'A Public key only sees what anyone can see on cats\' and crews\' public pages. The key also stays in this browser for one thing: the game\'s own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds, asked only of meowstreets.com. Revoke it in the game whenever you like.') +
+      sub('Verify with a <b>Public</b> key (Account → API in the game):') +
+      pts(['<b>Self and Crew keys are refused</b> and never sent.', 'The server checks who owns the key, gives this browser a private code, then <b>throws the key away</b>.',
+        'A Public key only sees public pages. It also stays in this browser for 🛡️ shield times on the Players list.', 'Revoke it in the game any time.']) +
       '<p class="msx-acc-sub" id="msx-acc-verified"></p>' +
-      sub('Until <b>' + new Date(VERIFY_GRACE_UNTIL).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</b>, sharing keeps working without verifying. After that it stops until you verify.', 'msx-acc-grace') +
+      sub('Sharing works without verifying until <b>' + new Date(VERIFY_GRACE_UNTIL).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</b>.', 'msx-acc-grace') +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Verify</button> <button type="button" id="msx-acc-keydel">Remove key</button> <button type="button" id="msx-acc-forget">Stop sharing and forget me</button> <span id="msx-acc-keystate"></span></div>' +
       check('msx-acc-keydata', 'Use my key for data') +
-      sub('Off unless you tick it. The server keeps your Public key and also reads with it, taking turns with other keys: cats\' and crews\' public pages (the list of active cats without a crew, crew member moves, who is in jail, new players). A Public key can\'t see anything private: no cash, bank, Mews or battle stats. Untick it and the server drops the key.') +
+      pts(['Off unless ticked.', 'The server keeps your Public key to read public cat and crew pages.', 'Untick and the key is dropped.']) +
       '<div id="msx-acc-areas">' +
       '<h4>City data</h4>' + check('msx-acc-share', 'Share city data (needed for everything below)') +
-      sub('<b>Sends</b>, with your cat id: Claw Street Ex stock prices as you view them; Whiskers &amp; Co.\'s hourly Premium tuna and Catnip tea prices; the hidden feats you have earned (how to get them); the crime mastery unlocks you reach (what they do); your Pier Nine catches, the fish book\'s notes and your Harbour sense.<br><b>Everyone verified gets back</b> the pooled stock price history, how to get hidden feats, what mastery unlocks do, the pier\'s fish table and what the next Harbour sense levels do, and which cats without a crew are active (Players page). Cataclysm alliance members also get the ✔/✖ marks in Purrgatory.') +
-      '<h4>Fight info</h4>' + check('msx-acc-fight', 'Share fight info') +
-      sub('<b>Sends:</b> the gear of cats seen in your fights, and your own level and worn gear.<br><b>Only the Cataclysm alliance gets back</b> other cats\' last-seen gear and the battle stats players chose to share. Outside the alliance, what you send is kept but nothing comes back.') +
-      '<div id="msx-acc-statsbox"><h4 id="msx-stats">Battle stats</h4>' + check('msx-acc-stats', 'Share my battle stats') +
-      sub('Off unless you turn it on. Your base strength, defense, speed and dexterity (no temporary boosts) go to the MeowStreets Info server and show on your profile and the Players list for the Cataclysm alliance\'s script users, and nobody else, with the date they were last updated. Untick this and they are taken back. If you turn sharing off instead, the last ones you shared stay, with their date. Only cats who turn this on show stats; nobody else\'s are ever kept.') +
-      '<label class="msx-acc-check" id="msx-acc-nudgerow"><input type="checkbox" id="msx-acc-statsnudge"> Remind me in the sidebar (under the crew contracts) while I\'m not sharing them</label></div>' +
+      sub('<ul><li><b>Sends:</b> stock prices, Whiskers\' tuna and catnip prices, hidden feats, mastery unlocks, Pier Nine catches and notes.</li>' +
+        '<li><b>Everyone verified gets back:</b> stock history, how to get hidden feats, what unlocks do, the fish table, active cats without a crew.</li>' +
+        '<li id="msx-acc-allymarks">The alliance also gets the ✔/✖ marks in Purrgatory.</li></ul>') +
+      '<div id="msx-acc-fightbox" hidden><h4>Fight info</h4>' + check('msx-acc-fight', 'Share fight info') +
+      pts(['<b>Sends:</b> gear of cats in your fights, your own level and gear.', '<b>The alliance gets back:</b> other cats\' last-seen gear.']) + '</div>' +
+      '<div id="msx-acc-statsbox" hidden><h4 id="msx-stats">Battle stats</h4>' + check('msx-acc-stats', 'Share my battle stats') +
+      pts(['Off unless ticked.', '<b>Sends:</b> your base STR, DEF, SPD and DEX (no boosts).', 'Only the alliance\'s script users see them, with the date.', 'Untick to take them back.']) +
+      '<label class="msx-acc-check" id="msx-acc-nudgerow"><input type="checkbox" id="msx-acc-statsnudge"> Remind me in the sidebar while I\'m not sharing them</label></div>' +
       '<div id="msx-acc-crewbox" hidden><h4>Crew data</h4>' + check('msx-acc-crew', 'Share crew data') +
-      sub('<b>Sends:</b> the crew chain and its end time; the crew\'s active jobs (seats, members\' names and levels, payout); heists you are in; the crew contracts\' cash rewards; the crew\'s treasury log (who put money in, who was paid, crew job money); the bank\'s deposit rates; the crew\'s finished chains (each cat\'s links, crimes and fights); the results of heists you were in (each member\'s payout); the newest cat id from the Players page.<br><b>Only your crew\'s leaders and Discord get it:</b> chain and job posts, contract payouts, chain reports, heist results and the recruiting list.') + '</div>' +
+      pts(['<b>Sends:</b> crew chain, jobs, heists you\'re in, contract rewards, treasury log, deposit rates, finished chains, heist results, the newest cat id.', '<b>Only your crew\'s leaders and Discord</b> see it.']) + '</div>' +
       '<div id="msx-acc-bankbox" hidden><h4>Bank deposits</h4>' + check('msx-acc-bank', 'Share my bank deposits (for my 💳 bank loan)') +
-      sub('Off unless you tick it. Shown because the crew\'s leaders entered a 💳 bank loan for you. <b>Sends</b> your open bank deposits (amount, rate, end time), so <b>only the crew\'s treasurers</b> can see your loan\'s interest share and when it\'s due.') + '</div>' +
+      pts(['Off unless ticked. Shown because you have a 💳 bank loan.', '<b>Sends:</b> your open deposits (amount, rate, end time).', '<b>Only the crew\'s treasurers</b> see it.']) + '</div>' +
       '</div>' +
-      sub('Nothing about your account (cash, email, messages) is sent, and nothing is ever sent to MeowStreets.') +
+      sub('Never sent: cash, email, messages. Nothing is ever sent to MeowStreets.') +
       '</div>';
     host.appendChild(box);
     box.querySelector('#msx-acc-keysave').addEventListener('click', () => {
@@ -5294,6 +5309,9 @@
     const on = sharingOn();
     setBox('msx-acc-fight', !settings.fightOff, !on);
     setBox('msx-acc-stats', settings.shareStats, !on);
+    toggle(box.querySelector('#msx-acc-fightbox'), inShareCrew());
+    toggle(box.querySelector('#msx-acc-statsbox'), inShareCrew());
+    toggle(box.querySelector('#msx-acc-allymarks'), inShareCrew());
     toggle(box.querySelector('#msx-acc-nudgerow'), inShareCrew());
     setBox('msx-acc-statsnudge', !settings.statsNudgeOff, !on || settings.shareStats);
     toggle(box.querySelector('#msx-acc-crewbox'), inOwnCrew());
