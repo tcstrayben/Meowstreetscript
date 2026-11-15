@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.50.1
+// @version      0.50.2
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -105,6 +105,7 @@
         if (!c || !c.name) return;
         out.crimes[norm(c.name)] = {
           id: c.id, chance: c.chance, baseChance: c.baseChance, masteryLevel: c.masteryLevel, masteryBonus: c.masteryBonus,
+          masteryBest: Number.isInteger(c.masteryBest) ? c.masteryBest : null, // the highest level reached (a failed job can take one away)
           heat: c.heat, hot: !!c.hot, heatZeroAt: Number(c.heatZeroAt) || 0, bonus: c.bonus, criticalChance: c.criticalChance,
           successes: c.successes, attempts: c.attempts, payMin: c.payMin, payMax: c.payMax,
           masteryPercent: Number.isFinite(c.masteryPercent) ? c.masteryPercent : null,
@@ -1353,6 +1354,7 @@
   // send the feats they HAVE earned (id, name, how to get it) to the crew bot and get back every one the crew has
   // found, so a hidden feat on your Merits page can show how to get it. Nothing about who found it.
   let meritFeats = null; // [{ id, name, criteria, hidden, held }] from the last /api/merits seen
+  const SADDLE_MERIT = 'saddle', SADDLE_HELD_KEY = 'ms_saddle_held_v1'; // Back in the saddle held? (mastery lines, 0.50.2)
   const FEAT_POOL_KEY = 'ms_feat_pool_v1'; // { [featId]: { name, criteria } } from the crew bot
   const FEAT_SYNC_GAP_MS = 10 * 60000;
   let featSyncAt = 0, featSyncSig = '';
@@ -1363,6 +1365,8 @@
       id: String(f.id), name: typeof f.name === 'string' ? f.name : null, criteria: typeof f.criteria === 'string' ? f.criteria : null,
       hidden: !!f.hidden, held: !!f.held,
     }));
+    const saddle = meritFeats.find((f) => f.id === SADDLE_MERIT);
+    if (saddle && GM_getValue(SADDLE_HELD_KEY, false) !== saddle.held) GM_setValue(SADDLE_HELD_KEY, saddle.held);
     syncFeats();
     schedule();
   }
@@ -2230,15 +2234,95 @@
   function masteryNext(api) {
     const L = api && api.masteryLevel;
     if (!Number.isInteger(L) || L < 0) return null;
-    if (L >= MASTERY_MAX) return { level: L, max: true };
+    const best = Number.isInteger(api.masteryBest) ? api.masteryBest : L;
+    if (L >= MASTERY_MAX) return { level: L, max: true, best };
     const from = masteryAt(L), to = masteryAt(L + 1), s = api.successes, pct = api.masteryPercent;
     if (Number.isFinite(s) && s >= from && s < to && (pct == null || Math.floor((100 * (s - from)) / (to - from)) === pct)) {
-      return { level: L, toGo: to - s, got: s, need: to, exact: true };
+      return { level: L, toGo: to - s, got: s, need: to, exact: true, best };
     }
     if (!Number.isFinite(pct)) return null;
-    return { level: L, toGo: Math.max(1, Math.ceil(((100 - pct) / 100) * (to - from))), pct, exact: false };
+    return { level: L, toGo: Math.max(1, Math.ceil(((100 - pct) / 100) * (to - from))), pct, exact: false, best };
   }
-  const masteryShort = (m) => (!m ? '' : m.max ? `M${m.level} (max)` : `M${m.level} · ${m.exact ? '' : '~'}${fmtInt(m.toGo)} to go`);
+  const masteryShort = (m) => (!m ? '' : (m.max ? `M${m.level} (max)` : `M${m.level} · ${m.exact ? '' : '~'}${fmtInt(m.toGo)} to go`) + (m.best > m.level ? ` · ↓ from M${m.best}` : ''));
+
+  // ─── Mastery lost to failed jobs (0.50.2, user request 2026-11-14) ───
+  // Since the crimes update a failed job can cost "some of your feel for the job": mastery falls back, sometimes a
+  // whole level (the game's `masteryBest` keeps the highest; winning it back earns the Back in the saddle merit).
+  // How much a failure takes isn't stated, so the script learns it: the game's level and % give your mastery in
+  // successes (level N at 5 × N², % of the way to the next), as a range because the % is rounded down. Kept per job
+  // from reading to reading; when mastery is lower than the last reading plus the new successes, that's a drop, kept
+  // with how much it took (`ms_mastery_track_v1`, this computer only). Before any drop is seen, successes minus
+  // mastery still shows what failed jobs have taken in total. From the 2026-11-14 API log: ten jobs match their
+  // successes exactly (ordinary failures cost nothing); the clock and the safe are each about 1 success behind.
+  const MASTERY_TRACK_KEY = 'ms_mastery_track_v1'; // { [crimeId]: { s, lo, hi, drops: [{ at, lo, hi, from: [L, pct], to: [L, pct] }] } }
+  const r2 = (x) => Math.round(x * 100) / 100;
+  // Your mastery in successes, [lo, hi): null without a level and %, or at the top level.
+  function masteryUnits(api) {
+    const L = api && api.masteryLevel, pct = api && api.masteryPercent;
+    if (!Number.isInteger(L) || L < 0 || L >= MASTERY_MAX || !Number.isFinite(pct)) return null;
+    const from = masteryAt(L), band = masteryAt(L + 1) - from;
+    return [from + (pct / 100) * band, from + ((pct + 1) / 100) * band];
+  }
+  // What failed jobs have taken in total, in successes: [lo, hi], or null.
+  function masteryLost(api) {
+    const u = masteryUnits(api);
+    if (!u || !Number.isFinite(api.successes)) return null;
+    return [Math.max(0, r2(api.successes - u[1])), Math.max(0, r2(api.successes - u[0]))];
+  }
+  let masteryTrackAt = 0;
+  function trackMastery() {
+    if (!apiState || !apiState.crimes || apiState.at === masteryTrackAt) return;
+    masteryTrackAt = apiState.at;
+    const t = GM_getValue(MASTERY_TRACK_KEY, null) || {};
+    let changed = false;
+    Object.values(apiState.crimes).forEach((api) => {
+      const u = api && api.id ? masteryUnits(api) : null;
+      if (!u || !Number.isFinite(api.successes)) return;
+      const prev = t[api.id] || { drops: [] };
+      let lo = u[0], hi = u[1];
+      if (Number.isFinite(prev.lo) && Number.isFinite(prev.s) && api.successes >= prev.s) {
+        const g = api.successes - prev.s; // new successes since the last reading, each worth 1
+        const cLo = prev.lo + g, cHi = prev.hi + g; // where mastery would be with nothing lost
+        if (cLo >= u[1] - 1e-9) { // lower than that, whatever the rounding: a failed job took some
+          prev.drops = (prev.drops || []).concat({ at: apiState.at, lo: r2(cLo - u[1]), hi: r2(cHi - u[0]), from: [prev.L, prev.pct], to: [api.masteryLevel, api.masteryPercent] }).slice(-20);
+        } else { lo = Math.max(lo, cLo); hi = Math.min(hi, cHi); } // no loss: both readings narrow it down
+      }
+      if (prev.s !== api.successes || prev.lo !== lo || prev.hi !== hi || prev.L !== api.masteryLevel || prev.pct !== api.masteryPercent) {
+        Object.assign(prev, { s: api.successes, lo, hi, L: api.masteryLevel, pct: api.masteryPercent });
+        changed = true;
+      }
+      t[api.id] = prev;
+    });
+    if (changed) GM_setValue(MASTERY_TRACK_KEY, t);
+  }
+  const mastAmt = (lo, hi) => { const a = Math.round(lo * 10) / 10, z = Math.round(hi * 10) / 10; return Math.round(lo) === Math.round(hi) && hi - lo < 0.5 ? `about ${fmtInt(Math.round((lo + hi) / 2))}` : `${a}–${z}`; };
+  const succWord = (lo, hi) => (Math.round((lo + hi) / 2) === 1 ? 'success' : 'successes');
+  // The job page's lines: a level lost (and the merit), what failed jobs took here, and what one failure takes.
+  function masteryLossHtml(api) {
+    const out = [];
+    const u = masteryUnits(api);
+    if (Number.isInteger(api.masteryBest) && api.masteryBest > api.masteryLevel) {
+      const need = u ? Math.max(1, Math.ceil(masteryAt(api.masteryBest) - u[0])) : null;
+      const merit = GM_getValue(SADDLE_HELD_KEY, false) ? '' : ' for the <b>Back in the saddle</b> merit';
+      out.push(`📉 <b>Down from mastery ${api.masteryBest}</b>: a failed job took a level${need ? ` · about ${fmtInt(need)} success${need === 1 ? '' : 'es'} to win it back` : ''}${merit}`);
+    }
+    const lost = masteryLost(api);
+    const tr = (GM_getValue(MASTERY_TRACK_KEY, null) || {})[api.id];
+    const drops = (tr && tr.drops) || [];
+    const last = drops[drops.length - 1];
+    if ((lost && lost[1] >= 0.5) || last) {
+      const bits = [lost && lost[1] >= 0.5 ? `failed jobs have taken ${mastAmt(lost[0], lost[1])} ${succWord(lost[0], lost[1])} of mastery here` : 'mastery lost here'];
+      if (last) bits.push(`last: −${mastAmt(last.lo, last.hi).replace('about ', '~')} on ${seenAt(last.at)}`);
+      out.push('📉 ' + bits.join(' · ').replace(/^./, (c) => c.toUpperCase()));
+    }
+    // What one failure takes, from every drop seen on any job.
+    const all = Object.values(GM_getValue(MASTERY_TRACK_KEY, null) || {}).flatMap((x) => x.drops || []).filter((d) => d.hi - d.lo <= 1.5);
+    if (all.length && (last || (lost && lost[1] >= 0.5))) {
+      const avg = all.reduce((n, d) => n + (d.lo + d.hi) / 2, 0) / all.length;
+      out.push(`<small>One failed job that costs mastery takes about ${avg.toFixed(1)} successes' worth (${all.length} drop${all.length === 1 ? '' : 's'} seen).</small>`);
+    }
+    return out.map((x) => `<div class="msx-crimeheat msx-mastloss">${x}</div>`).join('');
+  }
 
   // Overview: one line per job you can do, its best open place, pay and XP per nerve; ★ on the best of each.
   function drawCrimeTable() {
@@ -2347,7 +2431,7 @@
     }
     const mn = masteryNext(api);
     const mastHtml = !mn ? '' : `<div class="msx-crimeheat">⭐ <b>Mastery ${mn.level}</b>` + (mn.max ? ' · the top level' : ` · ${mn.exact ? '' : 'about '}${fmtInt(mn.toGo)} more success${mn.toGo === 1 ? '' : 'es'} to level ${mn.level + 1}` +
-      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`)) + ' · each level: +1 odds, +2.5% pay, +1 clean-job chance</div>';
+      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`)) + ' · each level: +1 odds, +2.5% pay, +1 clean-job chance</div>' + masteryLossHtml(api);
     // The job's own %, capped at its ceiling; each place's odds (the dock's "Odds", what the game rolls) can go past
     // it ("Sure-footed", e.g. 98% at the clock's bell rope against a 96% job: user, 2026-11-13).
     const html = heatHtml + mastHtml + `<small>The job's odds: ${api.chance}% with your bonuses and heat${api.ceiling ? ` (its ceiling is ${api.ceiling}%)` : ''}. Each place shows its own odds above, which can go past it ("Sure-footed"); those are what count.</small>` +
@@ -5351,6 +5435,7 @@
       readTraining();
       // The rebuilt Crimes pages (0.33.0): overview table, per-nerve line and the locks on each job's page.
       const onCrimes = isCrimesPage() || !!crimePageId();
+      trackMastery(); // mastery lost to failed jobs (0.50.2): compared reading to reading, every page
       drawCrimeTable();
       if (onCrimes) drawCrimeDock();
       syncRungs(); // mastery unlocks: at most every 30 minutes unless yours changed, sharing on only
