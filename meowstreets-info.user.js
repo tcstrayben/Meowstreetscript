@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.51.1
+// @version      0.51.2
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -299,6 +299,7 @@
           name: t.name, tier: t.tier, nerve: t.nerve, cut: t.cut, take: t.take, respect: t.respect,
           xp: t.xp, xpFail: t.xpFail, chance: t.baseChance, duration: t.duration, stake: t.stake,
           minMembers: t.minMembers, maxMembers: t.maxMembers, level: t.level, roles: Array.isArray(t.roles) ? t.roles.slice() : [],
+          oneAtATime: !!t.oneAtATime, roleCap: t.roleCap,
         }));
       }
       if (raw.heistRules) out.heistXp = { success: raw.heistRules.successXp, fail: raw.heistRules.failureXp };
@@ -329,7 +330,7 @@
             id: mine.id, mine: isMine(mine), name, tier: mine.tier, minLevel: tierDef ? tierDef.level : null, status: mine.status, endsAt: mine.ends_at || null,
             roles: Array.isArray(mine.roles) ? mine.roles.slice() : [],
             members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready })),
-            minMembers: mine.minMembers, maxMembers: mine.maxMembers,
+            minMembers: mine.minMembers ?? (tierDef ? tierDef.minMembers : null), maxMembers: mine.maxMembers ?? (tierDef ? tierDef.maxMembers : null),
             cut: mine.cut, take: mine.take, respect: mine.respectReward, nerve: mine.nerve, stake: mine.stake,
             chance: mine.chance != null ? mine.chance : mine.previewChance,
           };
@@ -933,6 +934,10 @@
       .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
       .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
       #msx-crewjobs { border-color:var(--msx-crew); }
+      #msx-crewjobs .msx-launch-rule { margin:8px 0; }
+      #msx-crewjobs .msx-launch { list-style:none; margin:8px 0; padding:0; display:grid; gap:6px; }
+      #msx-crewjobs .msx-launch li { padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12); }
+      #msx-crewjobs .msx-launch li.is-now { border-color:#7bd88f; background:rgba(123,216,143,.12); }
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
@@ -5036,6 +5041,29 @@
     body.innerHTML = h;
   }
 
+  // 🚀 When to launch a crew job (0.51.2, user 2026-11-16: crew respect is why we run crew jobs; crimes pay more XP and
+  // $ per nerve). A job pays its respect once, however many cats are in it (a job that goes wrong still pays 1), so the
+  // fewest cats make the most respect per nerve: launch as soon as the minimum is in. Shakedowns, skims and warehouse
+  // jobs can run any number at once, but the game fills open seats before a new one starts (game maker: "Fill the open
+  // seats on the board first"), so launching is what lets the next one start. The four big jobs run one at a time
+  // (`oneAtATime`): one more cat adds 0.08–0.10 respect per nerve there against 0.17 for a 2-cat shakedown, so only a
+  // cat going to bed (nerve stops at its cap) should join, up to 85%. The same rule as the crew bot's job posts.
+  // Who: the game launches a job by itself only when every seat is taken; before that "the leader, an officer or a
+  // planner launches it from" the minimum (the Crew page's own text, API log 2026-11-16).
+  // { now, text } or null when the minimum isn't known.
+  function crewLaunchNote(job, tierDef) {
+    const min = Number.isInteger(job.minMembers) && job.minMembers > 0 ? job.minMembers : tierDef && tierDef.minMembers;
+    if (!min) return null;
+    const n = (job.members || []).length;
+    if (n < min) { const k = min - n; return { now: false, text: `⏳ ${k} more cat${k === 1 ? '' : 's'} to launch (needs ${min}), then launch straight away` }; }
+    const seats = job.maxMembers || (tierDef && tierDef.maxMembers) || n;
+    if (tierDef && tierDef.oneAtATime) {
+      if (job.chance != null && job.chance < 85 && n < seats) return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cats is enough. Only one of these runs at a time, so a cat going to bed with spare nerve should join first (up to 85%); awake cats do more starting a shakedown.` };
+      return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cats is enough${job.chance != null && job.chance >= 85 ? ' (85% is the most any job can be)' : ''}.` };
+    }
+    return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cat${n === 1 ? '' : 's'} is enough. Launch it so spare cats can start the next one (the game fills open seats before a new job).` };
+  }
+
   function ensureCrewJobsPanel() {
     if (location.pathname.replace(/\/+$/, '') !== '/crew') { document.getElementById('msx-crewjobs')?.remove(); return; }
     const host = document.querySelector('.main-content') || document.querySelector('main');
@@ -5050,7 +5078,18 @@
     const body = panel.querySelector('.msx-calc-body');
     const tiers = apiState?.crewJobTiers || [];
     if (!tiers.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own crew job data (open this page once it has loaded).</p>'; return; }
-    let h = '<p class="msx-inv-note">The $ you personally get ("cut") is fixed per member, the same for every role. This assumes a bust pays nothing personally, only the crew’s treasury ("take") and respect are separate from your own cut.</p>';
+    // 🚀 The crew's jobs still recruiting, each with when to launch it (0.51.2).
+    const recruiting = (apiState?.myCrewJobs || []).filter((j) => j.status === 'planning');
+    let h = '<p class="msx-launch-rule"><b>🚀 Launch every crew job as soon as its minimum cats are in.</b> A job pays its respect once, however many cats are in it, so the fewest cats make the most respect per nerve.</p>';
+    if (recruiting.length) {
+      h += '<ul class="msx-launch">' + recruiting.map((j) => {
+        const td = tiers.find((t) => t.tier === j.tier) || tiers.find((t) => t.name === j.name);
+        const ln = crewLaunchNote(j, td);
+        const seats = j.maxMembers || (td && td.maxMembers);
+        return `<li class="${ln && ln.now ? 'is-now' : ''}"><b>${escHtml(j.name || 'Crew job')}</b> · ${(j.members || []).length}${seats ? '/' + seats : ''} cats${j.chance != null ? ` · ${j.chance}%` : ''}${ln ? `<br>${escHtml(ln.text)}` : ''}</li>`;
+      }).join('') + '</ul>';
+    }
+    h += '<p class="msx-inv-note">The $ you personally get ("cut") is fixed per member, the same for every role. This assumes a bust pays nothing personally, only the crew’s treasury ("take") and respect are separate from your own cut.</p>';
     // Respect for the crew (user request 2026-11-10, "the best way to farm respect"): per cat-hour = respect ÷ (run
     // hours × cats in it), with the fewest cats the job takes (the most it can be) and, smaller, with a full team.
     // Per 100 nerve = respect ÷ (nerve × cats), if every cat in it spends the nerve. Both are for a job that comes off;
@@ -5061,7 +5100,7 @@
     const bestNerve = Math.max(...tiers.map((t) => perNerve(t, t.minMembers) || 0));
     const fmtR = (v, best) => (v == null ? '—' : (v >= best - 1e-9 && best > 0 ? `<b>${v.toFixed(2)} ★</b>` : v.toFixed(2)));
     h += '<p class="msx-inv-note"><b>Respect / cat-hour</b>: the crew\'s respect for each hour each cat spends in the job, with the fewest cats it takes (with a full team below it). <b>Respect / 100 nerve</b>: for every 100 nerve the team spends, if each cat in it spends the job\'s nerve. Both count a job that comes off; ★ = best.</p>';
-    h += '<table class="msx-inv-table"><thead><tr><th>Job</th><th>Chance</th><th>Nerve</th><th>Your cut</th><th>To treasury</th><th>Respect</th><th>Cats</th><th>Respect / cat-hour</th><th>Respect / 100 nerve</th><th>XP/nerve</th><th>$/nerve</th><th>Run</th></tr></thead><tbody>';
+    h += '<table class="msx-inv-table"><thead><tr><th>Job</th><th>Chance</th><th>Nerve</th><th>Your cut</th><th>To treasury</th><th>Respect</th><th>Cats</th><th>Respect / cat-hour</th><th>Respect / 100 nerve</th><th>XP/nerve</th><th>$/nerve</th><th>Run</th><th>Launch</th></tr></thead><tbody>';
     tiers.forEach((t) => {
       const c = t.chance / 100;
       const xpEv = c * t.xp + (1 - c) * t.xpFail;
@@ -5074,7 +5113,8 @@
         `<td>${t.minMembers}${full ? '–' + t.maxMembers : ''}</td>` +
         `<td>${fmtR(perHour(t, t.minMembers), bestHour)}${hourFull != null ? `<br><small>${hourFull.toFixed(2)} with ${t.maxMembers}</small>` : ''}</td>` +
         `<td>${fmtR(perNerve(t, t.minMembers), bestNerve)}${nerveFull != null ? `<br><small>${nerveFull.toFixed(2)} with ${t.maxMembers}</small>` : ''}</td>` +
-        `<td>${(xpEv / t.nerve).toFixed(2)}</td><td>${signed0(dollarEv / t.nerve)}</td><td>${fmtDuration(t.duration)}</td></tr>`;
+        `<td>${(xpEv / t.nerve).toFixed(2)}</td><td>${signed0(dollarEv / t.nerve)}</td><td>${fmtDuration(t.duration)}</td>` +
+        `<td>🚀 with ${t.minMembers} cats${t.oneAtATime ? '<br><small>one at a time: cats going to bed join, up to 85%</small>' : ''}</td></tr>`;
     });
     h += '</tbody></table>';
     body.innerHTML = h;
