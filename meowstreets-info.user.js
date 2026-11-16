@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.50.2
+// @version      0.51.0
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -317,6 +317,14 @@
         // ever one job to consider); a job still only planning has no end time to show there yet.
         const withEnd = out.myCrewJobs.filter((j) => j.mine && j.endsAt).sort((a, b) => a.endsAt - b.endsAt);
         if (withEnd.length) out.activeCrewJob = { name: withEnd[0].name, endsAt: withEnd[0].endsAt };
+        // 🧮 For the crew bot's job numbers (0.51.0, user request 2026-11-16: "as much useful data as possible ... best
+        // nerve/respect/dollars"): every finished job the game lists (the chance it launched at, cats, won or not, what
+        // it paid in all), and each job still recruiting (its chance with this many cats). Numbers only, no names.
+        out.crewJobsDone = raw.crewJobs.filter((x) => x && x.status === 'completed' && (x.success === 0 || x.success === 1 || x.success === true || x.success === false) && Number.isFinite(x.chance))
+          .map((x) => ({ id: x.id, tier: x.tier, chance: x.chance, preview: Number.isFinite(x.previewChance) ? x.previewChance : null, cats: (x.members || []).length, tools: x.tools,
+            startsAt: x.starts_at || null, closedAt: x.closed_at || null, won: x.success === 1 || x.success === true, total: Number.isFinite(x.winTotal) ? x.winTotal : null }));
+        out.crewJobsPlan = raw.crewJobs.filter((x) => x && x.status === 'planning' && Number.isFinite(x.previewChance))
+          .map((x) => ({ id: x.id, tier: x.tier, cats: (x.members || []).length, chance: x.previewChance, tools: x.tools }));
       }
       // Heist roles (0.39.0): the game's own `roles` list, [{ id, name, stat }]. Not the crew job table: a heist
       // Lockpicker uses strength, a crew job Lockpicker dexterity.
@@ -382,6 +390,8 @@
         };
       }
       out.dailyCap = raw.rules && Number.isFinite(raw.rules.dailyConsumableCap) ? raw.rules.dailyConsumableCap : null;
+      // Nerve back per minute (0.51.0, for the mastery plan: 0.2 = 288 a day, API log 2026-11-16).
+      out.nerveRegen = raw.regen && Number.isFinite(raw.regen.nerve) ? raw.regen.nerve : null;
       (raw.events || []).forEach((e) => {
         if (e && e.body && e.kind) out.events.push({ id: e.id, body: e.body, kind: e.kind, at: e.created_at });
       });
@@ -549,7 +559,24 @@
     const today = utcDay(Date.now());
     return u && u.day === today ? u : { day: today, tuna: [], catnip: [] };
   }
+  // The last use of each, kept through the daily reset (0.51.0, user report 2026-11-16: used at 23:59, the pill said
+  // "ready" right after 00:00 while the game still had the cooldown). The cooldown is always exactly 60 minutes from
+  // the "Used …" event (API logs 2026-11-14 and 11-16: used 23:59:14 → cooldown until 00:59:14), so the pill also
+  // counts down from the last use when the game's own cooldown isn't in the reply.
+  const LAST_USE_KEY = 'ms_last_use_v1'; // { tuna: ms, catnip: ms }
+  const USE_COOLDOWN_MS = 60 * 60000;
+  function noteLastUses(events) {
+    const last = GM_getValue(LAST_USE_KEY, {}) || {};
+    let changed = false;
+    (events || []).forEach((e) => {
+      if (!e || e.kind !== 'use' || !Number.isFinite(e.at)) return;
+      const fam = (USE_FAMILY.find(([re]) => re.test(String(e.body))) || [])[1];
+      if (fam && !(last[fam] >= e.at)) { last[fam] = e.at; changed = true; }
+    });
+    if (changed) GM_setValue(LAST_USE_KEY, last);
+  }
   function noteUses(events) {
+    noteLastUses(events);
     const u = loadUses();
     const dayStart = Date.parse(u.day + 'T00:00:00Z');
     let changed = false;
@@ -1201,6 +1228,8 @@
         cut: j.cut, take: j.take, respect: j.respect, nerve: j.nerve, stake: j.stake, chance: j.chance,
       }));
       body.roleTitles = apiState.crewJobRoles || {};
+      if (apiState.crewJobsDone) body.jobsDone = apiState.crewJobsDone;
+      if (apiState.crewJobsPlan) body.jobsPlan = apiState.crewJobsPlan;
     }
     // Heists you are in (0.32.0), for the bot's heist posts; only when the game sent
     // its heist list. Member names and roles, never ids.
@@ -2298,6 +2327,58 @@
   const mastAmt = (lo, hi) => { const a = Math.round(lo * 10) / 10, z = Math.round(hi * 10) / 10; return Math.round(lo) === Math.round(hi) && hi - lo < 0.5 ? `about ${fmtInt(Math.round((lo + hi) / 2))}` : `${a}–${z}`; };
   const succWord = (lo, hi) => (Math.round((lo + hi) / 2) === 1 ? 'success' : 'successes');
   // The job page's lines: a level lost (and the merit), what failed jobs took here, and what one failure takes.
+  // ─── The road to mastery 5 / 10 / 15 / 20 (0.51.0, user request 2026-11-15: "how much nerve it costs to get to
+  // mastery 5 10 15 20, and how much money/xp you get along the way. Only have so much nerve per day. And catnip tea
+  // and cat cafe") ───
+  // From the job's best place (most expected cash per nerve): each success costs its nerve ÷ the odds; the odds go up
+  // 1 a level (to 99), pay 2.5% a level (`payoutBonus`), XP stays the same (mastery adds none: XP scale 1 at M7).
+  // A job of several steps (the clock, the safe) counts each step at the place's odds. Nerve a day: regen (the game's
+  // `regen.nerve`, 0.2 a minute = 288 a day while under the cap), plus Catnip tea (+10, 1 an hour, 12 a day: user
+  // 2026-11-16) and the Cat Café brush (+5 every 8 hours). Mastery that failed jobs take away isn't counted.
+  const MASTERY_GOALS = [5, 10, 15, 20];
+  const fmtK = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + 'M' : n >= 1e4 ? Math.round(n / 1e3) + 'k' : fmtInt(Math.round(n)));
+  function masteryPlan(crime, api) {
+    const mn = masteryNext(api);
+    if (!mn || mn.max || !crime || !crime.places) return null;
+    let best = null;
+    crime.places.forEach((pl) => { if (pl.open !== false) { const v = placeValue(crime, pl, api); if (v && (!best || v.eCash > best.eCash)) best = v; } });
+    if (!best || !Number.isFinite(best.odds || api.chance) || !(best.act.cost > 0)) return null;
+    const L = mn.level;
+    const odds0 = Number.isFinite(best.odds) ? best.odds : api.chance;
+    const steps = crime.steps || 1;
+    const nerveJob = best.act.cost * steps;
+    const pay0 = (best.act.payMin + best.act.payMax) / 2; // what one job pays when it works, at today's level
+    const bonus0 = Number.isFinite(api.payoutBonus) ? api.payoutBonus : 1 + 0.025 * L;
+    const xpJob = Number.isFinite(best.act.xp) ? best.act.xp * steps : 0;
+    let s = mn.exact ? mn.got : masteryAt(L + 1) - mn.toGo; // successes now
+    const out = [];
+    let nerve = 0, cash = 0, xp = 0;
+    for (let l = L; l < MASTERY_MAX; l++) {
+      const need = masteryAt(l + 1) - Math.max(s, masteryAt(l));
+      if (need > 0) {
+        const p = Math.min(99, odds0 + (l - L)) / 100;
+        nerve += (need / p) * nerveJob; // a job of several steps: each step at the place's odds (approximately)
+        cash += need * pay0 * (1 + 0.025 * l) / bonus0;
+        xp += need * xpJob;
+        s = masteryAt(l + 1);
+      }
+      if (MASTERY_GOALS.includes(l + 1)) out.push({ goal: l + 1, nerve, cash, xp });
+    }
+    const regen = (Number.isFinite(apiState.nerveRegen) ? apiState.nerveRegen : 0.2) * 1440;
+    const extra = 12 * 10 + 3 * ((apiState.cafe && Number.isFinite(apiState.cafe.brushGain)) ? apiState.cafe.brushGain : 5);
+    return { place: best.act, odds0, goals: out, regen, extra };
+  }
+  function masteryPlanHtml(crime, api) {
+    const m = masteryPlan(crime, api);
+    if (!m || !m.goals.length) return '';
+    const days = (n, per) => { const d = n / per; return d < 1 ? 'under a day' : `~${fmtInt(Math.ceil(d))} day${Math.ceil(d) === 1 ? '' : 's'}`; };
+    const rows = m.goals.map((g) => `<b>M${g.goal}</b>: ≈ ${fmtK(g.nerve)} nerve (${days(g.nerve, m.regen)} on regen, ${days(g.nerve, m.regen + m.extra)} with tea + café) · +$${fmtK(g.cash)} · +${fmtK(g.xp)} XP`);
+    const tip = `From your best place here at ${m.odds0}% odds now, +1 odds and +2.5% pay a level; XP doesn't change with mastery. ` +
+      `Nerve a day: ${fmtInt(Math.round(m.regen))} from regen (while under your cap), +${m.extra} with 12 Catnip tea and 3 Cat Café brushes. ` +
+      'Mastery lost to failed jobs isn\'t counted, so it can take a little more.';
+    return `<div class="msx-crimeheat msx-mastplan" title="${escHtml(tip)}">🎯 <b>The road ahead</b> (from here, all the way):<br>${rows.join('<br>')}</div>`;
+  }
+
   function masteryLossHtml(api) {
     const out = [];
     const u = masteryUnits(api);
@@ -2431,7 +2512,7 @@
     }
     const mn = masteryNext(api);
     const mastHtml = !mn ? '' : `<div class="msx-crimeheat">⭐ <b>Mastery ${mn.level}</b>` + (mn.max ? ' · the top level' : ` · ${mn.exact ? '' : 'about '}${fmtInt(mn.toGo)} more success${mn.toGo === 1 ? '' : 'es'} to level ${mn.level + 1}` +
-      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`)) + ' · each level: +1 odds, +2.5% pay, +1 clean-job chance</div>' + masteryLossHtml(api);
+      (mn.exact ? ` (${fmtInt(mn.got)} of ${fmtInt(mn.need)})` : ` (${mn.pct}% there)`)) + ' · each level: +1 odds, +2.5% pay, +1 clean-job chance</div>' + masteryLossHtml(api) + masteryPlanHtml(crime, api);
     // The job's own %, capped at its ceiling; each place's odds (the dock's "Odds", what the game rolls) can go past
     // it ("Sure-footed", e.g. 98% at the clock's bell rope against a 96% job: user, 2026-11-13).
     const html = heatHtml + mastHtml + `<small>The job's odds: ${api.chance}% with your bonuses and heat${api.ceiling ? ` (its ceiling is ${api.ceiling}%)` : ''}. Each place shows its own odds above, which can go past it ("Sure-footed"); those are what count.</small>` +
@@ -3814,8 +3895,10 @@
     let anyCapped = false;
     const uses = loadUses();
     const cap = apiState.dailyCap || 12;
+    const lastUse = GM_getValue(LAST_USE_KEY, {}) || {};
     const bits = CONSUMABLE_FAMILIES.map((f) => {
-      const expires = apiState.cooldowns[f.family];
+      // The game's cooldown, or 60 minutes from the last use if that's later (the reset can drop the game's one).
+      const expires = Math.max(apiState.cooldowns[f.family] || 0, Number.isFinite(lastUse[f.family]) ? lastUse[f.family] + USE_COOLDOWN_MS : 0);
       const capped = apiState.usedUp.includes(f.family);
       const full = apiState.caps && apiState.caps[f.resource] != null && apiState[f.resource] >= apiState.caps[f.resource];
       let text;
@@ -4281,9 +4364,31 @@
   // a line under the gym's description in the training view, "x to go" on each next gym's door in the Switch gyms
   // hall, and the exact figures on that gym's card. From the game's own data (`gymEnergySpent`, and `required` on
   // the gyms in state 'next'), sent with every page and after every training session.
+  // Days to the next gym at your pace (0.51.0, user request 2026-11-15: "Project days to next gym based on current
+  // energy spent per day"): the energy you've trained, kept at most once an hour for 14 days; pace = what it rose by
+  // over the last 7 days (shown once there's at least 12 hours of it).
+  const GYM_PACE_KEY = 'ms_gym_pace_v1'; // [[at, spent], ...]
+  function gymPace(spent, now = Date.now()) {
+    let list = GM_getValue(GYM_PACE_KEY, []);
+    if (!Array.isArray(list)) list = [];
+    const last = list[list.length - 1];
+    if (Number.isFinite(spent) && (!last || (now - last[0] >= 3600000 && spent !== last[1]) || spent < last[1])) {
+      if (last && spent < last[1]) list = []; // a lower number: not the same cat (another account), start over
+      list.push([now, spent]);
+      list = list.filter(([at]) => now - at <= 14 * 86400000);
+      GM_setValue(GYM_PACE_KEY, list);
+    }
+    const week = list.filter(([at]) => now - at <= 7 * 86400000);
+    if (!week.length || !Number.isFinite(spent)) return null;
+    const span = now - week[0][0];
+    if (span < 12 * 3600000) return null;
+    return ((spent - week[0][1]) / span) * 86400000;
+  }
+  const gymDays = (left, pace) => (pace > 0 ? (left / pace < 1 ? 'under a day' : `~${n0(Math.ceil(left / pace))} days`) : null);
   function drawGymProgress() {
     const spent = apiState && apiState.gymSpent;
     const next = (apiState && apiState.gymsNext) || [];
+    const pace = Number.isFinite(spent) ? gymPace(spent) : null;
     const on = onCatTree() && Number.isFinite(spent);
     // Training view: one line under the description.
     const say = on && document.querySelector('p.gy-say');
@@ -4296,9 +4401,11 @@
       const parts = Object.keys(groups).map(Number).sort((a, b) => a - b).map((req) => {
         const names = groups[req].map((g) => g.short).join(' & ');
         const left = req - spent;
-        return left > 0 ? `${names} open at ${n0(req)} · <b>${n0(left)} to go</b>` : `${names}: <b>ready to join</b>`;
+        const d = left > 0 ? gymDays(left, pace) : null;
+        return left > 0 ? `${names} open at ${n0(req)} · <b>${n0(left)} to go</b>${d ? ` (${d} at your pace)` : ''}` : `${names}: <b>ready to join</b>`;
       });
-      const html = `⚡ ${n0(spent)} energy trained${parts.length ? ' · ' + parts.join(' · ') : ''}`;
+      const paceText = pace > 0 ? ` · you train ~${n0(Math.round(pace))} a day` : pace === 0 ? ' · no training seen this week' : '';
+      const html = `⚡ ${n0(spent)} energy trained${paceText}${parts.length ? ' · ' + parts.join(' · ') : ''}`;
       if (line.dataset.html !== html) { line.innerHTML = html; line.dataset.html = html; }
       const prices = next.filter((g) => g.price).map((g) => `${g.name} $${n0(g.price)}`);
       setTitle(line, prices.length ? `Membership once open: ${prices.join(', ')}. From the game's own data.` : 'Energy you have spent training, from the game\'s own data.');
@@ -4323,7 +4430,8 @@
     const bar = doBox.querySelector('.progress');
     if (bar ? bar.nextElementSibling !== fig : fig.parentNode !== doBox) { if (bar) bar.after(fig); else doBox.prepend(fig); }
     const left = g.required - spent;
-    const text = `${n0(Math.min(spent, g.required))} of ${n0(g.required)} energy trained · ${left > 0 ? `${n0(left)} to go` : 'ready to join'}`;
+    const d = left > 0 ? gymDays(left, pace) : null;
+    const text = `${n0(Math.min(spent, g.required))} of ${n0(g.required)} energy trained · ${left > 0 ? `${n0(left)} to go${d ? ` (${d} at your pace)` : ''}` : 'ready to join'}`;
     if (fig.textContent !== text) fig.textContent = text;
   }
 
