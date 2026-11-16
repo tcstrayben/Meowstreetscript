@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.51.0
+// @version      0.51.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -20,6 +20,26 @@
 
 (function () {
   'use strict';
+
+  // The game's clock, not the computer's (0.51.1, user report 2026-11-16: tuna/catnip said "ready" while the game still
+  // had the cooldown; that PC's clock was 1 hour fast: the game's `serverTime` 04:53:25 vs the PC's 05:53:20). Every
+  // game page sends `serverTime`; the difference is kept and every `Date.now()` / `new Date()` in this script adds it,
+  // so all timers always count with the game's time (user 2026-11-16: "just use the game's clock all the time"). A
+  // difference of a day or more is ignored: that's an old capture replayed in a test, not a real clock.
+  let clockOffset = 0;
+  const Date = (() => {
+    const RealDate = globalThis.Date;
+    class GameDate extends RealDate {
+      constructor(...a) { if (a.length) super(...a); else super(RealDate.now() + clockOffset); }
+      static now() { return RealDate.now() + clockOffset; }
+    }
+    return GameDate;
+  })();
+  function noteServerTime(t) {
+    if (typeof t !== 'number' || !Number.isFinite(t)) return;
+    const d = t - globalThis.Date.now();
+    clockOffset = Math.abs(d) < 26 * 3600000 ? d : 0;
+  }
 
   // Only ever run on https://meowstreets.com/... pages (crimes, merits, and so on). The @match line already
   // limits this; the check is a second guard.
@@ -93,6 +113,7 @@
 
   function extractApiState(raw) {
     if (!raw || typeof raw !== 'object') return null;
+    noteServerTime(raw.serverTime);
     try {
       const out = {
         at: Date.now(), crimes: {}, meritLines: {}, merits: null, crew: null, chain: null, stocks: null, events: [],
@@ -2332,7 +2353,7 @@
   // and cat cafe") ───
   // From the job's best place (most expected cash per nerve): each success costs its nerve ÷ the odds; the odds go up
   // 1 a level (to 99), pay 2.5% a level (`payoutBonus`), XP stays the same (mastery adds none: XP scale 1 at M7).
-  // A job of several steps (the clock, the safe) counts each step at the place's odds. Nerve a day: regen (the game's
+  // A job of several steps (the clock, the safe): each step is one success (user: every clock click counts). Nerve a day: regen (the game's
   // `regen.nerve`, 0.2 a minute = 288 a day while under the cap), plus Catnip tea (+10, 1 an hour, 12 a day: user
   // 2026-11-16) and the Cat Café brush (+5 every 8 hours). Mastery that failed jobs take away isn't counted.
   const MASTERY_GOALS = [5, 10, 15, 20];
@@ -2346,10 +2367,13 @@
     const L = mn.level;
     const odds0 = Number.isFinite(best.odds) ? best.odds : api.chance;
     const steps = crime.steps || 1;
-    const nerveJob = best.act.cost * steps;
-    const pay0 = (best.act.payMin + best.act.payMax) / 2; // what one job pays when it works, at today's level
+    // One success = one click (user 2026-11-16: "each click on the clock counts, and gives exp"): a job of several
+    // steps counts each step as a success with its own nerve and XP; its cash comes once at the end, so it's spread
+    // over the steps.
+    const nerveEach = best.act.cost;
+    const pay0 = (best.act.payMin + best.act.payMax) / 2 / steps; // what one success pays when it works, at today's level
     const bonus0 = Number.isFinite(api.payoutBonus) ? api.payoutBonus : 1 + 0.025 * L;
-    const xpJob = Number.isFinite(best.act.xp) ? best.act.xp * steps : 0;
+    const xpEach = Number.isFinite(best.act.xp) ? best.act.xp : 0;
     let s = mn.exact ? mn.got : masteryAt(L + 1) - mn.toGo; // successes now
     const out = [];
     let nerve = 0, cash = 0, xp = 0;
@@ -2357,9 +2381,9 @@
       const need = masteryAt(l + 1) - Math.max(s, masteryAt(l));
       if (need > 0) {
         const p = Math.min(99, odds0 + (l - L)) / 100;
-        nerve += (need / p) * nerveJob; // a job of several steps: each step at the place's odds (approximately)
+        nerve += (need / p) * nerveEach;
         cash += need * pay0 * (1 + 0.025 * l) / bonus0;
-        xp += need * xpJob;
+        xp += need * xpEach;
         s = masteryAt(l + 1);
       }
       if (MASTERY_GOALS.includes(l + 1)) out.push({ goal: l + 1, nerve, cash, xp });
