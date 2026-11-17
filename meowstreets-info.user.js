@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.51.4
+// @version      0.52.0
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -396,6 +396,15 @@
           playAt: co.playAt || 0, groomAt: co.groomAt || 0, errandUntil: co.errandUntil || 0,
           out: !!co.out, hungry: !!co.hungry, overdue: !!co.overdue,
         };
+      }
+      // 🐱 The alley and its strays, for the crew bot's companion channel (0.52.0, syncAlley).
+      if (raw.alley && typeof raw.alley === 'object' && Array.isArray(raw.alley.strays)) {
+        const a = raw.alley;
+        out.alley = { strays: a.strays.slice(0, 6), visitor: a.visitor || null, rotatesAt: a.rotatesAt, visitorLeavesAt: a.visitorLeavesAt || 0, nextVisitAt: a.nextVisitAt || 0 };
+      }
+      if (Array.isArray(raw.strays)) {
+        out.strays = raw.strays.filter((s) => s && typeof s.id === 'string').slice(0, 12).map((s) => ({ id: s.id, name: s.name, bonus: s.bonus, tiers: s.tiers, rare: !!s.rare,
+          signature: s.signature ? { name: s.signature.name, description: s.signature.description } : null }));
       }
       if (raw.stocks && typeof raw.stocks === 'object') {
         out.stocks = {
@@ -5387,6 +5396,32 @@
       onerror: done, ontimeout: done,
     });
   }
+  // ─── Companion alley to the crew bot (0.52.0, user request 2026-11-17) ───
+  // The bot's 🐱 companion channel posts who's in the alley when it changes (Thursdays) and when a visitor comes
+  // (Sundays). The official API has no alley, so with sharing on the game's own `alley` and `strays` (every page) go to
+  // the bot: only when they change, or every 6 hours. Nothing about you is in it.
+  const ALLEY_URL = 'http://168.138.79.225:3001/v1/alley';
+  const ALLEY_SYNC_KEY = 'ms_alley_sync_v1'; // { sig, at } of the last send
+  const ALLEY_GAP_MS = 6 * 3600000;
+  let alleyBusy = false;
+  function syncAlley() {
+    const a = apiState && apiState.alley;
+    if (!sharingOn() || alleyBusy || typeof GM_xmlhttpRequest !== 'function' || !a || !Array.isArray(a.strays)) return;
+    const alley = a;
+    const strays = apiState.strays || null;
+    const sig = JSON.stringify([alley, strays]);
+    const last = GM_getValue(ALLEY_SYNC_KEY, null) || {};
+    if (last.sig === sig && Date.now() - (last.at || 0) < ALLEY_GAP_MS) return;
+    if (last.failAt && Date.now() - last.failAt < 5 * 60000) return; // refused or offline: try again in 5 minutes
+    alleyBusy = true;
+    const done = (ok) => { alleyBusy = false; GM_setValue(ALLEY_SYNC_KEY, ok ? { sig, at: Date.now() } : { ...last, failAt: Date.now() }); };
+    GM_xmlhttpRequest({
+      method: 'POST', url: ALLEY_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), alley, strays }),
+      onload: (r) => done(r.status === 200), onerror: () => done(false), ontimeout: () => done(false),
+    });
+  }
+
   // A job's page: "🔓 Found by the alliance: …" under the rung line while it shows one you haven't reached, and the same
   // text on each such peg's tooltip.
   function drawRungTips() {
@@ -5673,6 +5708,7 @@
       drawCrimeTable();
       if (onCrimes) drawCrimeDock();
       syncRungs(); // mastery unlocks: at most every 30 minutes unless yours changed, sharing on only
+      syncAlley(); // 🐱 companion alley to the bot: when it changes or every 6 hours, sharing on only
       drawRungTips();
       syncAllies(); // Purrgatory only: the alliance's member lists, at most every 15 minutes
       drawJailMarks();
