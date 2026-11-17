@@ -20,14 +20,14 @@ A userscript that adds extra information to [MeowStreets](https://meowstreets.co
 - **Crew → Contracts (the maintainer's crew, Crew data on):** under each crime contract, the crew's cut of the cash reward and each member's share of the rest by how many of the crimes they did, yours first, with ✅ for shares the leaders have paid.
 - **Trading page:** the cheapest currently-open listing for every item, next to Whiskers & Co.'s own buy price (tax included) and what it pays to sell the item back — flagging both an underpriced listing not worth skipping and a listing cheap enough to buy and immediately resell for a profit.
 - **Whiskers & Co.:** the price range for items whose price changes hourly, and your discounted price.
-- **Account page:** the script's settings: verifying with a Public game API key, and one switch for each kind of sharing (see Sharing below). Until you verify, a 🔑 link in the sidebar points there.
+- **Account page:** the script's settings, in its own **Extra Info** tab: verifying with a Public game API key, and one switch for each kind of sharing (see Sharing below). Until you verify, a 🔑 link in the sidebar points there.
 - **Records on your computer:** stock prices you've seen and a log of your Mews events (crime results, trades, heists, training and so on), so the game's real rates can be worked out. It never runs on a timer and never requests a page for you.
 
 ## Sharing (verify first, then one switch per kind of data)
 
 Sharing goes to the **MeowStreets Info server** (a small server run by the maintainer). Without verifying, nothing is sent anywhere and everything the script works out from your own pages still works.
 
-**Verifying.** Make a **Public** key under Account → API in the game and paste it into the script's box on the Account page.
+**Verifying.** Make a **Public** key under Account → API keys in the game and paste it into the **Extra Info** tab on the Account page.
 
 1. The script asks the game what kind of key it is (straight to meowstreets.com). **Self and Crew keys are refused** and never sent anywhere: they can see private things like your cash and Mews.
 2. A Public key is sent once to the MeowStreets Info server, which asks the game who owns it.
@@ -35,7 +35,7 @@ Sharing goes to the **MeowStreets Info server** (a small server run by the maint
 
 A Public key only sees what anyone can see on cats' and crews' public pages. The key also stays in your browser for one thing: the game's own shield time for lying-low cats on the Players list (🛡️ ready), at most one cat every 3 seconds, asked only of meowstreets.com. **Remove key** takes it out of your browser; **Stop sharing and forget me** turns sharing off and has the server drop your code. Revoke the key in the game whenever you like.
 
-**The switches** (Account page, after verifying). Each one says what it sends and who gets it back:
+**The switches** (Extra Info tab on the Account page, after verifying). Each one says what it sends and who gets it back:
 
 | Switch | Sends (with your cat id) | Who gets it back |
 |---|---|---|

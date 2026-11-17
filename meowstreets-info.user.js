@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.51.2
+// @version      0.51.3
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -867,6 +867,9 @@
       #msx-account { margin:18px 0; padding:16px 18px; border-radius:12px; background:rgba(0,0,0,.28);
         border:1px solid var(--ms-line, rgba(231,237,225,.15)); color:var(--ms-bone, #e7ede1); font-size:13px; line-height:1.5; }
       #msx-account h2 { margin:0 0 2px; font-size:17px; }
+      #msx-account[hidden], .ac-card[data-msx-tab] > #ac-pane { display:none !important; }
+      .ac-card > #msx-account { margin:0; border:0; border-radius:0; background:transparent; }
+      .ac-card > #msx-account > h2 { display:none; }
       #msx-account h3 { margin:16px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
       #msx-account h4 { margin:12px 0 2px; font-size:12px; }
       #msx-account #msx-acc-areas { margin-top:6px; padding-left:10px; border-left:2px solid var(--ms-line, rgba(231,237,225,.25)); }
@@ -5311,7 +5314,7 @@
     apiGet('key', (j, status) => {
       const d = j && j.ok && j.data;
       if (!d) verifyState = { ok: false, text: `The game refused it (${(j && j.error && j.error.code) || status || 'no answer'}). Nothing was saved or sent.` };
-      else if (d.level !== 'public') verifyState = { ok: false, text: `This is a ${String(d.level).charAt(0).toUpperCase() + String(d.level).slice(1)} key. It can see private things (like your cash and Mews), so the script only takes Public keys: it was not saved or sent anywhere. Make a Public key under Account → API in the game and paste that.` };
+      else if (d.level !== 'public') verifyState = { ok: false, text: `This is a ${String(d.level).charAt(0).toUpperCase() + String(d.level).slice(1)} key. It can see private things (like your cash and Mews), so the script only takes Public keys: it was not saved or sent anywhere. Make a Public key under Account → API keys in the game and paste that.` };
       else if (apiState && apiState.myId && d.owner && d.owner.id !== apiState.myId) verifyState = { ok: false, text: `That key is ${d.owner.name}'s, not yours. Nothing was saved or sent.` };
       if (!d || d.level !== 'public' || verifyState.ok === false) { updateAccountPanel(); return; }
       GM_setValue(API_KEY_KEY, key);
@@ -5464,9 +5467,8 @@
   function ensureAccountPanel() {
     const existing = document.getElementById('msx-account');
     if (currentPath() !== '/account') { if (existing) existing.remove(); return; }
-    if (existing) { updateAccountPanel(); return; }
-    const host = document.querySelector('.main-content') || document.querySelector('main');
-    if (!host) return;
+    if (existing) { placeAccountBox(existing); updateAccountPanel(); return; }
+    if (!document.querySelector('.ac-tabs, .main-content, main')) return;
     const box = document.createElement('section');
     box.id = 'msx-account';
     const check = (id, label) => `<label class="msx-acc-check"><input type="checkbox" id="${id}"> ${label}</label>`;
@@ -5478,7 +5480,7 @@
       '<h3>Recording</h3>' +
       check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') +
       '<div id="msx-acc-sharebox" hidden><h3 id="msx-verify">Sharing with the MeowStreets Info server</h3>' +
-      sub('Verify with a <b>Public</b> key (Account → API in the game):') +
+      sub('Verify with a <b>Public</b> key (Account → API keys in the game):') +
       pts(['<b>Self and Crew keys are refused</b> and never sent.', 'The server checks who owns the key, gives this browser a private code, then <b>throws the key away</b>.',
         'A Public key only sees public pages. It also stays in this browser for 🛡️ shield times on the Players list.', 'Revoke it in the game any time.']) +
       '<p class="msx-acc-sub" id="msx-acc-verified"></p>' +
@@ -5503,7 +5505,7 @@
       '</div>' +
       sub('Never sent: cash, email, messages. Nothing is ever sent to MeowStreets.') +
       '</div>';
-    host.appendChild(box);
+    placeAccountBox(box);
     box.querySelector('#msx-acc-keysave').addEventListener('click', () => {
       const inp = box.querySelector('#msx-acc-key');
       const v = inp.value.trim();
@@ -5530,6 +5532,63 @@
     box.querySelector('#msx-acc-bank').addEventListener('change', (e) => { settings.shareBank = e.target.checked; saveSettings(); shareCrew(); });
     updateAccountPanel();
   }
+
+  // 🗂️ Extra Info tab (0.51.3, user request 2026-11-17): the game's Account page is now tabs (.ac-tabs, one #ac-pane),
+  // so the box is a 7th tab of its own there. Picking it hides the game's pane and marks our tab; picking any game tab
+  // puts the game's pane and its selected tab back before the game handles the click. Old layout: bottom of the page.
+  let accPrevTab = null;
+  function placeAccountBox(box) {
+    const card = document.querySelector('.ac-card');
+    const tabs = card && card.querySelector('.ac-tabs');
+    if (!tabs) {
+      if (!box.isConnected) (document.querySelector('.main-content') || document.querySelector('main'))?.appendChild(box);
+      return;
+    }
+    if (box.parentElement !== card) card.appendChild(box);
+    let tab = document.getElementById('msx-ac-tab');
+    if (tab && tab.parentElement !== tabs) { tab.remove(); tab = null; }
+    if (!tab) {
+      tab = document.createElement('button');
+      tab.type = 'button';
+      tab.id = 'msx-ac-tab';
+      tab.className = 'ac-tab';
+      tab.setAttribute('role', 'tab');
+      tab.setAttribute('aria-controls', 'msx-account');
+      tab.innerHTML = '<span data-text="Extra Info">Extra Info</span>';
+      setTitle(tab, 'MeowStreets Extra Info: the script\'s settings, verifying and sharing');
+      tab.addEventListener('click', () => openAccountTab(true));
+      tabs.appendChild(tab);
+      tabs.addEventListener('click', (e) => { const t = e.target.closest('.ac-tab'); if (t && t !== tab) openAccountTab(false); }, true);
+      box.setAttribute('role', 'tabpanel');
+      box.setAttribute('aria-labelledby', 'msx-ac-tab');
+      openAccountTab(/^#msx-/.test(location.hash));
+    }
+  }
+  function openAccountTab(on) {
+    const card = document.querySelector('.ac-card');
+    const tab = document.getElementById('msx-ac-tab');
+    const box = document.getElementById('msx-account');
+    if (!card || !tab || !box) return;
+    if (on && !card.hasAttribute('data-msx-tab')) {
+      const cur = card.querySelector('.ac-tab[aria-selected="true"]:not(#msx-ac-tab)');
+      if (cur) { cur.setAttribute('aria-selected', 'false'); accPrevTab = cur; }
+      card.setAttribute('data-msx-tab', '');
+    } else if (!on && card.hasAttribute('data-msx-tab')) {
+      card.removeAttribute('data-msx-tab');
+      if (accPrevTab && accPrevTab.isConnected) accPrevTab.setAttribute('aria-selected', 'true');
+      accPrevTab = null;
+    }
+    tab.setAttribute('aria-selected', String(on));
+    tab.tabIndex = on ? 0 : -1;
+    box.hidden = !on;
+  }
+  // The sidebar's 🔑 verify and ⚔️ stats links while already on the Account page: open the tab and scroll there.
+  window.addEventListener('hashchange', () => {
+    if (currentPath() !== '/account' || !/^#msx-(verify|stats)$/.test(location.hash)) return;
+    openAccountTab(true);
+    const t = document.querySelector(location.hash);
+    if (t && t.scrollIntoView) t.scrollIntoView({ block: 'center' });
+  });
 
   function updateAccountPanel() {
     const box = document.getElementById('msx-account');
