@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.51.3
+// @version      0.51.4
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -5441,13 +5441,16 @@
     const rows = currentPath() === '/purrgatory' ? document.querySelectorAll('.jl-row') : [];
     const have = rows.length && sharingOn() && inShareCrew() ? GM_getValue(ALLIES_KEY, null) : null;
     if (!have || !have.cats || !have.cats.length) { document.querySelectorAll('.msx-jailmark').forEach((m) => m.remove()); return; }
-    const byName = new Map(have.cats.map(([, name, crew]) => [String(name).toLowerCase(), crew]));
+    // 0.51.4 (user report 2026-11-17: Aleksa_ showed ✖): the bot keeps names without * _ ` ~ | < > @ # (they'd break
+    // Discord's formatting) and the jail rows have no cat ids, so both sides drop those characters before comparing.
+    const plain = (s) => String(s).replace(/[*_`~|<>@#]/g, '').trim().toLowerCase();
+    const byName = new Map(have.cats.map(([, name, crew]) => [plain(name), crew]));
     const own = apiState.crew && apiState.crew.id;
     const names = { 3: 'Cats With Attitude', 4: 'The Church of Meowology', 10: 'The Meowfia Cat$', 11: 'Night Watch' };
     rows.forEach((row) => {
       const btn = row.querySelector('.jl-name');
       if (!btn) return;
-      const crew = byName.get(btn.textContent.trim().toLowerCase());
+      const crew = byName.get(plain(btn.textContent));
       const kind = crew == null ? 'none' : crew === own ? 'crew' : 'ally';
       const text = kind === 'none' ? '✖' : '✔';
       const tip = kind === 'none' ? 'Not in our crew or the alliance' : kind === 'crew' ? 'Our crew' : `Alliance: ${names[crew] || 'crew ' + crew}`;
