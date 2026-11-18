@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.52.0
+// @version      0.52.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3352,7 +3352,7 @@
     const book = {}, best = {};
     Object.entries(p.book && typeof p.book === 'object' ? p.book : {}).forEach(([k, v]) => { if (Array.isArray(v)) { book[k] = Number(v[0]) || 0; best[k] = Number(v[1]) || 0; } });
     return {
-      today: p.today, limit: p.limit, spot: p.spot || null, hook: p.hook || null, tide: p.tide || null, hour: p.hour || null, book, best,
+      today: p.today, limit: p.limit, spot: p.spot || null, hook: p.hook || null, rod: p.rod || null, tide: p.tide || null, hour: p.hour || null, book, best,
       bait: Object.fromEntries(Object.entries(p.bait && typeof p.bait === 'object' ? p.bait : {}).filter(([, n]) => Number.isFinite(n))),
       bucket: (Array.isArray(p.bucket) ? p.bucket : []).filter((f) => f && f.f && Number(f.at) > 0)
         .map((f) => ({ f: f.f, g: Number(f.g) || 0, v: Number(f.v) || 0, at: Number(f.at), off: Number(f.off) || 0 })),
@@ -3448,7 +3448,7 @@
       const rose = Object.keys(p.book).filter((k) => p.book[k] > (last.book[k] || 0));
       const fish = p.bucket.filter((f) => !last.bucketAts.includes(f.at)).sort((a, b) => b.at - a.at)[0];
       const f = rose.length === 1 ? rose[0] : fish ? fish.f : null;
-      const c = { at, spot: p.spot, hook: p.hook, tide: p.tide, hour: p.hour, f };
+      const c = { at, spot: p.spot, hook: p.hook, rod: p.rod, tide: p.tide, hour: p.hour, f };
       if (fish && fish.f === f) { c.g = fish.g; c.v = fish.v; }
       // Bait used = what went down since the last reply (a thrown prawn counts too). If the bait on the hook didn't go
       // down (bought more in between), one of it is assumed. Cost at the tackle hut's price (baitPrices).
@@ -3488,6 +3488,26 @@
     notePierCasts(apiState.pier, apiState.at);
     noteFish(apiState.pier);
     noteTide(apiState.pier.tide, apiState.at);
+    noteHour(apiState.pier.hour, apiState.at);
+  }
+
+  // Pier time of day (0.52.1, user request 2026-11-18 "verify dawn and dusk and the tide times"): `pier.hour` is day,
+  // dusk, night or dawn (dusk seen from 18:00 UTC on 11-17; the crew pool's catches put dawn ~05:00–08:00 and dusk
+  // ~18:00–21:00). Each switch seen between two readings less than 30 min apart is logged like a tide change, and
+  // both kinds of change go to the crew bot (sharing on) so everyone's sightings pin the times down.
+  const HOUR_KEY = 'ms_pier_hour_v1'; // { last: { hour, at }, changes: [{ from, to, at, span }] }
+  const HOUR_GAP = 30 * 60000, HOUR_MAX = 200;
+  function noteHour(hour, at) {
+    if (!hour || !at) return;
+    const t = GM_getValue(HOUR_KEY, null) || { last: null, changes: [] };
+    const l = t.last;
+    if (l && at <= l.at) return;
+    if (l && l.hour !== hour && at - l.at <= HOUR_GAP) {
+      t.changes.push({ from: l.hour, to: hour, at: Math.round((l.at + at) / 2), span: at - l.at });
+      if (t.changes.length > HOUR_MAX) t.changes.splice(0, t.changes.length - HOUR_MAX);
+    }
+    t.last = { hour, at };
+    GM_setValue(HOUR_KEY, t);
   }
 
   // Tide clock (0.43.1, user request): the tide goes Low tide → Coming in → High tide → Going out. Each time a reading
@@ -3509,7 +3529,8 @@
       let start = null;
       if (cur && cur.tide !== tide && at > cur.lastAt && at - cur.lastAt <= TIDE_GAP) {
         start = Math.round((cur.lastAt + at) / 2);
-        t.changes.push({ from: cur.tide, to: tide, at: start });
+        // span (0.52.1): the change happened somewhere in lastAt..at; the crew pool uses it to pin the tide clock down.
+        t.changes.push({ from: cur.tide, to: tide, at: start, span: at - cur.lastAt });
         if (cur.start) t.stages.push({ tide: cur.tide, ms: start - cur.start });
         ['changes', 'stages'].forEach((k) => { if (t[k].length > TIDE_MAX) t[k].splice(0, t[k].length - TIDE_MAX); });
       }
@@ -3550,7 +3571,8 @@
   function noteFish(p) {
     const m = GM_getValue(FISH_KEY, null) || {};
     let changed = false;
-    p.bucket.forEach((f) => { const k = f.f + ':' + f.at; if (!m[k] && f.g > 0) { m[k] = { f: f.f, g: f.g, v: f.v, at: f.at }; changed = true; } });
+    // 0.52.1: a fish with a value but no weight (octopus?) is kept too, so its price gets known.
+    p.bucket.forEach((f) => { const k = f.f + ':' + f.at; if (!m[k] && (f.g > 0 || f.v > 0)) { m[k] = { f: f.f, g: f.g, v: f.v, at: f.at }; changed = true; } });
     if (!changed) return;
     const keys = Object.keys(m);
     if (keys.length > FISH_MAX) keys.sort((a, b) => m[a].at - m[b].at).slice(0, keys.length - FISH_MAX).forEach((k) => delete m[k]);
@@ -3558,29 +3580,40 @@
   }
   // Your catches (0.46.0): each bucket fish once (kind, grams, value, catch time), with the spot, tide and day/night of
   // the logged cast that landed it (same kind and weight), plus logged casts that brought up junk (no weight).
+  // 0.52.1 (user request 2026-11-18, "gather the missing info: bait etc."): also the bait on the hook, the rod, and
+  // whether a prawn was thrown in for that cast, so the crew pool learns which bait and rod each fish takes.
+  const castExtra = (c, r) => {
+    if (c.hook) r.bait = c.hook;
+    if (c.rod) r.rod = c.rod;
+    if (c.used && c.used.prawns > 0) r.prawn = true;
+    return r;
+  };
   function fishRecords() {
     const casts = (GM_getValue(PIER_LOG_KEY, null) || { casts: [] }).casts;
     const where = {};
-    casts.forEach((c) => { if (c.f && c.g > 0) where[c.f + ':' + c.g] = c; });
+    casts.forEach((c) => { if (c.f && (c.g > 0 || c.v > 0)) where[c.f + ':' + (c.g || 0) + ':' + (c.v || 0)] = c; });
     const out = Object.values(GM_getValue(FISH_KEY, null) || {}).map((x) => {
-      const c = where[x.f + ':' + x.g];
+      const c = where[x.f + ':' + (x.g || 0) + ':' + (x.v || 0)];
       const r = { f: x.f, at: x.at, g: x.g, v: x.v };
-      if (c) { if (c.spot) r.spot = c.spot; if (c.tide) r.tide = c.tide; if (c.hour) r.hour = c.hour; }
+      if (c) { if (c.spot) r.spot = c.spot; if (c.tide) r.tide = c.tide; if (c.hour) r.hour = c.hour; castExtra(c, r); }
       return r;
     });
-    casts.forEach((c) => { if (c.f && !(c.g > 0)) out.push({ f: c.f, at: c.at, spot: c.spot || undefined, tide: c.tide || undefined, hour: c.hour || undefined }); });
+    casts.forEach((c) => { if (c.f && !(c.g > 0) && !(c.v > 0)) out.push(castExtra(c, { f: c.f, at: c.at, spot: c.spot || undefined, tide: c.tide || undefined, hour: c.hour || undefined })); });
     return out.sort((a, b) => a.at - b.at);
   }
-  // { kind: { n, w, minG, maxG, sumV, spots, tides, hours } }, the same as the crew bot's summary (bot/lib/fish.js).
+  // { kind: { n, w, minG, maxG, sumV, spots, tides, hours, baits, rods, prawns } }, the same as the crew bot's summary (bot/lib/fish.js).
   function fishSummary(rows) {
     const by = {};
     rows.forEach((c) => {
-      const k = by[c.f] || (by[c.f] = { n: 0, w: 0, minG: 0, maxG: 0, sumV: 0, spots: {}, tides: {}, hours: {} });
+      const k = by[c.f] || (by[c.f] = { n: 0, w: 0, minG: 0, maxG: 0, sumV: 0, spots: {}, tides: {}, hours: {}, baits: {}, rods: {}, prawns: 0 });
       k.n++;
       if (c.g > 0 && Number.isFinite(c.v)) { k.minG = k.w ? Math.min(k.minG, c.g) : c.g; k.maxG = Math.max(k.maxG, c.g); k.sumV += c.v; k.w++; }
       if (c.spot) k.spots[c.spot] = (k.spots[c.spot] || 0) + 1;
       if (c.tide) k.tides[c.tide] = (k.tides[c.tide] || 0) + 1;
       if (c.hour) k.hours[c.hour] = (k.hours[c.hour] || 0) + 1;
+      if (c.bait) k.baits[c.bait] = (k.baits[c.bait] || 0) + 1;
+      if (c.rod) k.rods[c.rod] = (k.rods[c.rod] || 0) + 1;
+      if (c.prawn) k.prawns++;
     });
     return by;
   }
@@ -3594,7 +3627,8 @@
   // Crew pool (0.46.0, user request "make sure we are sharing fishing info"; sharing on): send your new catches and the
   // game's notes, get back the crew's summary per kind. The bot keeps each catch once and never who sent it.
   const FISH_POOL_URL = 'http://168.138.79.225:3001/v1/fish';
-  const FISH_SYNC_KEY = 'ms_fish_sync_v1'; // { sentTo: newest catch time sent }
+  // v2 (0.52.1): every logged catch is sent once more, so catches already in the pool get their bait and rod.
+  const FISH_SYNC_KEY = 'ms_fish_sync_v2'; // { sentTo: newest catch time sent }
   const FISH_CREW_KEY = 'ms_fish_crew_v1'; // { at, n, kinds, notes } the bot's last reply
   const FISH_SEND_GAP_MS = 65000, FISH_REFRESH_MS = 10 * 60000, FISH_SEND_MAX = 500;
   let fishSyncAt = 0, fishSyncBusy = false;
@@ -3608,18 +3642,24 @@
     const onPier = location.pathname.replace(/\/+$/, '') === '/pier-nine';
     const sense = senseOut();
     const senseNew = JSON.stringify(sense) !== (sync.sense || 'null');
-    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
+    // Tide and time-of-day changes seen since the last send (0.52.1).
+    const clockTo = Number(sync.clockTo) || 0;
+    const tideCh = ((GM_getValue(TIDE_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo && c.span > 0);
+    const hourCh = ((GM_getValue(HOUR_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo);
+    const clockNew = tideCh.length + hourCh.length > 0;
+    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !clockNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
     const send = fresh.slice(0, FISH_SEND_MAX);
     fishSyncAt = Date.now(); fishSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: FISH_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), catches: send, notes: apiState.pier.rawNotes || null, sense }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), catches: send, notes: apiState.pier.rawNotes || null, sense, tides: tideCh, hours: hourCh }),
       onload: (r) => {
         fishSyncBusy = false;
         let j = null;
         try { j = botJson(r); } catch (e) { return; }
         if (!j || !j.ok) return;
-        GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense) });
+        const clockSent = Math.max(clockTo, ...tideCh.map((c) => c.at), ...hourCh.map((c) => c.at));
+        GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense), clockTo: clockSent });
         if (sharingOn()) GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
         schedule();
         if (fresh.length > FISH_SEND_MAX) setTimeout(syncFish, FISH_SEND_GAP_MS + 1000);
