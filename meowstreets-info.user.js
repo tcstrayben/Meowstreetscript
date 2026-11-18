@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.53.0
+// @version      0.53.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -734,10 +734,11 @@
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.25); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       .msx-heatlock button:hover { border-color:var(--ms-lime, #b4df87); }
       button.msx-heat-locked { opacity:.4; cursor:not-allowed !important; }
-      #msx-crimetable { margin-top:14px; padding:10px 12px; border-radius:10px; background:rgba(0,0,0,.28); font-size:12.5px; }
+      #msx-crimetable { margin-top:14px; padding:10px 12px; border-radius:10px; background:rgba(0,0,0,.28); font-size:12.5px; max-width:100%; box-sizing:border-box; overflow-x:auto; }
       #msx-crimetable h3 { margin:0 0 6px; font-size:14px; }
       #msx-crimetable table { border-collapse:collapse; width:100%; }
-      #msx-crimetable th, #msx-crimetable td { padding:3px 10px 3px 0; text-align:left; white-space:nowrap; }
+      /* Text wraps so the table fits the page (user report 2026-11-18: boxes scrolled sideways and jumped back). */
+      #msx-crimetable th, #msx-crimetable td { padding:3px 8px 3px 0; text-align:left; vertical-align:top; white-space:normal; overflow-wrap:break-word; }
       #msx-crimetable th { color:var(--ms-smoke, #8d9289); font-weight:600; }
       #msx-crimetable td.msx-best { color:var(--ms-lime, #b4df87); font-weight:700; }
       #msx-crimetable small { display:block; margin-top:6px; color:var(--ms-smoke, #8d9289); }
@@ -828,11 +829,14 @@
         background:var(--ms-asphalt, #1c201c); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
       #msx-invest button:hover { border-color:var(--ms-lime, #b4df87); }
       #msx-invest .msx-inv-go { border-color:var(--ms-lime, #b4df87); }
-      #msx-invest .msx-inv-table, #msx-heists .msx-inv-table, #msx-crewjobs .msx-inv-table, #msx-trading .msx-inv-table { border-collapse:collapse; margin:10px 0; display:block; overflow-x:auto; }
+      /* Tables fill the box and their text wraps, so they fit the page instead of scrolling sideways (user report
+         2026-11-18). The box itself scrolls only if a very narrow screen still can't fit it, and keeps its place. */
+      #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading { max-width:100%; box-sizing:border-box; overflow-x:auto; }
+      #msx-invest .msx-inv-table, #msx-heists .msx-inv-table, #msx-crewjobs .msx-inv-table, #msx-trading .msx-inv-table { border-collapse:collapse; margin:10px 0; width:100%; font-size:12.5px; }
       #msx-invest .msx-inv-table th, #msx-invest .msx-inv-table td,
       #msx-heists .msx-inv-table th, #msx-heists .msx-inv-table td,
       #msx-crewjobs .msx-inv-table th, #msx-crewjobs .msx-inv-table td,
-      #msx-trading .msx-inv-table th, #msx-trading .msx-inv-table td { padding:3px 12px 3px 0; text-align:left; white-space:nowrap; }
+      #msx-trading .msx-inv-table th, #msx-trading .msx-inv-table td { padding:3px 8px 3px 0; text-align:left; vertical-align:top; white-space:normal; overflow-wrap:break-word; }
       #msx-heists small, #msx-crewjobs small, #msx-trading small { color:var(--ms-smoke, #8d9289); }
       #msx-trading .msx-unk { color:var(--ms-smoke, #8d9289); font-style:italic; }
       #msx-trading .msx-stale { color:var(--ms-gold, #e9c46a); }
@@ -956,6 +960,7 @@
       #msx-crewjobs .msx-launch { list-style:none; margin:8px 0; padding:0; display:grid; gap:6px; }
       #msx-crewjobs .msx-launch li { padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12); }
       #msx-crewjobs .msx-launch li.is-now { border-color:#7bd88f; background:rgba(123,216,143,.12); }
+      .msx-launchnow { margin:8px 0; padding:6px 10px; border-radius:8px; font-weight:700; color:#7bd88f; background:rgba(123,216,143,.12); border:1px solid #7bd88f; }
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
       .msx-muggable svg { display:block; }
@@ -5085,7 +5090,7 @@
     }
     const body = panel.querySelector('.msx-calc-body');
     const heists = apiState?.heists || [];
-    if (!heists.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own heist data (open this page once it has loaded).</p>'; return; }
+    if (!heists.length) { setHtml(body, '<p class="msx-inv-note">Waiting for the game’s own heist data (open this page once it has loaded).</p>'); return; }
     const xp = apiState.heistXp || { success: 20, fail: 5 };
     let h = '<p class="msx-inv-note">Nerve costs the same (10) for every heist, so energy is what actually tells them apart. The $ figure is an exact expected value: chance × profit − (1 − chance) × what a bust costs you, using your own real chance for each job.</p>';
     h += '<table class="msx-inv-table"><thead><tr><th>Heist</th><th>Chance</th><th>Energy</th><th>Stake</th><th>Profit / cat</th><th>Bust returns</th><th>XP/energy</th><th>$/energy</th><th>Run</th></tr></thead><tbody>';
@@ -5098,7 +5103,7 @@
         `<td>${(xpEv / t.energy).toFixed(2)}</td><td>${signed0(dollarEv / t.energy)}</td><td>${fmtDuration(t.duration)}</td></tr>`;
     });
     h += '</tbody></table><p class="msx-inv-note">Also costs 10 nerve per cat either way. A kit (10% of the stake) is not included here.</p>';
-    body.innerHTML = h;
+    setHtml(body, h); // only when it changed, so a scrolled table stays put (user report 2026-11-18)
   }
 
   // 🚀 When to launch a crew job (0.51.2, user 2026-11-16: crew respect is why we run crew jobs; crimes pay more XP and
@@ -5118,10 +5123,35 @@
     if (n < min) { const k = min - n; return { now: false, text: `⏳ ${k} more cat${k === 1 ? '' : 's'} to launch (needs ${min}), then launch straight away` }; }
     const seats = job.maxMembers || (tierDef && tierDef.maxMembers) || n;
     if (tierDef && tierDef.oneAtATime) {
-      if (job.chance != null && job.chance < 85 && n < seats) return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cats is enough. Only one of these runs at a time, so a cat going to bed with spare nerve should join first (up to 85%); awake cats do more starting a shakedown.` };
-      return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cats is enough${job.chance != null && job.chance >= 85 ? ' (85% is the most any job can be)' : ''}.` };
+      if (job.chance != null && job.chance < 85 && n < seats) return { now: true, text: `🚀 Launch NOW (any crew Planner or higher can press Launch): ${n} cats is enough. Only one of these runs at a time, so a cat going to bed with spare nerve should join first (up to 85%); awake cats do more starting a shakedown.` };
+      return { now: true, text: `🚀 Launch NOW (any crew Planner or higher can press Launch): ${n} cats is enough${job.chance != null && job.chance >= 85 ? ' (85% is the most any job can be)' : ''}.` };
     }
-    return { now: true, text: `🚀 Launch NOW (the leader, an officer or its planner presses Launch): ${n} cat${n === 1 ? '' : 's'} is enough. Launch it so spare cats can start the next one (the game fills open seats before a new job).` };
+    return { now: true, text: `🚀 Launch NOW (any crew Planner or higher can press Launch): ${n} cat${n === 1 ? '' : 's'} is enough. Launch it so spare cats can start the next one (the game fills open seats before a new job).` };
+  }
+
+  // 🚀 On the game's own job card (Crew → Jobs → Recruiting, user request 2026-11-18): "Launch this now!" just above
+  // the Launch button once a job has its minimum cats and still has an open seat (a full job goes by itself). Read from
+  // the card itself (the taken seats) and the game's tier list (minimum cats), so no card-to-job matching is needed.
+  function markLaunchCards() {
+    if (location.pathname.replace(/\/+$/, '') !== '/crew') return;
+    const tiers = apiState?.crewJobTiers || [];
+    document.querySelectorAll('article.tf-job').forEach((card) => {
+      const launch = [...card.querySelectorAll('.tf-acts button')].some((b) => /^\s*Launch\b/i.test(b.textContent || ''));
+      const name = (card.querySelector('.tf-job-m > header h3')?.textContent || '').trim();
+      const td = tiers.find((x) => x.name === name);
+      const taken = card.querySelectorAll('.tf-slot.is-taken').length;
+      const seats = card.querySelectorAll('.tf-slot').length;
+      let note = card.querySelector('.msx-launchnow');
+      if (!(launch && td && td.minMembers && taken >= td.minMembers && taken < seats)) { note?.remove(); return; }
+      const text = `🚀 Launch this now! ${taken} cat${taken === 1 ? '' : 's'} is enough (needs ${td.minMembers}). Any crew Planner or higher can press Launch.`;
+      if (!note) {
+        note = document.createElement('p');
+        note.className = 'msx-launchnow';
+        const acts = card.querySelector('.tf-acts');
+        if (acts) acts.before(note); else (card.querySelector('.tf-job-m') || card).append(note);
+      }
+      if (note.textContent !== text) note.textContent = text;
+    });
   }
 
   function ensureCrewJobsPanel() {
@@ -5137,7 +5167,7 @@
     }
     const body = panel.querySelector('.msx-calc-body');
     const tiers = apiState?.crewJobTiers || [];
-    if (!tiers.length) { body.innerHTML = '<p class="msx-inv-note">Waiting for the game’s own crew job data (open this page once it has loaded).</p>'; return; }
+    if (!tiers.length) { setHtml(body, '<p class="msx-inv-note">Waiting for the game’s own crew job data (open this page once it has loaded).</p>'); return; }
     // 🚀 The crew's jobs still recruiting, each with when to launch it (0.51.2).
     const recruiting = (apiState?.myCrewJobs || []).filter((j) => j.status === 'planning');
     let h = '<p class="msx-launch-rule"><b>🚀 Launch every crew job as soon as its minimum cats are in.</b> A job pays its respect once, however many cats are in it, so the fewest cats make the most respect per nerve.</p>';
@@ -5177,7 +5207,7 @@
         `<td>🚀 with ${t.minMembers} cats${t.oneAtATime ? '<br><small>one at a time: cats going to bed join, up to 85%</small>' : ''}</td></tr>`;
     });
     h += '</tbody></table>';
-    body.innerHTML = h;
+    setHtml(body, h);
   }
 
   function ensureTradingPanel() {
@@ -5196,7 +5226,7 @@
     const body = panel.querySelector('.msx-calc-body');
     const listings = apiState?.listings || [];
     const store = apiState?.storeItems || {};
-    if (!listings.length) { body.innerHTML = '<p class="msx-inv-note">No open listings read yet (open this page once it has loaded).</p>'; return; }
+    if (!listings.length) { setHtml(body, '<p class="msx-inv-note">No open listings read yet (open this page once it has loaded).</p>'); return; }
     // Cheapest open listing per item, since that is the one worth comparing against the store.
     const cheapest = new Map();
     const counts = new Map();
@@ -5262,7 +5292,7 @@
         `<td>${r.sellPrice != null ? money0(r.sellPrice) : '—'}</td><td>${profit}</td><td>${r.count}</td></tr>`;
     });
     h += '</tbody></table>';
-    body.innerHTML = h;
+    setHtml(body, h);
   }
 
   // ─── Whiskers & Co. (/whiskers) ───────────────────────────────────────────
@@ -5795,6 +5825,7 @@
       drawContractPay();
       ensureHeistsPanel();
       ensureCrewJobsPanel();
+      markLaunchCards();
       ensureTradingPanel();
       logShopPricesFromApi();
       drawWhiskers();
