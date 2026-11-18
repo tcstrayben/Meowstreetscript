@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.52.2
-// @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
+// @version      0.53.0
+// @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
 // @supportURL   https://github.com/tcstrayben/Meowstreetscript/issues
@@ -405,6 +405,12 @@
       if (Array.isArray(raw.strays)) {
         out.strays = raw.strays.filter((s) => s && typeof s.id === 'string').slice(0, 12).map((s) => ({ id: s.id, name: s.name, bonus: s.bonus, tiers: s.tiers, rare: !!s.rare,
           signature: s.signature ? { name: s.signature.name, description: s.signature.description } : null }));
+      }
+      // 💼 Job ranks (0.53.0, user request 2026-11-18 "infer the purrfessions rank ladder"): rank, title, the shifts it
+      // started at and the next rank's title and shifts, for the shared rank ladders (syncRungs).
+      if (Array.isArray(raw.careers)) {
+        out.careers = raw.careers.filter((c) => c && typeof c.job === 'string' && Number.isInteger(c.rank)).slice(0, 20)
+          .map((c) => ({ job: c.job, rank: c.rank, title: c.title, floor: c.rankFloor, next: c.nextRank, nextTitle: c.nextTitle, ranks: c.ranks }));
       }
       if (raw.stocks && typeof raw.stocks === 'object') {
         out.stocks = {
@@ -5425,7 +5431,10 @@
     if (!sharingOn() || rungBusy || typeof GM_xmlhttpRequest !== 'function' || !apiState || !apiState.street) return;
     const mine = [];
     apiState.street.crimes.forEach((c) => (c.rungs || []).forEach((r) => { if (r.got && r.text) mine.push([c.id, r.at, r.name, r.text]); }));
-    const sig = JSON.stringify(mine);
+    // 💼 0.53.0: each job's rank and the next one ([job, rank, title, shifts it starts at, next title, next rank's
+    // shifts, ranks in all]), so the alliance fills in every job's rank ladder. Nothing about you but your ranks.
+    const ranks = (apiState.careers || []).map((c) => [c.job, c.rank, c.title, c.floor, c.nextTitle, c.next, c.ranks]);
+    const sig = JSON.stringify([mine, ranks]);
     const last = GM_getValue(RUNG_SYNC_KEY, null) || {};
     if (last.sig === sig && Date.now() - (last.at || 0) < RUNG_SYNC_GAP_MS) return;
     GM_setValue(RUNG_SYNC_KEY, { sig, at: Date.now() });
@@ -5433,7 +5442,7 @@
     const done = () => { rungBusy = false; };
     GM_xmlhttpRequest({
       method: 'POST', url: RUNGS_URL, timeout: 15000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), rungs: mine }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), rungs: mine, ranks }),
       onload: (r) => { done(); let j = null; try { j = botJson(r); } catch (e) { /* not json */ } if (j && j.ok && sharingOn() && j.rungs && typeof j.rungs === 'object') { GM_setValue(RUNG_POOL_KEY, j.rungs); schedule(); } },
       onerror: done, ontimeout: done,
     });
