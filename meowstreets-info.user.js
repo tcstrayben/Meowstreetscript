@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.52.1
+// @version      0.52.2
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it. Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3644,7 +3644,9 @@
     const senseNew = JSON.stringify(sense) !== (sync.sense || 'null');
     // Tide and time-of-day changes seen since the last send (0.52.1).
     const clockTo = Number(sync.clockTo) || 0;
-    const tideCh = ((GM_getValue(TIDE_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo && c.span > 0);
+    // 0.52.2: changes logged before 0.52.1 have no span; they were only logged when two readings were under 30 min apart,
+    // so they go with a 30 min span (the 🎣 pier card's tide clock learns from everyone's history at once).
+    const tideCh = ((GM_getValue(TIDE_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo).map((c) => (c.span > 0 ? c : { ...c, span: TIDE_GAP }));
     const hourCh = ((GM_getValue(HOUR_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo);
     const clockNew = tideCh.length + hourCh.length > 0;
     if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !clockNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
