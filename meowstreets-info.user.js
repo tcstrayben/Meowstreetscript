@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.0
+// @version      0.54.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -653,13 +653,16 @@
     // for the crew bot's ⛓️ chain report and ✅ heist results (crew sharing only).
     // /api/fight/<code> (0.42.0) is a fight page's own reply: both cats' gear, for the ⚔️ record. /api/pier and anything
     // under it (0.42.0): the Pier page's weekly board, and the pier itself if a cast's reply carries it.
-    const handlerFor = (path) => HANDLERS[path] || (/^\/api\/fight\/[\w-]+$/.test(path) ? onFightResponse : /^\/api\/pier\//.test(path) ? onPierResponse : null);
+    // /api/crew/supplies (0.54.1): the Crew → Supplies tab's own reply (and its older pages), for the crew bot's 📦
+    // Supplies on the treasury desk; it needs the address too (an older page asks with ?before=).
+    const handlerForPath = (path) => HANDLERS[path] || (/^\/api\/fight\/[\w-]+$/.test(path) ? onFightResponse : /^\/api\/pier\//.test(path) ? onPierResponse : null);
+    const handlerFor = (url) => { const path = pathOf(url); return path === '/api/crew/supplies' ? (j) => onSuppliesResponse(j, url) : handlerForPath(path); };
     const realFetch = pageWin.fetch;
     if (typeof realFetch === 'function') {
       pageWin.fetch = function (...args) {
         const p = realFetch.apply(this, args);
         p.then((res) => {
-          try { const h = res && res.url && handlerFor(pathOf(res.url)); if (h) res.clone().json().then(h).catch(() => {}); } catch (e) { /* ignore */ }
+          try { const h = res && res.url && handlerFor(res.url); if (h) res.clone().json().then(h).catch(() => {}); } catch (e) { /* ignore */ }
         }).catch(() => {});
         return p;
       };
@@ -671,7 +674,7 @@
       const sendOrig = RealXHR.prototype.send;
       RealXHR.prototype.send = function (...args) {
         this.addEventListener('loadend', () => {
-          try { const h = this.__msxUrl && handlerFor(pathOf(this.__msxUrl)); if (h && this.responseText) h(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
+          try { const h = this.__msxUrl && handlerFor(this.__msxUrl); if (h && this.responseText) h(JSON.parse(this.responseText)); } catch (e) { /* ignore */ }
         });
         return sendOrig.apply(this, args);
       };
@@ -960,6 +963,8 @@
       .msx-ct-line b, #msx-ct-banner b { color:var(--msx-crew); }
       .msx-ct-line small, #msx-ct-banner small { color:var(--ms-smoke, #8d9289); }
       #msx-crewjobs { border-color:var(--msx-crew); }
+      #msx-supnote { margin:0 0 12px; padding:8px 12px; border-radius:10px; font-weight:600; background:rgba(0,0,0,.28); border:1px solid #e0b25a; }
+      #msx-supnote.is-ok { border-color:#7fc98a; font-weight:500; }
       #msx-crewjobs .msx-launch-rule { margin:8px 0; }
       #msx-crewjobs .msx-launch { list-style:none; margin:8px 0; padding:0; display:grid; gap:6px; }
       #msx-crewjobs .msx-launch li { padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12); }
@@ -1203,6 +1208,7 @@
   // active jobs (seats, members' names/levels, payout) -- the same things the Crew page already shows. Never your
   // account, cash, email or messages. Nothing is ever sent to MeowStreets itself.
   const CREW_BOT_URL = 'http://168.138.79.225:3001/v1/crew';
+  const SUPPLIES_BOT_KEY = 'ms_crew_supplies_bot_v1'; // what the bot said about the log (📭/✅ note)
   const CONTRACT_CUT_KEY = 'ms_contract_cut_v1'; // { cut, ends, paid: { contractId: [catId] }, at } from the crew bot's replies
   const LOAN_CATS_KEY = 'ms_loan_cats_v1'; // [catId] with an open 💳 bank loan, from the crew bot's replies
   const CREW_BOT_FEATS_URL = 'http://168.138.79.225:3001/v1/feats'; // hidden feats found by the crew (Merits page)
@@ -1315,6 +1321,9 @@
     // The whole treasury log (0.49.8, user request: tell loan payments from money passing through) and the bank's rates.
     const lg = ledgerForBot();
     if (lg) body.ledger = lg;
+    // 📦 The crew's supplies from Crew → Supplies (0.54.1): stash, gear out, the log rows.
+    const sp = suppliesForBot();
+    if (sp) body.supplies = sp;
     if (apiState.bankTerms && apiState.bankTerms.length) body.bankTerms = apiState.bankTerms;
     // Your open bank deposits (0.46.6, user request: a 💳 bank loan's interest share, how much and when), only when
     // the bot's last reply named your cat id as having one (`loanCats`), so nobody else's deposits are ever sent; and
@@ -1345,6 +1354,13 @@
           const ids = j.loanCats.map(Number).filter(Number.isInteger);
           if (JSON.stringify(ids) !== JSON.stringify(GM_getValue(LOAN_CATS_KEY, []))) GM_setValue(LOAN_CATS_KEY, ids);
         }
+        // 📦 How up to date the crew's supplies log is on the bot (0.54.1): for the 📭/✅ note on the Crew page.
+        if (j && j.supplies && typeof j.supplies === 'object') {
+          const sp = j.supplies, pos = (x) => (Number.isFinite(Number(x)) && Number(x) > 0 ? Number(x) : null);
+          const gap = Array.isArray(sp.gap) && pos(sp.gap[0]) && pos(sp.gap[1]) ? [pos(sp.gap[0]), pos(sp.gap[1])] : null;
+          GM_setValue(SUPPLIES_BOT_KEY, { to: pos(sp.to), gap, gaps: pos(sp.gaps) || 0, perPage: pos(sp.perPage), at: Date.now() });
+          ensureSuppliesNote();
+        }
         if (done) done(j || { ok: false, error: 'bad reply (' + r.status + ')' });
       },
       onerror: () => { if (done) done({ ok: false, error: 'could not reach the MeowStreets Info server' }); },
@@ -1362,7 +1378,7 @@
     const wait = shareLastAt + SHARE_MIN_GAP_MS - Date.now();
     if (wait > 0) { if (!shareTimer) shareTimer = setTimeout(() => { shareTimer = null; shareCrew(); }, wait); return; }
     shareLastSig = sig; shareLastAt = Date.now();
-    sendToCrewBot(body);
+    sendToCrewBot(body, (r) => { if (r && r.ok && body.supplies) suppliesSent(body.supplies.at); });
   }
 
   // ─── Shared stock prices (crew pool, 0.20.0) ──────────────────────────────
@@ -3060,6 +3076,119 @@
     const list = saved && Array.isArray(saved.rows) ? saved.rows.filter((r) => r.at > Date.now() - 8 * 86400000) : [];
     return list.length ? list : null;
   }
+  // 📦 The crew's supplies (0.54.1, user request 2026-11-22: "see who deposits and uses what", on the crew bot's
+  // treasury desk). The Crew → Supplies tab's own reply: the stash (each item, how many, its value, who has borrowed
+  // gear) and the newest 30 log rows (an older page with ?before=), each { id, at, kind, item, quantity, cat, other }
+  // (deposit, use, lend, take, contract, access). Nothing is asked of the game: only what the tab itself loaded.
+  // spans = the stretches of time whose every row was seen (the first page reaches now; `more: false` = from the start).
+  // Kept: the stash, and the rows (up to 300 of the last 31 days: a 30-day backfill right after the update, user
+  // 2026-11-22; the bot keeps 35) and stretches until the bot has them.
+  const SUPPLIES_KEY = 'ms_crew_supplies_v1';
+  const SUPPLIES_WAIT_MAX = 300; // rows waiting to be sent (the bot takes 300 a message)
+  function onSuppliesResponse(json, url) {
+    if (!json || !Array.isArray(json.items) || !Array.isArray(json.log)) return;
+    const now = Date.now();
+    const who = (c) => (c && Number.isInteger(c.id) && typeof c.name === 'string' ? { id: c.id, name: c.name.slice(0, 40) } : null);
+    const rows = json.log.filter((r) => r && Number.isInteger(r.id) && Number(r.at) > 0 && typeof r.kind === 'string')
+      .map((r) => ({ id: r.id, at: Number(r.at), kind: r.kind.slice(0, 20), item: String(r.item || '').slice(0, 30), quantity: Number.isInteger(r.quantity) ? r.quantity : 0, cat: who(r.cat), other: who(r.other) }));
+    // Pages scrolled through join up (API log 2026-11-22: each older page starts right below the one before it, at its
+    // `before` = its oldest row id). The address isn't relied on: a page whose rows all sit below the page seen in the
+    // last 30 minutes reaches up to that page's oldest row. Any other page reaches now only if it has no query and is
+    // at least as new as anything seen (else just its own rows: a tab can come back on an old page).
+    let query = false;
+    try { query = new URL(url, location.href).search.length > 1; } catch (e) { /* none */ }
+    const saved = GM_getValue(SUPPLIES_KEY, null) || {};
+    const cut = now - 31 * 86400000;
+    const have = new Map((Array.isArray(saved.rows) ? saved.rows : []).map((r) => [r.id, r]));
+    const ats = rows.map((r) => r.at), ids = rows.map((r) => r.id);
+    const maxId = ids.length ? Math.max(...ids) : null, minId = ids.length ? Math.min(...ids) : null;
+    const last = saved.lastPage;
+    const joins = maxId != null && last && now - last.at < 30 * 60000 && maxId < last.minId;
+    const topId = Math.max(saved.topId || 0, have.size ? Math.max(...have.keys()) : 0);
+    const from = json.more === false ? 0 : (ats.length ? Math.min(...ats) : null);
+    const to = joins ? last.minAt : (!query && (maxId == null || maxId >= topId) ? now : (ats.length ? Math.max(...ats) : null));
+    rows.forEach((r) => have.set(r.id, r));
+    const spans = (Array.isArray(saved.spans) ? saved.spans : []).filter((x) => x[1] > cut);
+    if (from != null && to != null && to >= from) spans.push([from, to]);
+    // More than 300 waiting (Older pressed faster than the script sends, once per 15 s): the oldest rows don't fit, so
+    // the time they cover no longer counts as seen (no silent holes; the note then says to go back over it).
+    const waiting = [...have.values()].filter((r) => r.at > cut).sort((a, b) => b.at - a.at);
+    const keep = waiting.slice(0, SUPPLIES_WAIT_MAX);
+    let kept = spans;
+    if (waiting.length > keep.length) { const floor = keep[keep.length - 1].at; kept = spans.map((x) => [Math.max(x[0], floor), x[1]]).filter((x) => x[1] > x[0]); }
+    const next = { at: now, sentAt: saved.sentAt || 0, lastPage: minId != null ? { minId, minAt: Math.min(...ats), at: now } : saved.lastPage, topId: Math.max(topId, maxId || 0), rows: keep, spans: kept.slice(-30),
+      droppedAt: waiting.length > keep.length ? now : saved.droppedAt || 0 };
+    // Every page carries the whole stash as it is now.
+    next.stash = { use: typeof json.use === 'string' ? json.use : null, value: Number(json.value) || 0, onLoan: Number(json.onLoan) || 0, at: now,
+        items: json.items.filter((it) => it && typeof it.id === 'string').map((it) => ({ id: it.id, kind: String(it.kind || ''), quantity: Number(it.quantity) || 0, value: Number(it.value) || 0,
+          loans: (Array.isArray(it.loans) ? it.loans : []).map((l) => ({ to: who(l && l.to), by: who(l && l.by), at: Number(l && l.at) || 0 })) })) };
+    GM_setValue(SUPPLIES_KEY, next);
+    ensureSuppliesNote();
+    shareCrew();
+  }
+  // For the crew bot (crew sharing on): sent until the bot has said ok once, then only when the tab shows something new.
+  function suppliesForBot() {
+    const s = GM_getValue(SUPPLIES_KEY, null);
+    if (!s || !(s.at > (s.sentAt || 0))) return null;
+    const ids = new Set();
+    (s.rows || []).forEach((r) => { ids.add(r.item); });
+    ((s.stash && s.stash.items) || []).forEach((it) => ids.add(it.id));
+    const names = {};
+    ids.forEach((id) => { const it = apiState && apiState.storeItems && apiState.storeItems[id]; if (it && it.name) names[id] = it.name; });
+    return { at: s.at, stash: s.stash || null, log: s.rows || [], spans: s.spans || [], names };
+  }
+  // Once the bot has them, the rows and stretches go (it keeps them); unless the tab showed more meanwhile.
+  function suppliesSent(at) {
+    const s = GM_getValue(SUPPLIES_KEY, null);
+    if (s && at >= s.at) GM_setValue(SUPPLIES_KEY, { ...s, sentAt: at, rows: [], spans: [] });
+  }
+
+  // 📭/✅ Supplies log note at the top of the Crew page (user request 2026-11-22: "located on the crew page for now as
+  // like a header above everything"), crew sharing on only. The game shows 30 rows a page (8–13 hours for our crew),
+  // so whoever looks is told whether to open Crew → Supplies and about how many times to press Older. Counted by
+  // time (row ids are game-wide): the bot's newest gap and when it last saw every row, plus pages this script has
+  // seen but the bot hasn't confirmed yet. No requests of its own: it only reads what the bot's reply said.
+  function suppliesNoteText(now) {
+    const b = GM_getValue(SUPPLIES_BOT_KEY, null);
+    const s = GM_getValue(SUPPLIES_KEY, null) || {};
+    if (!b || !b.to) return { ok: false, t: '📭 Supplies log: nothing read yet. Open the Supplies tab so the bot can see who put in and used what.' };
+    const page = b.perPage || 10 * 3600000;
+    const ago = (ms) => (ms < 3600000 ? `${Math.max(1, Math.round(ms / 60000))} min` : `${Math.round(ms / 3600000)} h`);
+    const pending = (Array.isArray(s.spans) ? s.spans : []).map((x) => x[1]);
+    const to = Math.max(b.to, ...pending);
+    // Scrolling back right now: count from the oldest row on screen, not from now.
+    const scrolling = s.lastPage && now - s.lastPage.at < 10 * 60000;
+    const here = scrolling ? s.lastPage.minAt : now;
+    // Too fast (user request 2026-11-22: "a flag for have to wait for script 15 seconds ... if we're going too fast"):
+    // the script sends once per 15 s and holds 300 rows (10 pages) meanwhile.
+    const waiting = Array.isArray(s.rows) ? s.rows.length : 0;
+    const secs = Math.max(1, Math.ceil((shareLastAt + SHARE_MIN_GAP_MS - now) / 1000));
+    if (scrolling && s.droppedAt && now - s.droppedAt < 2 * 60000 && waiting) return { ok: false, t: `⚠️ Too fast: some older rows didn't fit while the script waited to send. Stop for ~${secs} s; this note will then say what to go back over.` };
+    if (scrolling && waiting >= SUPPLIES_WAIT_MAX - 90) return { ok: false, t: `⏳ Wait ~${secs} s before pressing Older again: the script sends every 15 s and has ${waiting} of ${SUPPLIES_WAIT_MAX} rows waiting.` };
+    const presses = (back) => Math.max(1, Math.ceil((here - back) / page));
+    if (now - to > page / 2) {
+      const n = Math.ceil((now - to) / page) - 1;
+      return { ok: false, t: `📭 Supplies log last read ${ago(now - to)} ago: open the Supplies tab${n > 0 ? `, then press Older about ${n} time${n === 1 ? '' : 's'}` : ''} until this says caught up.` };
+    }
+    if (b.gap) {
+      const n = presses(b.gap[0]);
+      const more = b.gaps > 1 ? ` (and ${b.gaps - 1} older)` : '';
+      return { ok: false, t: `📭 Supplies log: ${ago(b.gap[1] - b.gap[0])} not seen, from ${ago(now - b.gap[0])} ago${more}. On the Supplies tab press Older about ${n} more time${n === 1 ? '' : 's'}.` };
+    }
+    return { ok: true, t: `✅ Supplies log all caught up for the last 7 days (last read ${ago(now - to)} ago).` };
+  }
+  function ensureSuppliesNote() {
+    let el = document.getElementById('msx-supnote');
+    if (location.pathname.replace(/\/+$/, '') !== '/crew' || !crewSharingOn()) { el?.remove(); return; }
+    const host = document.querySelector('.main-content') || document.querySelector('main');
+    if (!host) return;
+    const note = suppliesNoteText(Date.now());
+    if (!el) { el = document.createElement('p'); el.id = 'msx-supnote'; }
+    if (host.firstElementChild !== el) host.prepend(el);
+    const cls = note.ok ? 'is-ok' : 'is-todo';
+    if (el.className !== cls) el.className = cls;
+    if (el.textContent !== note.t) el.textContent = note.t;
+  }
   // For the crew bot (sharing on): the last week of them.
   function treasuryPaysForBot() {
     const saved = GM_getValue(TREASURY_PAYS_KEY, null);
@@ -4191,7 +4320,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); ensureSuppliesNote(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -5878,6 +6007,7 @@
       drawContractPay();
       ensureHeistsPanel();
       ensureCrewJobsPanel();
+      ensureSuppliesNote();
       markLaunchCards();
       ensureTradingPanel();
       logShopPricesFromApi();
