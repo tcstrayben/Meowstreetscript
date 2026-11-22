@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.53.1
+// @version      0.54.0
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -328,8 +328,12 @@
           const tierDef = (raw.crewJobTiers || []).find((t) => t && t.name === name) || (raw.crewJobTiers || []).find((t) => t && t.tier === mine.tier);
           return {
             id: mine.id, mine: isMine(mine), name, tier: mine.tier, minLevel: tierDef ? tierDef.level : null, status: mine.status, endsAt: mine.ends_at || null,
+            // 0.54.0: who opened the job (the bot pings them on a 🐟 "scrap this job" post), and each member's cat id,
+            // jail end and vet flag (the bot's 🚀 launch ping waits until enough cats in the job are free).
+            plannerId: Number.isInteger(mine.planner_id) ? mine.planner_id : null,
             roles: Array.isArray(mine.roles) ? mine.roles.slice() : [],
-            members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready })),
+            members: (mine.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, ready: !!m.ready,
+              id: Number.isInteger(m.user_id) ? m.user_id : null, jailUntil: Number(m.jail_until) || null, atVet: m.at_vet === true })),
             minMembers: mine.minMembers ?? (tierDef ? tierDef.minMembers : null), maxMembers: mine.maxMembers ?? (tierDef ? tierDef.maxMembers : null),
             cut: mine.cut, take: mine.take, respect: mine.respectReward, nerve: mine.nerve, stake: mine.stake,
             chance: mine.chance != null ? mine.chance : mine.previewChance,
@@ -971,6 +975,10 @@
       #msx-catgear { margin:8px 0; padding:6px 10px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.5; }
       #msx-catgear .msx-catgear-stats { opacity:.85; }
       .msx-cafe b, .msx-pier b { font-weight:600; }
+      .msx-pier { flex-wrap:wrap; }
+      .msx-pier-remind { flex-basis:100%; display:flex; align-items:center; gap:6px; font-size:11px; color:var(--ms-gold, #e9c46a); }
+      .msx-pier-ok { margin-left:auto; padding:0 6px; border:1px solid var(--ms-line, rgba(231,237,225,.25)); border-radius:6px; background:transparent; color:inherit; font:inherit; cursor:pointer; }
+      .msx-pier-ok:hover { border-color:var(--ms-lime, #b4df87); color:var(--ms-lime, #b4df87); }
       #msx-pierlog { margin:10px 0; padding:8px 12px; border-left:3px solid var(--ms-gold, #e9c46a); font-size:12px; line-height:1.55; }
       #msx-pierlog .msx-pierlog-t { font-weight:600; margin-bottom:4px; }
       .msx-kpay { margin-top:8px; padding-top:6px; border-top:1px dashed var(--ms-line, rgba(231,237,225,.15)); font-size:12px; }
@@ -1271,8 +1279,8 @@
     const body = { v: 1, sender: shareId(), crew: { name: c.name, id: c.id, cat: apiState.myId || null, ...(code ? { tok: code.code } : {}), chain: c.chain, chainEndsAt: c.chainEndsAt, seenAt: apiState.at } };
     if (apiState.crewJobsSeen) {
       body.jobs = (apiState.myCrewJobs || []).map((j) => ({
-        id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles,
-        members: (j.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level })),
+        id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles, plannerId: j.plannerId,
+        members: (j.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, id: m.id, jailUntil: m.jailUntil, atVet: m.atVet })),
         minMembers: j.minMembers, maxMembers: j.maxMembers, endsAt: j.endsAt,
         cut: j.cut, take: j.take, respect: j.respect, nerve: j.nerve, stake: j.stake, chance: j.chance,
       }));
@@ -3371,7 +3379,11 @@
       // Since 2026-11-07 a spot can name tides: bass at The end on "high" and "mid" (the game's words, not `tide`'s).
       notes: Object.fromEntries(Object.entries(p.notes && typeof p.notes === 'object' ? p.notes : {})
         .map(([k, n]) => [k, ((n && Array.isArray(n.at)) ? n.at : []).filter((a) => a && a.spot)
-          .map((a) => ({ spot: a.spot, tide: Array.isArray(a.tide) ? a.tide.filter((t) => typeof t === 'string') : [] }))]).filter(([, s]) => s.length)),
+          // 0.54.0: the time of day too (`hour`: dawn/day/dusk/night; none = any time), for the table's 🕐 column.
+          .map((a) => ({ spot: a.spot, tide: Array.isArray(a.tide) ? a.tide.filter((t) => typeof t === 'string') : [], hour: Array.isArray(a.hour) ? a.hour.filter((t) => typeof t === 'string') : [] }))]).filter(([, s]) => s.length)),
+      // 0.54.0: whether the book has told WHEN each fish bites (`when: false` = only where; its empty tide/hour lists
+      // then mean "not told", not "any").
+      notesWhen: Object.fromEntries(Object.entries(p.notes && typeof p.notes === 'object' ? p.notes : {}).map(([k, n]) => [k, !!(n && n.when)])),
       rawNotes: p.notes && typeof p.notes === 'object' ? p.notes : null,
       // Harbour sense, the fishing level: { level, done, toGo (fish to keep for the next), percent, reads ("junk" at 3+) }.
       sense: p.sense && Number.isFinite(p.sense.level) ? { level: p.sense.level, done: !!p.sense.done, toGo: Number(p.sense.toGo) || 0, percent: Number(p.sense.percent) || 0, reads: p.sense.reads || null } : null,
@@ -3391,7 +3403,20 @@
     return utcDay(at) === utcDay(Date.now()) ? Math.max(0, p.limit - p.today) : p.limit;
   }
   const PIER_ICON = '<svg viewBox="0 0 48 48" class="msx-item-icon" aria-hidden="true"><path d="M8 6 40 6" stroke="#8A8F86" stroke-width="3" stroke-linecap="round"/><path d="M36 6v20" stroke="#E7EDE1" stroke-width="1.6"/><path d="M36 26c0 5-4 7-7 5" fill="none" stroke="#E7EDE1" stroke-width="2.2" stroke-linecap="round"/><path d="M6 36c6-6 16-6 22 0-6 6-16 6-22 0Z" fill="#7FB3C8"/><path d="M28 36l7-5v10Z" fill="#7FB3C8"/><circle cx="12" cy="35" r="1.4" fill="#182316"/></svg>';
-  let pierBoard = null; // [{ name, fish, grams, me }] from the Pier page's own /api/pier
+  let pierBoard = null; // [{ id, name, fish, grams, me }] from the Pier page's own /api/pier
+  let pierBoardAt = 0; // when it came (0.53.2: sent to the bot with the fish pool, for the weekly biggest-fish record)
+  // 🏆 Sunday reminder (0.53.2, user request 2026-11-19): on Sundays (UTC), for sharing cats, the pier pill asks you to
+  // open the pier close to the 00:00 UTC reset, so the week's final board reaches the bot. Hidden by its ✓ (until next
+  // Sunday), or by itself once the board was read in the last 2 hours before the reset.
+  const PIER_REMIND_KEY = 'ms_pier_remind_v1'; // the UTC day (Sunday) it was hidden
+  function pierRemindOn(now) {
+    if (!sharingOn() || new Date(now).getUTCDay() !== 0) return false;
+    const day = utcDay(now);
+    if (GM_getValue(PIER_REMIND_KEY, '') === day) return false;
+    const resetAt = Date.parse(day + 'T00:00:00Z') + 86400000;
+    const boardAt = Math.max(pierBoardAt, Number((GM_getValue('ms_fish_sync_v2', null) || {}).boardAt) || 0); // FISH_SYNC_KEY (set further down)
+    return !(boardAt >= resetAt - 2 * 3600000 && boardAt < resetAt);
+  }
   function updatePierPill() {
     const p = apiState && apiState.pier;
     let el = document.querySelector('.msx-pier');
@@ -3402,6 +3427,13 @@
       el = document.createElement('a');
       el.href = '/pier-nine';
       el.className = 'msx-ticker msx-pier msx-pill-link';
+      // The Sunday reminder's ✓ hides it until next Sunday; the rest of the pill is still the link to the pier.
+      el.addEventListener('click', (e) => {
+        if (!e.target.closest('.msx-pier-ok')) return;
+        e.preventDefault(); e.stopPropagation();
+        GM_setValue(PIER_REMIND_KEY, utcDay(Date.now()));
+        updatePierPill();
+      });
       if (anchor.classList.contains('msx-ticker')) anchor.after(el); else anchor.parentNode.insertBefore(el, anchor);
     }
     const now = Date.now();
@@ -3416,7 +3448,9 @@
     const soonOff = next && next.off - now < 24 * 3600000 ? ` · 1st off ${fmtClock(next.off - now)}` : '';
     const td = tideNow();
     const tideTag = td && td.at && td.at > now ? ` · ${td.next} ${fmtClock(td.at - now)}` : '';
-    const html = `${PIER_ICON}${casts}${fresh.length ? ` · ${fmtMoney(worth)}` : ''}${soonOff}${tideTag}`;
+    const remind = pierRemindOn(now);
+    const html = `${PIER_ICON}${casts}${fresh.length ? ` · ${fmtMoney(worth)}` : ''}${soonOff}${tideTag}`
+      + (remind ? '<span class="msx-pier-remind">🏆 Sunday: check the pier before reset<button type="button" class="msx-pier-ok" title="Hide until next Sunday">✓</button></span>' : '');
     if (el.innerHTML !== html) el.innerHTML = html;
     el.classList.toggle('soon', left > 0);
     const lines = [`Pier Nine. ${left} of ${p.limit} fish left to keep today; after that they go back (new day at 00:00 UTC, ${fmtTime(reset)} your time).`];
@@ -3427,6 +3461,7 @@
     const mine = pierBoard ? pierBoard.findIndex((b) => b.me) : -1;
     if (mine >= 0) lines.push(`This week's biggest: you are #${mine + 1} (${fishName(pierBoard[mine].fish)} ${kg(pierBoard[mine].grams)}).`);
     if (td) lines.push(`Tide: ${tideLine(now)}.`);
+    if (remind) lines.push(`Sunday: the week's biggest-fish board resets at 00:00 UTC (${fmtTime(reset)} your time). Open the pier as close to then as you can so the crew keeps this week's final board. ✓ hides this until next Sunday.`);
     if (p.sense) lines.push(`Harbour sense ${p.sense.level}${p.sense.done ? '' : `: ${p.sense.toGo} more fish to keep for level ${p.sense.level + 1} (${p.sense.percent}%)`}.`);
     lines.push('Figures as of your last page load.');
     setTitle(el, lines.join('\n'));
@@ -3435,7 +3470,9 @@
   function onPierResponse(json) {
     if (json && Array.isArray(json.board)) {
       const me = apiState && apiState.myId;
-      pierBoard = json.board.filter((b) => b && b.fish).map((b) => ({ name: b.name || '', fish: b.fish, grams: Number(b.grams) || 0, me: b.id === me }));
+      pierBoard = json.board.filter((b) => b && b.fish).map((b) => ({ id: b.id, name: b.name || '', fish: b.fish, grams: Number(b.grams) || 0, me: b.id === me }));
+      pierBoardAt = Date.now();
+      if (apiState && apiState.pier) syncFish(); // the board goes to the bot straight away (0.53.2)
     }
     // A reply that carries the pier itself (a cast's reply may) counts like a state.
     const p = json && (json.pier || (Array.isArray(json.bucket) && Number.isFinite(json.today) ? json : null));
@@ -3660,19 +3697,22 @@
     const tideCh = ((GM_getValue(TIDE_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo).map((c) => (c.span > 0 ? c : { ...c, span: TIDE_GAP }));
     const hourCh = ((GM_getValue(HOUR_KEY, null) || {}).changes || []).filter((c) => c.at > clockTo);
     const clockNew = tideCh.length + hourCh.length > 0;
-    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !clockNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
+    // The game's "Biggest this week" board (0.53.2): public, the same for every cat; sent while under an hour old.
+    const board = pierBoard && pierBoard.length && Date.now() - pierBoardAt < 3600000 ? { at: pierBoardAt, list: pierBoard.map(({ id, name, fish, grams }) => ({ id, name, fish, grams })) } : null;
+    const boardNew = !!board && board.at > (Number(sync.boardAt) || 0);
+    if (gap < FISH_SEND_GAP_MS || (!fresh.length && !senseNew && !clockNew && !boardNew && !(onPier && gap >= FISH_REFRESH_MS))) return;
     const send = fresh.slice(0, FISH_SEND_MAX);
     fishSyncAt = Date.now(); fishSyncBusy = true;
     GM_xmlhttpRequest({
       method: 'POST', url: FISH_POOL_URL, timeout: 20000, headers: { 'Content-Type': 'application/json' },
-      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), catches: send, notes: apiState.pier.rawNotes || null, sense, tides: tideCh, hours: hourCh }),
+      data: JSON.stringify({ v: 1, sender: shareId(), crew: shareCrewRef(), catches: send, notes: apiState.pier.rawNotes || null, sense, tides: tideCh, hours: hourCh, board }),
       onload: (r) => {
         fishSyncBusy = false;
         let j = null;
         try { j = botJson(r); } catch (e) { return; }
         if (!j || !j.ok) return;
         const clockSent = Math.max(clockTo, ...tideCh.map((c) => c.at), ...hourCh.map((c) => c.at));
-        GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense), clockTo: clockSent });
+        GM_setValue(FISH_SYNC_KEY, { sentTo: send.length ? send[send.length - 1].at : sentTo, sense: JSON.stringify(sense), clockTo: clockSent, boardAt: board ? board.at : Number(sync.boardAt) || 0 });
         if (sharingOn()) GM_setValue(FISH_CREW_KEY, { at: Date.now(), n: Number(j.n) || 0, kinds: j.kinds || {}, notes: j.notes || {}, sense: j.sense || {} });
         schedule();
         if (fresh.length > FISH_SEND_MAX) setTimeout(syncFish, FISH_SEND_GAP_MS + 1000);
@@ -3715,24 +3755,37 @@
       return noted;
     };
     const bite = Object.fromEntries(all.map((f) => [f, biting(f)]));
-    const rows = all.filter((f) => !isJunk(f)).sort((a, b) => !!bite[b] - !!bite[a] || avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0)).map((f) => {
+    // 0.54.0 (user 2026-11-21: "untidy … show fish, tide, day/night/dusk/dawn and $ value more neatly, and organize from
+    // most valuable to least"): sorted by average value only (✓ biting-now fish stay marked and highlighted, not moved
+    // up), and separate 🌊 Tide and 🕐 Time columns. Both from the game's fish book when it says (per spot; a spot that
+    // names none = any), else from catches (all four tides / times seen = any).
+    const GAME_TIDE = { high: 'High', low: 'Low', mid: 'Mid' };
+    const HOUR_LABEL = { dawn: '🌅 Dawn', day: '☀️ Day', dusk: '🌇 Dusk', night: '🌙 Night' };
+    const bookOf = (f) => (p.notes[f] || []);
+    const fromBook = (f, part, label) => {
+      const at = bookOf(f);
+      // The book doesn't say: no notes, "when" not told yet, or (time of day) no spot names one.
+      if (!at.length || !(p.notesWhen || {})[f] || (part === 'hour' && !at.some((a) => a.hour.length))) return null;
+      if (at.some((a) => !a[part].length)) return 'any';
+      return [...new Set(at.flatMap((a) => a[part]))].map((x) => label[x] || x).join(' / ');
+    };
+    const fromCatches = (o, label) => { const l = most(o); return !l.length ? null : l.length >= 4 ? 'any' : l.map((x) => label[x] || x).join(' / '); };
+    const rows = all.filter((f) => !isJunk(f)).sort((a, b) => avg(b) - avg(a) || (p.book[b] || 0) - (p.book[a] || 0)).map((f) => {
       const k = kinds[f] || { spots: {}, tides: {}, hours: {} };
       const nt = notes[f] || {};
       const tick = bite[f] ? ` <span class="msx-pf-now" title="Probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''})${bite[f].length ? ': the game\'s notes say ' + escHtml(bite[f].map(spotName).join(', ')) : ': caught at this tide before'}">✓</span>` : '';
-      const spots = [...new Set([...most(k.spots), ...Object.keys(nt)])]
-        .map((s) => escHtml(spotName(s)) + (nt[s] && nt[s].length ? ` <span class="msx-pf-dim">(${escHtml(nt[s].join('/'))})</span>` : ''));
-      const tides = most(k.tides);
-      const hours = Object.keys(k.hours);
-      const when = [tides.length >= 4 ? 'any tide' : tides.map((t) => TIDE_SHORT[t] || t).join(', '), hours.length === 1 ? hours[0] : ''].filter(Boolean).join(' · ');
-      return `<tr${bite[f] ? ' class="now"' : ''}><td><b>${escHtml(fishName(f))}</b>${tick}</td><td>${spots.join(', ') || '?'}</td><td>${escHtml(when) || '?'}</td>` +
-        `<td>${avg(f) >= 0 ? '$' + n0(Math.round(avg(f))) : '?'}</td><td>${k.w ? weight(k) : p.best[f] > 0 ? 'best ' + gOrKg(p.best[f]) : '?'}</td></tr>`;
+      const spots = [...new Set([...most(k.spots), ...Object.keys(nt)])].map((s) => escHtml(spotName(s)));
+      const tideCol = fromBook(f, 'tide', GAME_TIDE) || fromCatches(k.tides, TIDE_SHORT);
+      const timeCol = fromBook(f, 'hour', HOUR_LABEL) || fromCatches(k.hours, HOUR_LABEL);
+      return `<tr${bite[f] ? ' class="now"' : ''}><td><b>${escHtml(fishName(f))}</b>${tick}</td><td>${avg(f) >= 0 ? '$' + n0(Math.round(avg(f) / 10) * 10) : '?'}</td>` +
+        `<td>${k.w ? weight(k) : p.best[f] > 0 ? 'best ' + gOrKg(p.best[f]) : '?'}</td><td>${escHtml(tideCol || '?')}</td><td>${escHtml(timeCol || '?')}</td><td>${spots.join(', ') || '?'}</td></tr>`;
     });
     const junk = all.filter(isJunk).map(fishName);
     const n = crew ? crew.n : Object.values(kinds).reduce((s, k) => s + k.n, 0);
     return {
       title: crew ? `🎣 Pier fish · script users' ${n0(n)} catches` : `🎣 Pier fish · your ${n0(n)} catches (verify and share on the Account page to see everyone's)`,
-      html: (rows.length ? `<table class="msx-pf"><thead><tr><th>Fish</th><th>Where</th><th>When</th><th>Avg</th><th>Weight</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div>No fish yet.</div>') +
-        (rows.length && tide ? `<div class="msx-pf-dim">✓ = probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''}), from the game's notes and past catches. Ticked fish are listed first, best paying first.</div>` : '') +
+      html: (rows.length ? `<table class="msx-pf"><thead><tr><th>Fish</th><th>💰 Avg</th><th>Weight</th><th>🌊 Tide</th><th>🕐 Time</th><th>📍 Where</th></tr></thead><tbody>${rows.join('')}</tbody></table>` : '<div>No fish yet.</div>') +
+        (rows.length ? `<div class="msx-pf-dim">Most valuable first.${tide ? ` ✓ = probably biting now (${escHtml(tide)}${hour ? ', ' + escHtml(hour) : ''}), from the game's notes and past catches.` : ''} Tide and time: the game's fish book when it says, else past catches.</div>` : '') +
         (junk.length ? `<div class="msx-pf-dim">Junk: ${junk.map(escHtml).join(', ')}</div>` : ''),
     };
   }
