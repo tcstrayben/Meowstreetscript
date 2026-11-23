@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.1
+// @version      0.54.2
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3081,8 +3081,8 @@
   // gear) and the newest 30 log rows (an older page with ?before=), each { id, at, kind, item, quantity, cat, other }
   // (deposit, use, lend, take, contract, access). Nothing is asked of the game: only what the tab itself loaded.
   // spans = the stretches of time whose every row was seen (the first page reaches now; `more: false` = from the start).
-  // Kept: the stash, and the rows (up to 300 of the last 31 days: a 30-day backfill right after the update, user
-  // 2026-11-22; the bot keeps 35) and stretches until the bot has them.
+  // Kept: the stash, and the rows (up to 300, any age: the bot keeps them all, user 2026-11-22 "lets keep it all", so
+  // scrolling back to the start of the game's log fills it in) and stretches until the bot has them.
   const SUPPLIES_KEY = 'ms_crew_supplies_v1';
   const SUPPLIES_WAIT_MAX = 300; // rows waiting to be sent (the bot takes 300 a message)
   function onSuppliesResponse(json, url) {
@@ -3098,7 +3098,7 @@
     let query = false;
     try { query = new URL(url, location.href).search.length > 1; } catch (e) { /* none */ }
     const saved = GM_getValue(SUPPLIES_KEY, null) || {};
-    const cut = now - 31 * 86400000;
+    const cut = 0; // no age limit (0.54.2): rows only wait here until the bot has them
     const have = new Map((Array.isArray(saved.rows) ? saved.rows : []).map((r) => [r.id, r]));
     const ats = rows.map((r) => r.at), ids = rows.map((r) => r.id);
     const maxId = ids.length ? Math.max(...ids) : null, minId = ids.length ? Math.min(...ids) : null;
