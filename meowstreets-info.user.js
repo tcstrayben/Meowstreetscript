@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.2
+// @version      0.54.3
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3590,10 +3590,54 @@
     const mine = pierBoard ? pierBoard.findIndex((b) => b.me) : -1;
     if (mine >= 0) lines.push(`This week's biggest: you are #${mine + 1} (${fishName(pierBoard[mine].fish)} ${kg(pierBoard[mine].grams)}).`);
     if (td) lines.push(`Tide: ${tideLine(now)}.`);
-    if (remind) lines.push(`Sunday: the week's biggest-fish board resets at 00:00 UTC (${fmtTime(reset)} your time). Open the pier as close to then as you can so the crew keeps this week's final board. ✓ hides this until next Sunday.`);
+    if (remind) lines.push(`Sunday: the week's biggest-fish board resets at 00:00 UTC (${fmtTime(reset)} your time). Open the pier as close to then as you can so the crew keeps this week's final board: open the noticeboard on its "Biggest this week" tab. ✓ hides this until next Sunday.`);
     if (p.sense) lines.push(`Harbour sense ${p.sense.level}${p.sense.done ? '' : `: ${p.sense.toGo} more fish to keep for level ${p.sense.level + 1} (${p.sense.percent}%)`}.`);
     lines.push('Figures as of your last page load.');
     setTitle(el, lines.join('\n'));
+  }
+  // 0.54.3 (user report 2026-11-23: the bot never got a single board): the script starts after a page has loaded, so a
+  // fresh load of the Pier page fetches /api/pier before the script listens and the board above is missed. So the board
+  // is also read off the page: the noticeboard's "Biggest this week" tab, while you have it open (only read; the script
+  // never opens or clicks it). The page shows kg to one decimal, so grams are to the nearest 100 g; when the reply above
+  // gave the same board, its exact grams are kept. A fish name that matches no known kind skips the whole reading
+  // rather than send a wrong fish. Read again at most every 30 min while unchanged (the Sunday close-to-reset reading).
+  const PIER_KINDS = ['bluefin', 'swordfish', 'turbot', 'stingray', 'catfish', 'octopus', 'sardine', 'puffer', 'moonfish', 'koi', 'herring', 'monkfish', 'carp', 'bass', 'crab', 'mullet', 'conger', 'goldfish', 'boot', 'can', 'cone'];
+  const PIER_BOARD_REREAD_MS = 30 * 60000;
+  let pierBoardSig = '';
+  function readPierBoardPage() {
+    if (location.pathname.replace(/\/+$/, '') !== '/pier-nine') return;
+    const tab = [...document.querySelectorAll('.pl-sheet [role="tab"][aria-selected="true"]')].find((t) => /biggest this week/i.test(t.textContent));
+    const sheet = tab && tab.closest('.pl-sheet');
+    const table = sheet && sheet.querySelector('table.pl-table');
+    if (!table) return;
+    const kinds = new Set([...PIER_KINDS, ...Object.keys((apiState && apiState.pier && apiState.pier.book) || {})]);
+    const me = apiState && apiState.myId;
+    const list = [];
+    for (const tr of table.querySelectorAll('tbody tr')) {
+      const td = tr.querySelectorAll('td');
+      const a = tr.querySelector('a[href^="/cat/"]');
+      const id = a ? Number((a.getAttribute('href').match(/^\/cat\/(\d+)/) || [])[1]) || 0 : 0;
+      const kgm = td.length >= 4 ? td[3].textContent.match(/([\d.,]+)\s*kg/i) : null;
+      const fish = td.length >= 3 ? td[2].textContent.toLowerCase().split(/[\s-]+/).find((w) => kinds.has(w)) : null;
+      if (!id || !kgm || !fish) return;
+      list.push({ id, name: a.textContent.trim(), fish, grams: Math.round(parseFloat(kgm[1].replace(/,/g, '')) * 1000), me: id === me });
+    }
+    if (!list.length) return;
+    const sig = JSON.stringify(list.map((b) => [b.id, b.fish, b.grams]));
+    const fresh = Date.now() - pierBoardAt < PIER_BOARD_REREAD_MS;
+    if (sig !== pierBoardSig || !fresh) {
+      pierBoardSig = sig;
+      const replySig = pierBoard ? JSON.stringify(pierBoard.map((b) => [b.id, b.fish, Math.round(b.grams / 100) * 100])) : '';
+      // The reply already gave this board (exact grams and all) and recently: nothing new to note.
+      if (replySig !== sig || !fresh) {
+        if (replySig !== sig) pierBoard = list;
+        pierBoardAt = Date.now();
+      }
+    }
+    // Not sent yet (a fish send went out under 65 s ago, so this one waits): try each second while the board is open;
+    // syncFish keeps its own 65 s gap. 'ms_fish_sync_v2' = FISH_SYNC_KEY (set further down).
+    const sentAt = Number((GM_getValue('ms_fish_sync_v2', null) || {}).boardAt) || 0;
+    if (pierBoardAt > sentAt && apiState && apiState.pier) syncFish();
   }
   // The weekly board, as the Pier page's noticeboard shows it (the top 5 only).
   function onPierResponse(json) {
@@ -4320,7 +4364,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); arrangeRail(); ensureSuppliesNote(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); readPierBoardPage(); arrangeRail(); ensureSuppliesNote(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
