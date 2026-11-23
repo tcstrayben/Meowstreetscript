@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.3
+// @version      0.54.5
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -299,7 +299,7 @@
           name: t.name, tier: t.tier, nerve: t.nerve, cut: t.cut, take: t.take, respect: t.respect,
           xp: t.xp, xpFail: t.xpFail, chance: t.baseChance, duration: t.duration, stake: t.stake,
           minMembers: t.minMembers, maxMembers: t.maxMembers, level: t.level, roles: Array.isArray(t.roles) ? t.roles.slice() : [],
-          oneAtATime: !!t.oneAtATime, roleCap: t.roleCap,
+          oneAtATime: !!t.oneAtATime, roleCap: t.roleCap, statPer: Number.isFinite(t.statPer) && t.statPer > 0 ? t.statPer : null,
         }));
       }
       if (raw.heistRules) out.heistXp = { success: raw.heistRules.successXp, fail: raw.heistRules.failureXp };
@@ -337,6 +337,7 @@
             minMembers: mine.minMembers ?? (tierDef ? tierDef.minMembers : null), maxMembers: mine.maxMembers ?? (tierDef ? tierDef.maxMembers : null),
             cut: mine.cut, take: mine.take, respect: mine.respectReward, nerve: mine.nerve, stake: mine.stake,
             chance: mine.chance != null ? mine.chance : mine.previewChance,
+            tools: Number.isInteger(mine.tools) ? mine.tools : null, // 0.54.5: the bot's seat shares only compare readings with the same tools
           };
         });
         // The soonest-ending running job drives the sidebar pill (unchanged behaviour from when there was only
@@ -526,9 +527,15 @@
         const range = Array.isArray(it.priceRange) && it.priceRange.length === 2 ? it.priceRange : null;
         const ref = Number.isFinite(it.reference_price) ? it.reference_price : null;
         const disc = rate < 1 && ref != null && (range ? Math.abs((range[0] + range[1]) / 2 - ref * rate) <= 1 : it.price !== ref && Math.round(ref * rate) === it.price);
+        const base = disc ? (range ? undo(it.price) : ref) : it.price;
+        const baseMax = range ? (disc ? undo(range[1]) : range[1]) : null;
         return {
           range, disc,
-          base: disc ? (range ? undo(it.price) : ref) : it.price,
+          // 0.54.4 (Daily Stray, user 2026-11-23: 100% accurate only): whether `base` is surely the normal price. Through
+          // a discount two normal prices can show as the same figure (15% off: tuna $150 and $151 both show $128);
+          // `base` is the smaller, so it's sure only when one more wouldn't show the same (or is past the top).
+          sure: !disc || !range || Math.round((base + 1) * rate) !== it.price || base + 1 > baseMax,
+          base,
           baseMin: range ? (disc ? undo(range[0]) : range[0]) : null,
           baseMax: range ? (disc ? undo(range[1]) : range[1]) : null,
         };
@@ -540,7 +547,7 @@
         out.storeItems[it.id] = {
           name: it.name, price: it.price, sellPrice: it.sellPrice != null ? it.sellPrice : it.sellBack,
           min: n.range ? n.range[0] : null, max: n.range ? n.range[1] : null, until: it.priceUntil || 0,
-          disc: n.disc, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
+          disc: n.disc, sure: n.sure, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
         };
       });
       (raw.gear || []).forEach((g) => { if (g && g.id != null && out.storeItems[g.id] == null) out.storeItems[g.id] = { name: g.name, price: g.price, sellPrice: g.sellPrice != null ? g.sellPrice : g.sellBack }; });
@@ -552,7 +559,7 @@
         return {
           name: it.name, price: it.price, ref: Number.isFinite(it.reference_price) ? it.reference_price : null,
           min: n.range ? n.range[0] : null, max: n.range ? n.range[1] : null, until: it.priceUntil || 0,
-          disc: n.disc, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
+          disc: n.disc, sure: n.sure, base: n.base, baseMin: n.baseMin, baseMax: n.baseMax,
         };
       });
       // Everything that can make store consumables cheaper. `modifiers.marketRate` is the game's own combined
@@ -896,9 +903,19 @@
       #msx-account[hidden], .ac-card[data-msx-tab] > #ac-pane { display:none !important; }
       .ac-card > #msx-account { margin:0; border:0; border-radius:0; background:transparent; }
       .ac-card > #msx-account > h2 { display:none; }
-      #msx-account h3 { margin:16px 0 6px; font-size:13px; color:var(--ms-lime-light, #d3f0b4); }
-      #msx-account h4 { margin:12px 0 2px; font-size:12px; }
-      #msx-account #msx-acc-areas { margin-top:6px; padding-left:10px; border-left:2px solid var(--ms-line, rgba(231,237,225,.25)); }
+      #msx-account h3 { margin:0 0 8px; font-size:14px; color:var(--ms-lime-light, #d3f0b4); }
+      #msx-account .msx-acc-lead { margin:0 0 12px; color:var(--ms-smoke, #8d9289); }
+      #msx-account .msx-acc-card { margin:0 0 12px; padding:12px 14px; border-radius:10px; background:rgba(0,0,0,.22);
+        border:1px solid var(--ms-line, rgba(231,237,225,.15)); }
+      #msx-account .msx-acc-card > .msx-acc-sub { margin:4px 0; }
+      #msx-account .msx-acc-opt { padding:8px 0; border-top:1px solid var(--ms-line, rgba(231,237,225,.12)); }
+      #msx-account h3 + .msx-acc-opt { border-top:0; padding-top:0; }
+      #msx-account .msx-acc-opt > .msx-acc-check { margin:0 0 2px; font-weight:600; }
+      #msx-account .msx-acc-opt > .msx-acc-sub { margin-left:26px; font-size:12px; }
+      #msx-account .msx-acc-opt > .msx-acc-minor { margin:6px 0 0 26px; font-weight:400; font-size:12px; }
+      #msx-account .msx-acc-check small { font-weight:400; color:var(--ms-smoke, #8d9289); }
+      #msx-account .msx-acc-ok { color:var(--ms-lime, #7bd88f); }
+      #msx-account .msx-acc-key { margin:8px 0; }
       #msx-account .msx-acc-key { display:flex; flex-wrap:wrap; gap:6px; align-items:center; }
       #msx-account .msx-acc-key input { flex:1 1 220px; min-width:0; padding:4px 6px; font:inherit; color:inherit; background:transparent; border:1px solid var(--ms-line, rgba(231,237,225,.25)); border-radius:4px; }
       #msx-account .msx-acc-key .msx-bad { color:var(--ms-red, #eb6561); }
@@ -969,6 +986,8 @@
       #msx-crewjobs .msx-launch { list-style:none; margin:8px 0; padding:0; display:grid; gap:6px; }
       #msx-crewjobs .msx-launch li { padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12); }
       #msx-crewjobs .msx-launch li.is-now { border-color:#7bd88f; background:rgba(123,216,143,.12); }
+      .tf-slot.msx-best { outline:2px solid #7bd88f; outline-offset:-2px; border-radius:8px; }
+      .msx-bestseat { display:block; margin-top:2px; font-size:11px; font-weight:700; color:#7bd88f; white-space:nowrap; }
       .msx-launchnow { margin:8px 0; padding:6px 10px; border-radius:8px; font-weight:700; color:#7bd88f; background:rgba(123,216,143,.12); border:1px solid #7bd88f; }
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
@@ -1288,7 +1307,7 @@
         id: j.id, name: j.name, tier: j.tier, minLevel: j.minLevel, status: j.status, roles: j.roles, plannerId: j.plannerId,
         members: (j.members || []).map((m) => ({ role: m.role, name: m.name, level: m.level, id: m.id, jailUntil: m.jailUntil, atVet: m.atVet })),
         minMembers: j.minMembers, maxMembers: j.maxMembers, endsAt: j.endsAt,
-        cut: j.cut, take: j.take, respect: j.respect, nerve: j.nerve, stake: j.stake, chance: j.chance,
+        cut: j.cut, take: j.take, respect: j.respect, nerve: j.nerve, stake: j.stake, chance: j.chance, tools: j.tools,
       }));
       body.roleTitles = apiState.crewJobRoles || {};
       if (apiState.crewJobsDone) body.jobsDone = apiState.crewJobsDone;
@@ -1405,11 +1424,13 @@
     try { sync = JSON.parse(GM_getValue(STOCK_SYNC_KEY, '{}')) || {}; } catch (e) { sync = {}; }
     // 🐟 Whiskers price alerts (0.49.1, user request): this hour's normal price (before your discount) of the two
     // items whose store price moves hourly, Premium tuna and Catnip tea: [[item id, until, price]].
+    // 0.54.4 (Daily Stray: hours at the bottom or top of the range): + whether that normal price is sure (1/0) and the
+    // game's normal range: [item id, until, price, sure, min, max].
     const shop = [];
     const items = (apiState && apiState.storeItems) || {};
     ['tuna', 'catnip'].forEach((id) => {
       const it = items[id];
-      if (it && it.until > Date.now() && Number.isFinite(it.base) && it.base > 0) shop.push([id, it.until, it.base]);
+      if (it && it.until > Date.now() && Number.isFinite(it.base) && it.base > 0) shop.push([id, it.until, it.base, it.sure ? 1 : 0, it.baseMin, it.baseMax]);
     });
     stockSyncAt = Date.now();
     stockSyncBusy = true;
@@ -5380,6 +5401,61 @@
     });
   }
 
+  // ✔ Best seat for you (0.54.5, user request 2026-11-23: "tells the player whats the best role for them to join that is
+  // available", "a green checkmark right on the role", "recommend the dex role as the priority"). The game's own numbers
+  // (Reference/api-data-reference.md, 188 job readings): odds = base + each filled seat's share (up to the tier's
+  // roleCap) + Inside line + 3 a tool, never past 85%; each seat uses one stat (the card says dex / spe / str). Very
+  // likely: a seat's share = your stat for it ÷ the tier's statPer, rounded down, up to roleCap. The mark goes on the
+  // open seat (or your own seat, in a job you're in) that adds the most up to 85%; a tie goes to a DEX seat (most cats
+  // are short on DEX, so a strong cat there leaves the easy seats free), then the first on the card. Your own base
+  // stats only (selfCat), read from the game data on every page; nothing is sent.
+  const SEAT_STAT = { str: 0, def: 1, spe: 2, dex: 3 }; // selfCat.st order: STR, DEF, SPD, DEX
+  const SEAT_WORD = { str: 'STR', def: 'DEF', spe: 'SPD', dex: 'DEX' };
+  // seats: [{ stat: 'dex'|'spe'|'str', open, mine }] in card order. { i, add, share } or null when no seat adds anything.
+  function bestSeat(seats, odds, tier, st) {
+    if (!tier || !(tier.statPer > 0) || !(tier.roleCap > 0) || !Array.isArray(st) || !Number.isFinite(odds)) return null;
+    const share = (s) => { const v = st[SEAT_STAT[s.stat]]; return Number.isFinite(v) ? Math.min(tier.roleCap, Math.floor(v / tier.statPer)) : null; };
+    const mine = seats.find((s) => s.mine);
+    const room = 85 - odds + (mine ? share(mine) || 0 : 0); // in the job already: your seat's share is in the odds
+    const c = seats.map((s, i) => ({ i, s, share: share(s) })).filter((x) => (x.s.open || x.s.mine) && x.share != null)
+      .map((x) => ({ ...x, add: Math.max(0, Math.min(x.share, room)) }))
+      .sort((a, b) => b.add - a.add || (b.s.stat === 'dex') - (a.s.stat === 'dex') || a.i - b.i);
+    return c.length && c[0].add > 0 ? { i: c[0].i, add: c[0].add, share: c[0].share } : null;
+  }
+  function markBestSeats() {
+    const onCrew = location.pathname.replace(/\/+$/, '') === '/crew';
+    const me = apiState && apiState.selfCat;
+    const tiers = (apiState && apiState.crewJobTiers) || [];
+    const roles = (apiState && apiState.crewJobRoles) || {};
+    document.querySelectorAll('article.tf-job').forEach((card) => {
+      const slots = [...card.querySelectorAll('.tf-slot')];
+      const name = (card.querySelector('.tf-job-m > header h3')?.textContent || '').trim();
+      const td = tiers.find((x) => x.name === name);
+      const oddsM = (card.querySelector('.tf-job-d .tf-quiet b')?.textContent || '').match(/(\d+)\s*%/);
+      const seats = slots.map((li) => {
+        const title = (li.querySelector('header b')?.textContent || '').trim();
+        let stat = (li.querySelector('header small')?.textContent || '').trim().toLowerCase().slice(0, 3);
+        if (!(stat in SEAT_STAT)) { const r = Object.values(roles).find((x) => x && x.title === title); stat = r && r.stat ? String(r.stat).slice(0, 3).toLowerCase() : ''; }
+        return { stat, title, open: li.classList.contains('is-free') && !!li.querySelector('button'), mine: li.classList.contains('is-me') };
+      });
+      const ok = onCrew && me && td && !(Number.isFinite(td.level) && Number.isFinite(me.lv) && me.lv < td.level) && seats.some((s) => s.open);
+      const best = ok ? bestSeat(seats, oddsM ? Number(oddsM[1]) : NaN, td, me.st) : null;
+      slots.forEach((li, i) => {
+        const on = !!best && best.i === i;
+        let tag = li.querySelector('.msx-bestseat');
+        if (!on) { tag?.remove(); li.classList.remove('msx-best'); return; }
+        const s = seats[i];
+        const text = `✔ Best for you +${best.add}`;
+        if (!tag) { tag = document.createElement('span'); tag.className = 'msx-bestseat'; (li.querySelector('header') || li).append(tag); }
+        if (tag.textContent !== text) tag.textContent = text;
+        li.classList.add('msx-best');
+        setTitle(tag, `Your ${SEAT_WORD[s.stat]} ${Math.round(me.st[SEAT_STAT[s.stat]]).toLocaleString()} ÷ ${td.statPer} = +${best.share}` +
+          `${best.share >= td.roleCap ? ' (a full seat)' : ` (a full seat is +${td.roleCap}, at ${SEAT_WORD[s.stat]} ${td.roleCap * td.statPer})`}` +
+          `${best.add < best.share ? `; the job stops at 85%, so +${best.add}` : ''}. Worked out from the game's own job numbers.`);
+      });
+    });
+  }
+
   function ensureCrewJobsPanel() {
     if (location.pathname.replace(/\/+$/, '') !== '/crew') { document.getElementById('msx-crewjobs')?.remove(); return; }
     const host = document.querySelector('.main-content') || document.querySelector('main');
@@ -5816,39 +5892,34 @@
     if (!document.querySelector('.ac-tabs, .main-content, main')) return;
     const box = document.createElement('section');
     box.id = 'msx-account';
+    // 0.54.5 (user request 2026-11-23: "shorten and make that page look nicer"): cards, one switch per row with one
+    // short line under it. Same ids and switches as before.
     const check = (id, label) => `<label class="msx-acc-check"><input type="checkbox" id="${id}"> ${label}</label>`;
     const sub = (html, id) => `<div class="msx-acc-sub"${id ? ` id="${id}"` : ''}>${html}</div>`;
-    const pts = (items, id) => sub('<ul>' + items.map((x) => '<li>' + x + '</li>').join('') + '</ul>', id);
+    const opt = (boxId, id, label, html, extra = '') => `<div class="msx-acc-opt"${boxId ? ` id="${boxId}" hidden` : ''}>${check(id, label)}${sub(html)}${extra}</div>`;
     box.innerHTML =
       '<h2>MeowStreets Extra Info</h2>' +
-      pts(['Reads what the game\'s own pages already load. Never your email or other players\' private data.', 'Everything it records stays on this computer.', 'Nothing is sent anywhere unless you verify below.']) +
-      '<h3>Recording</h3>' +
-      check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') +
-      '<div id="msx-acc-sharebox" hidden><h3 id="msx-verify">Sharing with the MeowStreets Info server</h3>' +
-      sub('Verify with a <b>Public</b> key (Account → API keys in the game):') +
-      pts(['<b>Self and Crew keys are refused</b> and never sent.', 'The server checks who owns the key, gives this browser a private code, then <b>throws the key away</b>.',
-        'A Public key only sees public pages. It also stays in this browser for 🛡️ shield times on the Players list.', 'Revoke it in the game any time.']) +
-      '<p class="msx-acc-sub" id="msx-acc-verified"></p>' +
+      '<p class="msx-acc-lead">Reads what the game\'s pages already load. Everything stays on this computer unless you verify and turn sharing on. Nothing is ever sent to MeowStreets.</p>' +
+      '<div class="msx-acc-card"><h3>📝 Recording</h3>' +
+      check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') + '</div>' +
+      '<div class="msx-acc-card"><h3>🎯 Crew jobs: best seat</h3>' +
+      sub('On Crew → Jobs, a green <b class="msx-acc-ok">✔ Best for you</b> marks the open seat where your stats add the most to the odds. Your stats never leave this browser for it.') +
+      sub('Each seat uses one stat: <b>DEX</b> Lookout, Lockpicker, Forger, Inside cat, Safecracker · <b>SPD</b> Getaway driver, Spotter, Second driver · <b>STR</b> Muscle, Bruiser. A tie goes to the DEX seat: most cats are short on DEX.') + '</div>' +
+      '<div id="msx-acc-sharebox" hidden>' +
+      '<div class="msx-acc-card"><h3 id="msx-verify">🔑 Verify</h3>' +
+      '<p class="msx-acc-status" id="msx-acc-verified"></p>' +
       sub('Sharing works without verifying until <b>' + new Date(VERIFY_GRACE_UNTIL).toLocaleString([], { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) + '</b>.', 'msx-acc-grace') +
+      sub('Paste a <b>Public</b> key (Account → API keys in the game). <b>Self and Crew keys are refused</b>. The server checks who owns it, gives this browser a private code, then <b>throws the key away</b>. The key also stays here for 🛡️ shield times on Players.') +
       '<div class="msx-acc-key"><input type="password" id="msx-acc-key" autocomplete="off" spellcheck="false"> <button type="button" id="msx-acc-keysave">Verify</button> <button type="button" id="msx-acc-keydel">Remove key</button> <button type="button" id="msx-acc-forget">Stop sharing and forget me</button> <span id="msx-acc-keystate"></span></div>' +
-      check('msx-acc-keydata', 'Use my key for data') +
-      pts(['Off unless ticked.', 'The server keeps your Public key to read public cat and crew pages.', 'Untick and the key is dropped.']) +
-      '<div id="msx-acc-areas">' +
-      '<h4>City data</h4>' + check('msx-acc-share', 'Share city data (needed for everything below)') +
-      sub('<ul><li><b>Sends:</b> stock prices, Whiskers\' tuna and catnip prices, hidden feats, mastery unlocks, Pier Nine catches and notes.</li>' +
-        '<li><b>Everyone verified gets back:</b> stock history, how to get hidden feats, what unlocks do, the fish table, active cats without a crew.</li>' +
-        '<li id="msx-acc-allymarks">The alliance also gets the ✔/✖ marks in Purrgatory.</li></ul>') +
-      '<div id="msx-acc-fightbox" hidden><h4>Fight info</h4>' + check('msx-acc-fight', 'Share fight info') +
-      pts(['<b>Sends:</b> gear of cats in your fights, your own level and gear.', '<b>The alliance gets back:</b> other cats\' last-seen gear.']) + '</div>' +
-      '<div id="msx-acc-statsbox" hidden><h4 id="msx-stats">Battle stats</h4>' + check('msx-acc-stats', 'Share my battle stats') +
-      pts(['Off unless ticked.', '<b>Sends:</b> your base STR, DEF, SPD and DEX (no boosts).', 'Only the alliance\'s script users see them, with the date.', 'Untick to take them back.']) +
-      '<label class="msx-acc-check" id="msx-acc-nudgerow"><input type="checkbox" id="msx-acc-statsnudge"> Remind me in the sidebar while I\'m not sharing them</label></div>' +
-      '<div id="msx-acc-crewbox" hidden><h4>Crew data</h4>' + check('msx-acc-crew', 'Share crew data') +
-      pts(['<b>Sends:</b> crew chain, jobs, heists you\'re in, contract rewards, treasury log, deposit rates, finished chains, heist results, the newest cat id.', '<b>Only your crew\'s leaders and Discord</b> see it.']) + '</div>' +
-      '<div id="msx-acc-bankbox" hidden><h4>Bank deposits</h4>' + check('msx-acc-bank', 'Share my bank deposits (for my 💳 bank loan)') +
-      pts(['Off unless ticked. Shown because you have a 💳 bank loan.', '<b>Sends:</b> your open deposits (amount, rate, end time).', '<b>Only the crew\'s treasurers</b> see it.']) + '</div>' +
-      '</div>' +
-      sub('Never sent: cash, email, messages. Nothing is ever sent to MeowStreets.') +
+      opt(null, 'msx-acc-keydata', 'Use my key for data', 'Off unless ticked: the server keeps your Public key to read public cat and crew pages. Untick and it\'s dropped.') + '</div>' +
+      '<div class="msx-acc-card" id="msx-acc-areas"><h3>📡 Sharing</h3>' +
+      opt(null, 'msx-acc-share', 'City data <small>(needed for the rest)</small>', '<b>Sends</b> stock prices, Whiskers\' tuna and catnip prices, hidden feats, mastery unlocks, Pier Nine catches. <b>Everyone verified gets back</b> stock history, feat hints, unlock texts, the fish table, cats without a crew.<span id="msx-acc-allymarks"> The alliance also gets the ✔/✖ marks in Purrgatory.</span>') +
+      opt('msx-acc-fightbox', 'msx-acc-fight', 'Fight info', '<b>Sends</b> gear seen in your fights, your own level and gear. <b>The alliance gets back</b> other cats\' last-seen gear.') +
+      opt('msx-acc-statsbox', 'msx-acc-stats', '<span id="msx-stats">Battle stats</span>', 'Off unless ticked. <b>Sends</b> your base STR, DEF, SPD and DEX. The alliance\'s script users see them (dated), and the crew bot checks them against what you add to a crew job\'s odds. Untick to take them back.',
+        '<label class="msx-acc-check msx-acc-minor" id="msx-acc-nudgerow"><input type="checkbox" id="msx-acc-statsnudge"> Remind me in the sidebar while I\'m not sharing them</label>') +
+      opt('msx-acc-crewbox', 'msx-acc-crew', 'Crew data', '<b>Sends</b> crew chain, jobs (seats and odds), heists you\'re in, contract rewards, treasury log, deposit rates, finished chains, heist results, the newest cat id. <b>Only your crew\'s leaders and Discord</b> see it. The bot also works out what each seat adds to a job\'s odds (no names).') +
+      opt('msx-acc-bankbox', 'msx-acc-bank', 'Bank deposits <small>(for my 💳 bank loan)</small>', 'Off unless ticked. <b>Sends</b> your open deposits (amount, rate, end time). <b>Only the crew\'s treasurers</b> see it.') +
+      sub('Never sent: cash, email, messages.') + '</div>' +
       '</div>';
     placeAccountBox(box);
     box.querySelector('#msx-acc-keysave').addEventListener('click', () => {
@@ -6053,6 +6124,7 @@
       ensureCrewJobsPanel();
       ensureSuppliesNote();
       markLaunchCards();
+      markBestSeats();
       ensureTradingPanel();
       logShopPricesFromApi();
       drawWhiskers();
