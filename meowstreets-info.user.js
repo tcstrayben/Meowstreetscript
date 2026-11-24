@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.7
+// @version      0.54.8
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -5450,7 +5450,7 @@
         const s = seats[i];
         const best = r.best === i;
         // "(max)" when the seat gives the most any cat can there (user 2026-11-23: "if its +10 put (max) beside it").
-        const max = x.add >= td.roleCap ? ' (max)' : '';
+        const max = x.add >= td.roleCap ? ' (max for this job)' : ''; // 0.54.8: "(max)" alone read oddly next to +9
         const text = best ? `✔ Best for you +${x.add}${max}` : `+${x.add}${max} for you`;
         // Right below the seat's Join button (user 2026-11-23); your own seat has none, so under its name.
         if (!tag) { tag = document.createElement('span'); }
