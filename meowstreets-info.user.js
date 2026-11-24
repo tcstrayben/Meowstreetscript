@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.5
+// @version      0.54.6
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -987,7 +987,8 @@
       #msx-crewjobs .msx-launch li { padding:6px 10px; border-radius:8px; border:1px solid rgba(255,255,255,.12); }
       #msx-crewjobs .msx-launch li.is-now { border-color:#7bd88f; background:rgba(123,216,143,.12); }
       .tf-slot.msx-best { outline:2px solid #7bd88f; outline-offset:-2px; border-radius:8px; }
-      .msx-bestseat { display:block; margin-top:2px; font-size:11px; font-weight:700; color:#7bd88f; white-space:nowrap; }
+      .msx-bestseat { display:block; margin:4px 0 0; font-size:11px; line-height:1.3; font-weight:600; color:var(--ms-smoke, #8d9289); text-align:center; text-transform:none; letter-spacing:normal; white-space:normal; }
+      .msx-bestseat.is-best { font-weight:700; color:#7bd88f; }
       .msx-launchnow { margin:8px 0; padding:6px 10px; border-radius:8px; font-weight:700; color:#7bd88f; background:rgba(123,216,143,.12); border:1px solid #7bd88f; }
       .msx-xpline { margin-top:2px; font-size:11px; line-height:1.3; color:var(--ms-smoke, #8d9289); font-variant-numeric:tabular-nums; }
       .msx-muggable { display:inline-flex; align-items:center; vertical-align:middle; margin-left:4px; cursor:help; }
@@ -5411,16 +5412,18 @@
   // stats only (selfCat), read from the game data on every page; nothing is sent.
   const SEAT_STAT = { str: 0, def: 1, spe: 2, dex: 3 }; // selfCat.st order: STR, DEF, SPD, DEX
   const SEAT_WORD = { str: 'STR', def: 'DEF', spe: 'SPD', dex: 'DEX' };
-  // seats: [{ stat: 'dex'|'spe'|'str', open, mine }] in card order. { i, add, share } or null when no seat adds anything.
-  function bestSeat(seats, odds, tier, st) {
+  // seats: [{ stat: 'dex'|'spe'|'str', open, mine }] in card order. { adds: [{ add, share } | null per seat], best } where
+  // best is the seat index that adds the most (null when none adds anything). 0.54.6 (user 2026-11-23: "show each of
+  // their +# to each crew job role"): every open seat gets its number, not only the best.
+  function seatAdds(seats, odds, tier, st) {
     if (!tier || !(tier.statPer > 0) || !(tier.roleCap > 0) || !Array.isArray(st) || !Number.isFinite(odds)) return null;
     const share = (s) => { const v = st[SEAT_STAT[s.stat]]; return Number.isFinite(v) ? Math.min(tier.roleCap, Math.floor(v / tier.statPer)) : null; };
     const mine = seats.find((s) => s.mine);
     const room = 85 - odds + (mine ? share(mine) || 0 : 0); // in the job already: your seat's share is in the odds
-    const c = seats.map((s, i) => ({ i, s, share: share(s) })).filter((x) => (x.s.open || x.s.mine) && x.share != null)
-      .map((x) => ({ ...x, add: Math.max(0, Math.min(x.share, room)) }))
-      .sort((a, b) => b.add - a.add || (b.s.stat === 'dex') - (a.s.stat === 'dex') || a.i - b.i);
-    return c.length && c[0].add > 0 ? { i: c[0].i, add: c[0].add, share: c[0].share } : null;
+    const adds = seats.map((s) => { const sh = (s.open || s.mine) ? share(s) : null; return sh == null ? null : { share: sh, add: Math.max(0, Math.min(sh, room)) }; });
+    const order = adds.map((x, i) => ({ x, i, dex: seats[i].stat === 'dex' })).filter((y) => y.x)
+      .sort((p, q) => q.x.add - p.x.add || q.dex - p.dex || p.i - q.i);
+    return { adds, best: order.length && order[0].x.add > 0 ? order[0].i : null };
   }
   function markBestSeats() {
     const onCrew = location.pathname.replace(/\/+$/, '') === '/crew';
@@ -5439,19 +5442,26 @@
         return { stat, title, open: li.classList.contains('is-free') && !!li.querySelector('button'), mine: li.classList.contains('is-me') };
       });
       const ok = onCrew && me && td && !(Number.isFinite(td.level) && Number.isFinite(me.lv) && me.lv < td.level) && seats.some((s) => s.open);
-      const best = ok ? bestSeat(seats, oddsM ? Number(oddsM[1]) : NaN, td, me.st) : null;
+      const r = ok ? seatAdds(seats, oddsM ? Number(oddsM[1]) : NaN, td, me.st) : null;
       slots.forEach((li, i) => {
-        const on = !!best && best.i === i;
+        const x = r && r.adds[i];
         let tag = li.querySelector('.msx-bestseat');
-        if (!on) { tag?.remove(); li.classList.remove('msx-best'); return; }
+        if (!x) { tag?.remove(); li.classList.remove('msx-best'); return; }
         const s = seats[i];
-        const text = `✔ Best for you +${best.add}`;
-        if (!tag) { tag = document.createElement('span'); tag.className = 'msx-bestseat'; (li.querySelector('header') || li).append(tag); }
+        const best = r.best === i;
+        const text = best ? `✔ Best for you +${x.add}` : `+${x.add} for you`;
+        // Right below the seat's Join button (user 2026-11-23); your own seat has none, so under its name.
+        if (!tag) { tag = document.createElement('span'); }
+        const btn = li.querySelector('button');
+        const anchor = btn ? (btn.parentElement === li ? btn : btn.closest('.tf-slot > *')) : li.lastElementChild;
+        if (anchor && anchor.nextElementSibling !== tag) anchor.after(tag); else if (!anchor && tag.parentElement !== li) li.append(tag);
+        const cls = 'msx-bestseat' + (best ? ' is-best' : '');
+        if (tag.className !== cls) tag.className = cls;
         if (tag.textContent !== text) tag.textContent = text;
-        li.classList.add('msx-best');
-        setTitle(tag, `Your ${SEAT_WORD[s.stat]} ${Math.round(me.st[SEAT_STAT[s.stat]]).toLocaleString()} ÷ ${td.statPer} = +${best.share}` +
-          `${best.share >= td.roleCap ? ' (a full seat)' : ` (a full seat is +${td.roleCap}, at ${SEAT_WORD[s.stat]} ${td.roleCap * td.statPer})`}` +
-          `${best.add < best.share ? `; the job stops at 85%, so +${best.add}` : ''}. Worked out from the game's own job numbers.`);
+        li.classList.toggle('msx-best', best);
+        setTitle(tag, `Your ${SEAT_WORD[s.stat]} ${Math.round(me.st[SEAT_STAT[s.stat]]).toLocaleString()} ÷ ${td.statPer} = +${x.share}` +
+          `${x.share >= td.roleCap ? ' (a full seat)' : ` (a full seat is +${td.roleCap}, at ${SEAT_WORD[s.stat]} ${td.roleCap * td.statPer})`}` +
+          `${x.add < x.share ? `; the job stops at 85%, so +${x.add}` : ''}. Worked out from the game's own job numbers.`);
       });
     });
   }
@@ -5903,7 +5913,7 @@
       '<div class="msx-acc-card"><h3>📝 Recording</h3>' +
       check('msx-acc-events', 'Log my Mews events (crime results, trades, training)') + '</div>' +
       '<div class="msx-acc-card"><h3>🎯 Crew jobs: best seat</h3>' +
-      sub('On Crew → Jobs, a green <b class="msx-acc-ok">✔ Best for you</b> marks the open seat where your stats add the most to the odds. Your stats never leave this browser for it.') +
+      sub('On Crew → Jobs, a green <b class="msx-acc-ok">✔ Best for you</b> marks the open seat where your stats add the most to the odds, and every open seat shows what you would add (+N, under its Join button). Your stats never leave this browser for it.') +
       sub('Each seat uses one stat: <b>DEX</b> Lookout, Lockpicker, Forger, Inside cat, Safecracker · <b>SPD</b> Getaway driver, Spotter, Second driver · <b>STR</b> Muscle, Bruiser. A tie goes to the DEX seat: most cats are short on DEX.') + '</div>' +
       '<div id="msx-acc-sharebox" hidden>' +
       '<div class="msx-acc-card"><h3 id="msx-verify">🔑 Verify</h3>' +
