@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.8
+// @version      0.54.9
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -589,6 +589,7 @@
   }
 
   function onApiStateResponse(json) {
+    noteCells(json);
     const ex = extractApiState(json);
     if (ex) { apiState = ex; noteUses(ex.events); noteFightCats(); notePierFromState(); noteLedger(ex.crewLedger); schedule(); shareCrew(); syncGear(); syncFish(); } // nothing in the DOM changed, so redraw by hand to pick up the new numbers
   }
@@ -643,6 +644,9 @@
 
   // Only a full state is taken (an error reply, e.g. { error }, would otherwise blank everything).
   function onActionResponse(json) {
+    // 🔓 A bust's reply first (0.54.9): matched against the jail list seen BEFORE it (the reply's own list no longer has
+    // a cat that walked out).
+    if (json && typeof json === 'object' && typeof json.message === 'string') noteBust(json.message);
     if (json && typeof json === 'object' && json.player && Array.isArray(json.crimes)) onApiStateResponse(json);
   }
 
@@ -1584,9 +1588,42 @@
     heistHistory = json.heists.filter((h) => h && h.id != null && h.status === 'completed' && Number.isFinite(h.closed_at));
     shareCrew();
   }
+  // 🔓 Bust XP (0.54.9, user request 2026-11-25: "Can the script not do this ... so we can use others to gather data
+  // too?"). The XP for springing a cat varies (+10 to +19 seen); what sets it isn't known (the jailed cat's level, its
+  // time left?). Every bust you make is kept with the jailed cat's level and minutes left (from the jail list the game
+  // sent just before: public, on Purrgatory for anyone), whether it worked, the XP and your own level. No names, no
+  // ids. Sent with crew sharing; the bot pools everyone's so the rule can be worked out for the Jail guide.
+  const BUSTS_KEY = 'ms_busts_v1', BUSTS_MAX = 60, BUSTS_DAYS = 14;
+  let lastCells = null; // { at, list: [{ name, level, until }] }
+  function noteCells(raw) {
+    if (!raw || typeof raw !== 'object' || !Array.isArray(raw.cells)) return;
+    lastCells = { at: Date.now(), list: raw.cells.filter((c) => c && c.name).map((c) => ({ name: String(c.name), level: Number(c.level) || null, until: Number(c.jail_until) || 0 })) };
+  }
+  // The game's own words (Mews 2026-11-11..25): "You talked the guards around and walked X out. +14 XP." and
+  // "The guards did not buy it. X stays inside."
+  function bustFrom(text) {
+    let m = String(text).match(/^You talked the guards around and walked (.+?) out\. \+(\d+) XP\.?$/);
+    if (m) return { name: m[1], ok: 1, xp: +m[2] };
+    m = String(text).match(/^The guards did not buy it\. (.+?) stays inside\.?$/);
+    return m ? { name: m[1], ok: 0, xp: 0 } : null;
+  }
+  function noteBust(text) {
+    const b = bustFrom(text);
+    if (!b) return;
+    const now = Date.now();
+    const cell = lastCells && now - lastCells.at < 30 * 60000 ? lastCells.list.find((c) => c.name === b.name) : null;
+    if (!cell || !cell.level || !cell.until) return; // without the cat's level and time left it says nothing
+    const list = GM_getValue(BUSTS_KEY, []).filter((x) => x && now - x.at < BUSTS_DAYS * 86400000);
+    list.push({ at: now, ok: b.ok, xp: b.xp, level: cell.level, left: Math.max(0, Math.round((cell.until - now) / 60000)), me: readPlayerLevel() || null });
+    GM_setValue(BUSTS_KEY, list.slice(-BUSTS_MAX));
+    shareCrew();
+  }
+
   function historyForBot() {
     const now = Date.now();
     const out = {};
+    const busts = GM_getValue(BUSTS_KEY, []).filter((x) => x && now - x.at < BUSTS_DAYS * 86400000);
+    if (busts.length) out.busts = busts.slice(-30);
     if (chainHistory) {
       // Finished chains only (the day's chain stays in the list until 00:00 UTC), newest first.
       out.chains = chainHistory.filter((c) => c.end <= now).slice(0, 5).map((c) => ({
