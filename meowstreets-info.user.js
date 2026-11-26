@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.54.9
+// @version      0.55.0
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -971,6 +971,21 @@
       .msx-contracts .msx-ct.off { opacity:.55; }
       .msx-statsnudge, .msx-verifynudge { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
       .msx-statsnudge:hover, .msx-verifynudge:hover { text-decoration:underline; }
+      .msx-lockline { flex-basis:100%; font-size:11px; font-weight:600; color:var(--msx-crew); text-decoration:none; }
+      .msx-lockline.on { color:var(--ms-red, #eb6561); }
+      .msx-lockline:hover { text-decoration:underline; }
+      .msx-lockhost { position:relative !important; }
+      .cs-dock.msx-lockhost { min-height:170px; }
+      .msx-lockcover { position:absolute; inset:0; z-index:30; display:flex; align-items:flex-start; justify-content:center; padding:14px;
+        background:rgba(12,14,11,.84); backdrop-filter:blur(2px); border-radius:inherit; }
+      .msx-lockcard { position:sticky; top:90px; max-width:440px; display:flex; flex-direction:column; gap:8px; padding:14px 16px; text-align:center;
+        border:1px solid var(--ms-red, #eb6561); border-radius:10px; background:var(--ms-ink, #171a15); color:var(--ms-bone, #e7ede1); font-size:13px; }
+      .msx-lockcard > b:first-child { color:var(--ms-red, #eb6561); font-size:14px; }
+      .msx-lockbtns { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; align-items:center; }
+      .msx-lockbtns button { padding:5px 12px; border-radius:7px; cursor:pointer; font:inherit; font-weight:600; width:auto; min-height:0;
+        color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
+      .msx-lockbtns button:hover { border-color:var(--ms-lime, #b4df87); }
+      .msx-lockbtns a { color:var(--msx-crew); font-size:12px; }
       .msx-rail > .msx-ticker.msx-verifyrow { display:block; }
       #msx-account .msx-acc-sub ul { margin:2px 0 6px; padding-left:18px; }
       #msx-account .msx-acc-sub li { margin:1px 0; }
@@ -1215,7 +1230,8 @@
   // 0.50.0 (user request 2026-11-14), each kind of sharing on its own switch: fightOff (gear seen in fights, your own
   // level and gear), crewOff (our crew's data), shareBank (your bank deposits, for a 💳 bank loan; opt-in), keyData
   // (the server may also read public pages with your Public key; opt-in).
-  const DEFAULT_SETTINGS = { events: true, shareOff: false, shareStats: false, statsNudgeOff: false, fightOff: false, crewOff: false, shareBank: false, keyData: false };
+  // lockOff / lockHours (0.55.0, user request 2026-11-26): 🔒 crime lock before the daily reset, on by default, 3 hours.
+  const DEFAULT_SETTINGS = { events: true, shareOff: false, shareStats: false, statsNudgeOff: false, fightOff: false, crewOff: false, shareBank: false, keyData: false, lockOff: false, lockHours: 3 };
   let settings = { ...DEFAULT_SETTINGS };
   try {
     const saved = JSON.parse(GM_getValue(SETTINGS_KEY, 'null'));
@@ -3060,7 +3076,7 @@
   function updateChainPill() {
     const el = document.querySelector('.msx-chain');
     if (!el) return;
-    const show = !!el.querySelector('.msx-crewjob-inline, .msx-contracts');
+    const show = !!el.querySelector('.msx-crewjob-inline, .msx-contracts, .msx-lockline');
     const want = show ? '' : 'none';
     if (el.style.display !== want) el.style.display = want;
   }
@@ -4423,7 +4439,7 @@
   setInterval(() => {
     // Redraw the Trading panel the moment an hourly store price runs out, so it shows "old price" straight away.
     if (tradingRefreshAt && Date.now() >= tradingRefreshAt) { tradingRefreshAt = 0; schedule(); }
-    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateChainPill(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); readPierBoardPage(); arrangeRail(); ensureSuppliesNote(); }, 1000);
+    updateCatClock(); ensureXpLine(); updateTicker(); updateCrewJobPill(); updateCrewBuffPill(); updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateLockLine(); updateChainPill(); drawLockCovers(); updateHeistPill(); updateCompanionPill(); updatePvpPill(); updateConsumablesPill(); updateBankPill(); updateCafePill(); updatePierPill(); readPierBoardPage(); arrangeRail(); ensureSuppliesNote(); }, 1000);
 
   // ─── Reading page text ─────────────────────────────────────────────────────
   // Page text without our own additions and without the chat column.
@@ -5930,6 +5946,92 @@
     });
   }
 
+  // ─── 🔒 Crime lock before the daily reset (0.55.0, user request 2026-11-26) ───
+  // "a lock on all crimes for 3 hours by default before reset ... You can still join crew jobs. just a lock on crimes
+  // and maybe heists" (heists too, daily 00:00 UTC reset, a cover with an unlock button: user's picks). Our crew only.
+  // Like the heat lock it only blocks your own click: a cover over a crime's dock and over the Heists page, with
+  // "Unlock until reset" on it. The crew box in the sidebar says when it starts; Account → Extra Info sets how many
+  // hours before the reset it starts, or turns it off. Crew jobs (Crew page) are never covered.
+  const LOCK_UNLOCK_KEY = 'ms_crime_lock_unlock_v1'; // the reset (ms) an "Unlock until reset" is for
+  const LOCK_MAX_HOURS = 12;
+  const lockHours = () => { const h = Math.round(Number(settings.lockHours)); return h >= 1 && h <= LOCK_MAX_HOURS ? h : 3; };
+  // null when off or not in our crew; else { start, reset, locked, unlocked } (unlocked = by you, until this reset).
+  function crimeLock(now = Date.now()) {
+    if (settings.lockOff || !inOwnCrew()) return null;
+    const reset = (Math.floor(now / 86400000) + 1) * 86400000;
+    const start = reset - lockHours() * 3600000;
+    const mine = Number(GM_getValue(LOCK_UNLOCK_KEY, 0)) === reset;
+    return { start, reset, locked: now >= start && !mine, unlocked: now >= start && mine };
+  }
+  document.addEventListener('click', (e) => {
+    const b = e.target.closest && e.target.closest('.msx-lock-unlock, .msx-lock-relock');
+    if (!b) return;
+    const l = crimeLock();
+    if (!l) return;
+    const unlock = b.classList.contains('msx-lock-unlock');
+    GM_setValue(LOCK_UNLOCK_KEY, unlock ? l.reset : 0);
+    drawLockCovers(); updateLockLine(); updateChainPill(); updateAccountPanel();
+    // Unlock (user 2026-11-26): unlocked until this reset, then straight to the setting (change the time or turn it off).
+    if (unlock && currentPath() !== '/account') location.assign('/account#msx-lock');
+  });
+  // While locked, a click (or Enter / Space) on anything under a cover does nothing; the cover's own buttons work.
+  const lockBlock = (e) => {
+    const t = e.target;
+    if (!t || !t.closest || !t.closest('.msx-lockhost') || t.closest('.msx-lockcover')) return;
+    if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
+    const l = crimeLock();
+    if (!l || !l.locked) return;
+    e.preventDefault(); e.stopPropagation();
+  };
+  document.addEventListener('click', lockBlock, true);
+  document.addEventListener('keydown', lockBlock, true);
+  // The cover: over a crime's dock (its nerve buttons) or the whole Heists page. Redrawn each second.
+  function drawLockCovers() {
+    const l = crimeLock();
+    const crime = !!crimePageId();
+    const host = !l || !l.locked ? null : crime ? document.querySelector('.cs-dock') : currentPath() === '/heists' ? (document.querySelector('.main-content') || document.querySelector('main')) : null;
+    document.querySelectorAll('.msx-lockhost').forEach((h) => {
+      if (h === host) return;
+      h.classList.remove('msx-lockhost');
+      h.querySelectorAll(':scope > .msx-lockcover').forEach((c) => c.remove());
+    });
+    if (!host) return;
+    if (!host.classList.contains('msx-lockhost')) host.classList.add('msx-lockhost');
+    let cover = host.querySelector(':scope > .msx-lockcover');
+    if (!cover) {
+      cover = document.createElement('div');
+      cover.className = 'msx-lockcover';
+      cover.innerHTML = `<div class="msx-lockcard"><b>🔒 ${crime ? 'Crimes' : 'Heists'} locked until the daily reset</b>` +
+        `<span>Reset in <b class="msx-lockleft"></b> (00:00 UTC, ${escHtml(fmtTime(l.reset))} your time). Crew jobs stay open.</span>` +
+        '<span class="msx-lockbtns"><button type="button" class="msx-lock-unlock" title="Unlocks until the reset, then opens the setting (Account → Extra Info) to change the time or turn it off.">Unlock</button></span></div>';
+    }
+    if (host.lastElementChild !== cover) host.appendChild(cover);
+    const left = fmtClock(l.reset - Date.now());
+    const el = cover.querySelector('.msx-lockleft');
+    if (el && el.textContent !== left) el.textContent = left;
+  }
+  // The line in the sidebar crew box (top): when the lock starts, or how long it has left; nothing once you unlocked it
+  // (user 2026-11-26). A plain link to the setting.
+  function updateLockLine() {
+    const box = document.querySelector('.msx-chain');
+    let el = document.querySelector('.msx-lockline');
+    const l = box && crimeLock();
+    if (!l || l.unlocked) { if (el) el.remove(); return; }
+    if (!el) {
+      el = document.createElement('a');
+      el.className = 'msx-lockline';
+      el.href = '/account#msx-lock';
+    }
+    const now = Date.now();
+    const text = l.locked ? `🔒 Crimes & heists locked · reset in ${fmtClock(l.reset - now)}`
+      : `🔒 Crimes & heists lock at ${fmtTime(l.start)} (in ${fmtClock(l.start - now)})`;
+    if (el.textContent !== text) el.textContent = text;
+    const cls = 'msx-lockline' + (l.locked ? ' on' : '');
+    if (el.className !== cls) el.className = cls;
+    setTitle(el, `Crimes and heists lock for the last ${lockHours()} h before the daily reset (00:00 UTC). Crew jobs stay open. Click to change the time or turn it off (Account → Extra Info).`);
+    if (box.firstElementChild !== el) box.prepend(el);
+  }
+
   // ─── Account page panel ───────────────────────────────────────────────────
   // Settings for the script, added at the bottom of the Account page. The script never reads that page.
   // Sharing (0.50.0, user request 2026-11-14): verify first, then one switch per kind of data, each saying what it
@@ -5954,6 +6056,12 @@
       '<div class="msx-acc-card"><h3>🎯 Crew jobs: best seat</h3>' +
       sub('On Crew → Jobs, a green <b class="msx-acc-ok">✔ Best for you</b> marks the open seat where your stats add the most to the odds, and every open seat shows what you would add (+N, under its Join button). Your stats never leave this browser for it.') +
       sub('Each seat uses one stat: <b>DEX</b> Lookout, Lockpicker, Forger, Inside cat, Safecracker · <b>SPD</b> Getaway driver, Spotter, Second driver · <b>STR</b> Muscle, Bruiser. A tie goes to the DEX seat: most cats are short on DEX.') + '</div>' +
+      // 🔒 Crime lock (0.55.0, user request 2026-11-26): our crew only (hidden for everyone else).
+      '<div class="msx-acc-card" id="msx-lock" hidden><h3>🔒 Crime lock</h3>' +
+      check('msx-acc-lock', 'Lock crimes and heists before the daily reset') +
+      sub('Starts <select id="msx-acc-lockhours">' + Array.from({ length: LOCK_MAX_HOURS }, (_, i) => `<option value="${i + 1}">${i + 1} hour${i ? 's' : ''}</option>`).join('') + '</select> before 00:00 UTC: <b id="msx-acc-lockfrom"></b>.') +
+      sub('Crew jobs stay open. While it is on, the Crimes and Heists pages are covered. <b>Unlock</b> on the cover unlocks them until the reset and brings you here.') +
+      '<div class="msx-acc-sub" id="msx-acc-lockstate" hidden>🔓 Unlocked by you until the reset; it locks again tomorrow. <button type="button" class="msx-lock-relock">Lock again now</button></div>' + '</div>' +
       '<div id="msx-acc-sharebox" hidden>' +
       '<div class="msx-acc-card"><h3 id="msx-verify">🔑 Verify</h3>' +
       '<p class="msx-acc-status" id="msx-acc-verified"></p>' +
@@ -5989,6 +6097,8 @@
     box.querySelector('#msx-acc-forget').addEventListener('click', forgetMe);
     box.querySelector('#msx-acc-keydata').addEventListener('change', (e) => setKeyData(e.target.checked));
     box.querySelector('#msx-acc-events').addEventListener('change', (e) => { settings.events = e.target.checked; saveSettings(); });
+    box.querySelector('#msx-acc-lock').addEventListener('change', (e) => { settings.lockOff = !e.target.checked; saveSettings(); updateAccountPanel(); schedule(); });
+    box.querySelector('#msx-acc-lockhours').addEventListener('change', (e) => { settings.lockHours = Number(e.target.value) || 3; saveSettings(); updateAccountPanel(); schedule(); });
     box.querySelector('#msx-acc-share').addEventListener('change', (e) => setSharing(e.target.checked));
     box.querySelector('#msx-acc-fight').addEventListener('change', (e) => { settings.fightOff = !e.target.checked; saveSettings(); noteSelfGear(); syncGear(); });
     box.querySelector('#msx-acc-stats').addEventListener('change', (e) => { settings.shareStats = e.target.checked; saveSettings(); noteSelfGear(); syncGear(); updateStatsNudge(); });
@@ -6049,7 +6159,7 @@
   }
   // The sidebar's 🔑 verify and ⚔️ stats links while already on the Account page: open the tab and scroll there.
   window.addEventListener('hashchange', () => {
-    if (currentPath() !== '/account' || !/^#msx-(verify|stats)$/.test(location.hash)) return;
+    if (currentPath() !== '/account' || !/^#msx-(verify|stats|lock)$/.test(location.hash)) return;
     openAccountTab(true);
     const t = document.querySelector(location.hash);
     if (t && t.scrollIntoView) t.scrollIntoView({ block: 'center' });
@@ -6067,6 +6177,20 @@
     };
     const ev = box.querySelector('#msx-acc-events');
     if (ev.checked !== settings.events) ev.checked = settings.events;
+    // 🔒 Crime lock card: our crew only.
+    const lockCard = box.querySelector('#msx-lock');
+    toggle(lockCard, inOwnCrew());
+    setBox('msx-acc-lock', !settings.lockOff, false);
+    const hrs = box.querySelector('#msx-acc-lockhours');
+    if (hrs.value !== String(lockHours())) hrs.value = String(lockHours());
+    if (hrs.disabled !== !!settings.lockOff) hrs.disabled = !!settings.lockOff;
+    const reset = (Math.floor(Date.now() / 86400000) + 1) * 86400000, from = reset - lockHours() * 3600000;
+    const fromText = `${String(24 - lockHours()).padStart(2, '0')}:00–00:00 UTC (${fmtTime(from)}–${fmtTime(reset)} your time)`;
+    const fromEl = box.querySelector('#msx-acc-lockfrom');
+    if (fromEl.textContent !== fromText) fromEl.textContent = fromText;
+    const lockNow = crimeLock();
+    toggle(box.querySelector('#msx-acc-lockstate'), !!(lockNow && lockNow.unlocked));
+    if (location.hash === '#msx-lock' && !lockCard.hidden && !lockCard.dataset.seen) { lockCard.dataset.seen = '1'; if (lockCard.scrollIntoView) lockCard.scrollIntoView({ block: 'center' }); }
     const shBox = box.querySelector('#msx-acc-sharebox');
     if (shBox.hidden === known) {
       shBox.hidden = !known;
@@ -6150,8 +6274,9 @@
       ensureChainPill();
       updateCrewJobPill();
       updateCrewBuffPill();
-      updateContractsPill(); updateStatsNudge(); updateVerifyPrompt();
+      updateContractsPill(); updateStatsNudge(); updateVerifyPrompt(); updateLockLine();
       updateChainPill();
+      drawLockCovers(); // 🔒 crime lock (0.55.0)
       updateHeistPill();
       updateCompanionPill();
       updatePvpPill();
@@ -6201,7 +6326,7 @@
     // Ignore our own once-a-second ticker updates so they don't trigger a full redraw.
     if (!observer) {
       observer = new MutationObserver((muts) => {
-        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, #msx-toast, #msx-sharepop, .msx-rungtip, #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
+        const own = (m) => (m.target.nodeType === 1 ? m.target : m.target.parentElement)?.closest('.msx-ticker, .msx-legend, .msx-lockcover, .msx-lockline, #msx-toast, #msx-sharepop, .msx-rungtip, #msx-invest, #msx-heists, #msx-crewjobs, #msx-trading, #msx-crimetable, #msx-gymlock, #msx-ct-banner, .msx-muggable, .msx-lowtag, .msx-halfxp, .msx-geartag, #msx-catgear, #msx-pierlog, .msx-kpay, .msx-xpline, .msx-ct-line, .msx-pernerve, .msx-chance, .msx-croplock, .msx-players, .msx-stock, .msx-ws, .msx-clock, .msx-clock-row, .msx-feat-how, .msx-rail');
         if (muts.every(own)) return;
         schedule();
       });
