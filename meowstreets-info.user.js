@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.55.0
+// @version      0.55.1
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -3271,7 +3271,7 @@
     return list.length ? list : null;
   }
 
-  // 💰 Each member's share of a crime contract's cash reward, right in the contract on Crew → Contracts (0.44.2, user
+  // 💰 Each member's share of a crew contract's cash reward (every contract since 0.55.1, user 2026-11-26; crime ones only before), right in the contract on Crew → Contracts (0.44.2, user
   // request). The leaders set the crew's cut on the crew bot (it comes back in the bot's replies while sharing is
   // on); the rest is split by everyone's count toward it: floor((reward − cut) × count ÷ all counts), the same sum
   // the bot's 💰 Contract pay uses. ✅ = a leader marked it paid. Counts as of the last time this tab loaded.
@@ -3285,10 +3285,10 @@
       const c = saved && saved.ends > Date.now() && Array.isArray(saved.list) ? saved.list.find((x) => x.name === name) : null;
       const cash = c && c.pay ? Number(c.pay.cash) : NaN;
       let box = li.querySelector(':scope > .msx-kpay');
-      if (!c || c.counts !== 'crime' || !Number.isFinite(cash) || !cfg || !Array.isArray(c.shares) || !c.shares.length) { if (box) box.remove(); return; }
+      if (!c || !Number.isFinite(cash) || !cfg || !Array.isArray(c.shares) || !c.shares.length) { if (box) box.remove(); return; }
       const pool = Math.floor((cash * (100 - cfg.cut)) / 100);
       const paid = new Set(cfg.ends === saved.ends && Array.isArray(cfg.paid[c.id]) ? cfg.paid[c.id] : []);
-      // 🚫 Skipped (and not already paid): their crimes count for nobody, as on the bot.
+      // 🚫 Skipped (and not already paid): what they add counts for nobody, as on the bot.
       const skip = new Set(Array.isArray(cfg.skip) ? cfg.skip : []);
       const out = (s) => skip.has(s.id) && !paid.has(s.id);
       const total = c.shares.reduce((a, s) => a + (out(s) ? 0 : s.got), 0);
