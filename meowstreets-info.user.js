@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.55.3
+// @version      0.55.4
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -981,6 +981,7 @@
       .msx-lockcard { position:sticky; top:90px; max-width:440px; display:flex; flex-direction:column; gap:8px; padding:14px 16px; text-align:center;
         border:1px solid var(--ms-red, #eb6561); border-radius:10px; background:var(--ms-ink, #171a15); color:var(--ms-bone, #e7ede1); font-size:13px; }
       .msx-lockcard > b:first-child { color:var(--ms-red, #eb6561); font-size:14px; }
+      .msx-lockcard > .msx-lockjobs { color:var(--ms-green, #5fd38d); }
       .msx-spendnote { margin:0 0 8px; padding:6px 10px; border-radius:8px; border:1px solid var(--msx-crew); font-size:12px; font-weight:600; color:var(--msx-crew); }
       .msx-lockbtns { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; align-items:center; }
       .msx-lockbtns button { padding:5px 12px; border-radius:7px; cursor:pointer; font:inherit; font-weight:600; width:auto; min-height:0;
@@ -6061,7 +6062,7 @@
       cover.className = 'msx-lockcover';
       cover.innerHTML = `<div class="msx-lockcard"><b>🔒 ${crime ? 'Crimes' : 'Heists'} locked: save your nerve for the reset</b>` +
         '<span class="msx-lockplan"></span><span class="msx-locktea"></span>' +
-        `<span>Reset in <b class="msx-lockleft"></b> (00:00 UTC, ${escHtml(fmtTime(l.reset))} your time). Crew jobs stay open.</span>` +
+        `<span>Reset in <b class="msx-lockleft"></b> (00:00 UTC, ${escHtml(fmtTime(l.reset))} your time).</span><b class="msx-lockjobs">🧰 Crew jobs are never locked: keep joining them before the chain!</b>` +
         '<span class="msx-lockbtns"><button type="button" class="msx-lock-unlock" title="Unlocks until the reset, then opens the setting (Account → Extra Info) to change the time or turn it off.">Unlock</button></span></div>';
     }
     if (host.lastElementChild !== cover) host.appendChild(cover);
@@ -6089,7 +6090,7 @@
     if (el.textContent !== text) el.textContent = text;
     const cls = 'msx-lockline' + (p.spend === 0 ? ' on' : '');
     if (el.className !== cls) el.className = cls;
-    setTitle(el, `Crimes and heists that cost more than this lock, so you have ${p.keep}/${p.max} nerve at the daily reset (00:00 UTC) and never go over. Crew jobs stay open. ${teaLine(p)} Click to turn it off (Account → Extra Info).`);
+    setTitle(el, `Crimes and heists that cost more than this lock, so you have ${p.keep}/${p.max} nerve at the daily reset (00:00 UTC) and never go over. Crew jobs are never locked: keep joining them before the chain! ${teaLine(p)} Click to turn it off (Account → Extra Info).`);
     if (box.firstElementChild !== el) box.prepend(el);
   }
 
@@ -6120,7 +6121,9 @@
       // 🔒 Crime lock (0.55.0, user request 2026-11-26): our crew only (hidden for everyone else).
       '<div class="msx-acc-card" id="msx-lock" hidden><h3>🔒 Crime lock</h3>' +
       check('msx-acc-lock', 'Save my nerve for the daily reset') +
-      sub('Keeps you at 1 under your max nerve at 00:00 UTC, so you never go over. You can spend your nerve + what regen adds before the reset − (max − 1); a crime or heist costing more is covered. Early in the day that\'s everything; it tightens by itself as the reset gets near. The cover says how much you can spend and whether a Catnip tea is ready. Crew jobs stay open. <b>Unlock</b> on the cover unlocks everything until the reset and brings you here.') +
+      sub('Keeps you at 1 under your max nerve at 00:00 UTC, so you never go over. You can spend your nerve + what regen adds before the reset − (max − 1); a crime or heist costing more is covered. Early in the day that\'s everything; it tightens by itself as the reset gets near. The cover says how much you can spend and whether a Catnip tea is ready. <b>Unlock</b> on the cover unlocks everything until the reset and brings you here.') +
+      // User 2026-11-27: "emphasize you can join crew jobs prior to chain, it's important to keep them going".
+      sub('🧰 <b>Crew jobs are never locked. Keep joining them right up to the reset and the chain: keeping crew jobs going is important.</b>') +
       '<div class="msx-acc-sub" id="msx-acc-lockstate" hidden>🔓 Unlocked by you until the reset; it locks again tomorrow. <button type="button" class="msx-lock-relock">Lock again now</button></div>' + '</div>' +
       '<div id="msx-acc-sharebox" hidden>' +
       '<div class="msx-acc-card"><h3 id="msx-verify">🔑 Verify</h3>' +
