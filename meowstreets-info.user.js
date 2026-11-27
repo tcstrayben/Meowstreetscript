@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         MeowStreets Extra Info
 // @namespace    https://meowstreets.com
-// @version      0.55.1
+// @version      0.55.2
 // @description  Crimes pages: the best place in each job with pay and XP per nerve, and on each job's page the game's success % with where every point comes from, heat, mastery and its unlocks. Claw Street Ex: logs stock prices and shows if a price looks low or high. Sidebar timers for stocks and your crew chain, a "Script data" checklist and a Mews event log, all kept on your computer. It also reads (never requests) the JSON the game's own pages fetch from their own API, for exact crime, merit and crew numbers. Optional sharing with the MeowStreets Info server starts only after you verify who you are with a Public game API key (Account page; the key is thrown away after the check unless you choose to lend it): then each kind of data has its own switch, with what it sends and who sees it (pooled stock history, Pier Nine fish, tides and dawn/dusk for the Discord pier card, mastery unlocks and job rank ladders). Nothing is sent to MeowStreets.
 // @author       Strayben
 // @homepageURL  https://github.com/tcstrayben/Meowstreetscript
@@ -981,6 +981,7 @@
       .msx-lockcard { position:sticky; top:90px; max-width:440px; display:flex; flex-direction:column; gap:8px; padding:14px 16px; text-align:center;
         border:1px solid var(--ms-red, #eb6561); border-radius:10px; background:var(--ms-ink, #171a15); color:var(--ms-bone, #e7ede1); font-size:13px; }
       .msx-lockcard > b:first-child { color:var(--ms-red, #eb6561); font-size:14px; }
+      .msx-spendnote { margin:0 0 8px; padding:6px 10px; border-radius:8px; border:1px solid var(--msx-crew); font-size:12px; font-weight:600; color:var(--msx-crew); }
       .msx-lockbtns { display:flex; flex-wrap:wrap; gap:10px; justify-content:center; align-items:center; }
       .msx-lockbtns button { padding:5px 12px; border-radius:7px; cursor:pointer; font:inherit; font-weight:600; width:auto; min-height:0;
         color:var(--ms-bone, #e7ede1); background:rgba(0,0,0,.3); border:1px solid var(--ms-line-strong, rgba(231,237,225,.3)); }
@@ -5955,14 +5956,56 @@
   const LOCK_UNLOCK_KEY = 'ms_crime_lock_unlock_v1'; // the reset (ms) an "Unlock until reset" is for
   const LOCK_MAX_HOURS = 12;
   const lockHours = () => { const h = Math.round(Number(settings.lockHours)); return h >= 1 && h <= LOCK_MAX_HOURS ? h : 3; };
-  // null when off or not in our crew; else { start, reset, locked, unlocked } (unlocked = by you, until this reset).
-  function crimeLock(now = Date.now()) {
+  // 0.55.2 (user request 2026-11-27, from MofuMofu: "lock if nerve won't reach max before reset, ie don't want to be
+  // locked sitting on full nerve 1hr before reset"): inside the window, only what you can't spend is locked. Nerve you
+  // can spend = nerve now + what regen adds before 00:00 UTC − your max (regen stops at the max, so anything above it
+  // would be lost). A crime or heist that costs more than that stays covered; cheaper ones are open, and the cover
+  // says how much you can spend. Catnip tea (+10, can go over the max; 1-hour cooldown, 12 a day, reset 00:00 UTC:
+  // Reference) is only shown: whether you can drink one now or before the reset (user: "just if you can use it or
+  // not"); drinking one raises your nerve, and the lock opens by itself.
+  // null without the game's nerve numbers.
+  function nervePlan(now = Date.now()) {
+    if (!apiState || !Number.isFinite(apiState.nerve) || !apiState.caps || !(apiState.caps.nerve > 0)) return null;
+    const reset = (Math.floor(now / 86400000) + 1) * 86400000;
+    const rate = apiState.nerveRegen > 0 ? apiState.nerveRegen : 0.2; // per minute (+1 every 5 minutes)
+    const max = apiState.caps.nerve;
+    // Regen since the game last said (only while under the max).
+    const since = Number.isFinite(apiState.at) ? Math.max(0, now - apiState.at) : 0;
+    const nerve = apiState.nerve >= max ? apiState.nerve : Math.min(max, apiState.nerve + Math.floor((since / 60000) * rate));
+    const regen = Math.floor(((reset - now) / 60000) * rate);
+    const spend = Math.max(0, nerve + regen - max);
+    // Catnip tea: any left today, and when the cooldown lets you (the game's, or 60 minutes from your last use).
+    const cap = apiState.dailyCap || 12;
+    const used = (apiState.usedUp || []).includes('catnip') ? cap : Math.min(cap, loadUses().catnip.length);
+    const lastUse = (GM_getValue(LAST_USE_KEY, {}) || {}).catnip;
+    const ready = Math.max((apiState.cooldowns || {}).catnip || 0, Number.isFinite(lastUse) ? lastUse + USE_COOLDOWN_MS : 0);
+    const teaAt = used < cap ? Math.max(now, ready) : null;
+    return { nerve, max, regen, spend, reset, tea: teaAt == null ? 'none' : teaAt <= now ? 'now' : teaAt < reset ? 'later' : 'after', teaAt };
+  }
+  // The cheapest nerve cost on this page: a crime's nerve buttons, or the heists on offer. 1 when unknown.
+  function lockCost() {
+    if (crimePageId()) {
+      const costs = [...document.querySelectorAll('.cs-dock button.cs-go')].map((b) => ((b.getAttribute('aria-label') || '').match(/\b(\d+) nerve\b/) || [])[1]).map(Number).filter((n) => n > 0);
+      return costs.length ? Math.min(...costs) : 1;
+    }
+    const h = (apiState && apiState.heists || []).map((x) => Number(x.nerve)).filter((n) => n > 0);
+    return h.length ? Math.min(...h) : 1;
+  }
+  // null when off or not in our crew; else { start, reset, window, locked, unlocked, plan } (unlocked = by you, until
+  // this reset). cost = the nerve this page needs (locked only when you can't spend that much).
+  function crimeLock(now = Date.now(), cost = 1) {
     if (settings.lockOff || !inOwnCrew()) return null;
     const reset = (Math.floor(now / 86400000) + 1) * 86400000;
     const start = reset - lockHours() * 3600000;
     const mine = Number(GM_getValue(LOCK_UNLOCK_KEY, 0)) === reset;
-    return { start, reset, locked: now >= start && !mine, unlocked: now >= start && mine };
+    const inWin = now >= start;
+    const plan = inWin ? nervePlan(now) : null;
+    const short = !plan || plan.spend < cost;
+    return { start, reset, window: inWin, plan, locked: inWin && !mine && short, unlocked: inWin && mine };
   }
+  const teaLine = (p) => (!p ? '' : p.tea === 'now' ? '🍵 You can drink a Catnip tea now: +10 nerve to spend.'
+    : p.tea === 'later' ? `🍵 You can drink a Catnip tea at ${fmtTime(p.teaAt)} (before the reset): +10 nerve to spend then.`
+      : p.tea === 'after' ? '🍵 Your next Catnip tea is after the reset.' : '🍵 No Catnip tea left today.');
   document.addEventListener('click', (e) => {
     const b = e.target.closest && e.target.closest('.msx-lock-unlock, .msx-lock-relock');
     if (!b) return;
@@ -5979,7 +6022,7 @@
     const t = e.target;
     if (!t || !t.closest || !t.closest('.msx-lockhost') || t.closest('.msx-lockcover')) return;
     if (e.type === 'keydown' && e.key !== 'Enter' && e.key !== ' ') return;
-    const l = crimeLock();
+    const l = crimeLock(Date.now(), lockCost());
     if (!l || !l.locked) return;
     e.preventDefault(); e.stopPropagation();
   };
@@ -5987,9 +6030,21 @@
   document.addEventListener('keydown', lockBlock, true);
   // The cover: over a crime's dock (its nerve buttons) or the whole Heists page. Redrawn each second.
   function drawLockCovers() {
-    const l = crimeLock();
+    const cost = lockCost();
+    const l = crimeLock(Date.now(), cost);
     const crime = !!crimePageId();
-    const host = !l || !l.locked ? null : crime ? document.querySelector('.cs-dock') : currentPath() === '/heists' ? (document.querySelector('.main-content') || document.querySelector('main')) : null;
+    const page = crime ? document.querySelector('.cs-dock') : currentPath() === '/heists' ? (document.querySelector('.main-content') || document.querySelector('main')) : null;
+    const host = !l || !l.locked ? null : page;
+    // Open in the window with nerve to spare: a note on the page says how much (0.55.2).
+    let note = document.querySelector('.msx-spendnote');
+    const showNote = page && l && l.window && !l.locked && !l.unlocked && l.plan;
+    if (!showNote) { if (note) note.remove(); }
+    else {
+      if (!note) { note = document.createElement('div'); note.className = 'msx-spendnote'; }
+      const text = `🔓 You can spend ${l.plan.spend} nerve before the reset and still be full (${l.plan.max}) at 00:00 UTC.`;
+      if (note.textContent !== text) note.textContent = text;
+      if (crime ? !page.contains(note) : page.firstElementChild !== note) page.prepend(note);
+    }
     document.querySelectorAll('.msx-lockhost').forEach((h) => {
       if (h === host) return;
       h.classList.remove('msx-lockhost');
@@ -6001,14 +6056,18 @@
     if (!cover) {
       cover = document.createElement('div');
       cover.className = 'msx-lockcover';
-      cover.innerHTML = `<div class="msx-lockcard"><b>🔒 ${crime ? 'Crimes' : 'Heists'} locked until the daily reset</b>` +
+      cover.innerHTML = `<div class="msx-lockcard"><b>🔒 ${crime ? 'Crimes' : 'Heists'} locked: save your nerve for the reset</b>` +
+        '<span class="msx-lockplan"></span><span class="msx-locktea"></span>' +
         `<span>Reset in <b class="msx-lockleft"></b> (00:00 UTC, ${escHtml(fmtTime(l.reset))} your time). Crew jobs stay open.</span>` +
         '<span class="msx-lockbtns"><button type="button" class="msx-lock-unlock" title="Unlocks until the reset, then opens the setting (Account → Extra Info) to change the time or turn it off.">Unlock</button></span></div>';
     }
     if (host.lastElementChild !== cover) host.appendChild(cover);
-    const left = fmtClock(l.reset - Date.now());
-    const el = cover.querySelector('.msx-lockleft');
-    if (el && el.textContent !== left) el.textContent = left;
+    const set = (sel, text) => { const el = cover.querySelector(sel); if (el && el.textContent !== text) el.textContent = text; };
+    set('.msx-lockleft', fmtClock(l.reset - Date.now()));
+    const p = l.plan;
+    set('.msx-lockplan', !p ? 'Your nerve isn\'t known yet: open any game page.'
+      : `Nerve ${p.nerve}/${p.max}, +${p.regen} by the reset. You can spend ${p.spend} now and still be full at reset; ${crime ? 'this crime' : 'the cheapest heist'} needs ${cost}.`);
+    set('.msx-locktea', teaLine(p));
   }
   // The line in the sidebar crew box (top): when the lock starts, or how long it has left; nothing once you unlocked it
   // (user 2026-11-26). A plain link to the setting.
@@ -6023,12 +6082,14 @@
       el.href = '/account#msx-lock';
     }
     const now = Date.now();
-    const text = l.locked ? `🔒 Crimes & heists locked · reset in ${fmtClock(l.reset - now)}`
-      : `🔒 Crimes & heists lock at ${fmtTime(l.start)} (in ${fmtClock(l.start - now)})`;
+    const p = l.plan;
+    const text = !l.window ? `🔒 Crimes & heists lock at ${fmtTime(l.start)} (in ${fmtClock(l.start - now)})`
+      : p ? `🔒 Save nerve · spend up to ${p.spend} · reset in ${fmtClock(l.reset - now)}`
+        : `🔒 Crimes & heists locked · reset in ${fmtClock(l.reset - now)}`;
     if (el.textContent !== text) el.textContent = text;
-    const cls = 'msx-lockline' + (l.locked ? ' on' : '');
+    const cls = 'msx-lockline' + (l.window && (!p || p.spend === 0) ? ' on' : '');
     if (el.className !== cls) el.className = cls;
-    setTitle(el, `Crimes and heists lock for the last ${lockHours()} h before the daily reset (00:00 UTC). Crew jobs stay open. Click to change the time or turn it off (Account → Extra Info).`);
+    setTitle(el, `For the last ${lockHours()} h before the daily reset (00:00 UTC), crimes and heists lock unless you have nerve to spare: you can spend what regen would top up again before the reset, and still be full at 00:00. Crew jobs stay open.${p ? ' ' + teaLine(p) : ''} Click to change the time or turn it off (Account → Extra Info).`);
     if (box.firstElementChild !== el) box.prepend(el);
   }
 
@@ -6060,7 +6121,7 @@
       '<div class="msx-acc-card" id="msx-lock" hidden><h3>🔒 Crime lock</h3>' +
       check('msx-acc-lock', 'Lock crimes and heists before the daily reset') +
       sub('Starts <select id="msx-acc-lockhours">' + Array.from({ length: LOCK_MAX_HOURS }, (_, i) => `<option value="${i + 1}">${i + 1} hour${i ? 's' : ''}</option>`).join('') + '</select> before 00:00 UTC: <b id="msx-acc-lockfrom"></b>.') +
-      sub('Crew jobs stay open. While it is on, the Crimes and Heists pages are covered. <b>Unlock</b> on the cover unlocks them until the reset and brings you here.') +
+      sub('Only nerve you\'d need at the reset is locked: you can spend what regen would top up again before 00:00 UTC, so you\'re never locked sitting on full nerve. A crime or heist costing more is covered; the cover says how much you can spend and whether a Catnip tea is ready. Crew jobs stay open. <b>Unlock</b> on the cover unlocks everything until the reset and brings you here.') +
       '<div class="msx-acc-sub" id="msx-acc-lockstate" hidden>🔓 Unlocked by you until the reset; it locks again tomorrow. <button type="button" class="msx-lock-relock">Lock again now</button></div>' + '</div>' +
       '<div id="msx-acc-sharebox" hidden>' +
       '<div class="msx-acc-card"><h3 id="msx-verify">🔑 Verify</h3>' +
